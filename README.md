@@ -9,7 +9,7 @@ an always-on-top HUD and an authenticated local browser interface around one
 Python coordinator. Models run through your existing Ollama installation or a
 configured local inference engine. No cloud AI account is required.
 
-[Download Windows packages](https://github.com/Bh0ps/sidekick-local-ai/releases)
+[Download Windows packages](https://github.com/Bh0ps/forge-local-ai/releases)
 · [Quick start](QUICKSTART.md) · [Integrations and Docker](docs/INTEGRATIONS.md)
 · [Architecture](docs/ARCHITECTURE.md) · [Validation](docs/VALIDATION.md)
 
