@@ -1,8 +1,6 @@
 """Bounded Ollama requests shared by the desktop and Docker clients."""
-import asyncio
 import json
 import os
-import queue
 import re
 import threading
 from pathlib import Path
@@ -10,13 +8,16 @@ from pathlib import Path
 import httpx
 from context_window import (validate_context, response_budget, history_character_limit,
                             history_message_limit, estimated_prompt_tokens, prompt_budget)
+from inference_stream import (InferenceTimeouts, cancellable_inference, bounded_lines,
+                              FIRST_RESPONSE_TIMEOUT_SECONDS, GENERATION_IDLE_TIMEOUT_SECONDS,
+                              TOTAL_REQUEST_TIMEOUT_SECONDS)
 
 BASE_DIR = Path(__file__).resolve().parent
 MAX_HISTORY_MESSAGES = 24
 MAX_HISTORY_CHARACTERS = 24000
 MAX_IMAGE_CHARACTERS = 8000000
 MAX_STREAM_CHARACTERS = 262144
-STREAM_DEADLINE_SECONDS = 600
+STREAM_DEADLINE_SECONDS = TOTAL_REQUEST_TIMEOUT_SECONDS
 MAX_AGENT_CHARACTERS = 60000
 MAX_COMPACTION_CHARACTERS = 40000
 MAX_SUMMARY_CHARACTERS = 6000
@@ -102,8 +103,15 @@ class Core:
 
     @staticmethod
     def _timeout(path):
-        read_seconds = {'/tags': 3, '/show': 8, '/delete': 15, '/pull': 900, '/chat': 120}.get(path, 15)
+        read_seconds = {'/tags': 3, '/show': 8, '/delete': 15, '/pull': 900,
+                        '/chat': FIRST_RESPONSE_TIMEOUT_SECONDS}.get(path, 15)
         return httpx.Timeout(read_seconds, connect=2, write=15, pool=2)
+
+    @staticmethod
+    def _inference_timeouts(connect=2):
+        return InferenceTimeouts(first_response=FIRST_RESPONSE_TIMEOUT_SECONDS,
+                                 generation_idle=GENERATION_IDLE_TIMEOUT_SECONDS,
+                                 total=STREAM_DEADLINE_SECONDS, connect=connect)
 
     @staticmethod
     def _response_json(response):
@@ -390,103 +398,45 @@ class Core:
             return
         if not self._stream_lock.acquire(blocking=False):
             raise ValueError('A response is already running. Stop it before sending another message.')
-        packets = queue.Queue(maxsize=32)
-        stopped, finished = threading.Event(), threading.Event()
-        failure = []
-
-        async def publish(packet):
-            while not stopped.is_set() and not cancel_event.is_set():
-                try:
-                    packets.put_nowait(packet)
+        async def consume(response, publish):
+            characters = 0
+            async for line in bounded_lines(response):
+                if cancel_event.is_set():
                     return
-                except queue.Full:
-                    await asyncio.sleep(0.02)
-
-        async def receive():
-            timeout = httpx.Timeout(90, connect=2, write=15, pool=2)
-            async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-                async with client.stream('POST', self.base + '/chat', json=payload) as response:
-                    if response.is_error:
-                        await response.aread()
-                        self._response_json(response)
-                    characters = 0
-                    async for line in response.aiter_lines():
-                        if stopped.is_set() or cancel_event.is_set():
-                            return
-                        if not line.strip():
-                            continue
-                        if len(line) > 65536:
-                            raise ValueError('Ollama returned an oversized response packet.')
-                        try:
-                            packet = json.loads(line)
-                        except ValueError:
-                            raise ValueError('Ollama returned an invalid response stream. Try again.') from None
-                        if not isinstance(packet, dict):
-                            raise ValueError('Ollama returned an invalid response stream. Try again.')
-                        if packet.get('error'):
-                            raise ValueError(str(packet['error'])[:1500])
-                        message = packet.get('message', {})
-                        if (not isinstance(message, dict)
-                                or any(not isinstance(message.get(key, ''), str) for key in ('content', 'thinking'))):
-                            raise ValueError('Ollama returned an invalid message.')
-                        characters += len(message.get('content', '')) + len(message.get('thinking', ''))
-                        if 'tool_calls' in message:
-                            _, call_characters = _tool_calls(message['tool_calls'], partial=True)
-                            characters += call_characters
-                        if characters > MAX_STREAM_CHARACTERS:
-                            raise ValueError('Response is too large. Ask for a shorter answer.')
-                        await publish(packet)
-                        if packet.get('done') is True:
-                            return
-                    if not stopped.is_set() and not cancel_event.is_set():
-                        raise ValueError('Ollama stopped before completing its response. Try again.')
-
-        async def run():
-            request_task = asyncio.create_task(receive())
-
-            async def watch_cancel():
-                while not stopped.is_set() and not cancel_event.is_set():
-                    await asyncio.sleep(0.05)
-                request_task.cancel()
-
-            cancel_task = asyncio.create_task(watch_cancel())
-            try:
-                await asyncio.wait_for(request_task, STREAM_DEADLINE_SECONDS)
-            except asyncio.CancelledError:
-                if not (stopped.is_set() or cancel_event.is_set()):
-                    raise
-            finally:
-                cancel_task.cancel()
-                await asyncio.gather(cancel_task, return_exceptions=True)
-
-        def worker():
-            try:
-                asyncio.run(run())
-            except Exception as exc:
-                failure.append(self._connection_error(exc))
-            finally:
-                finished.set()
-                self._stream_lock.release()
-
-        thread = threading.Thread(target=worker, name='Sidekick-Ollama-stream', daemon=True)
-        try:
-            thread.start()
-        except Exception:
-            self._stream_lock.release()
-            raise
-        try:
-            while not cancel_event.is_set():
+                if not line.strip():
+                    continue
                 try:
-                    yield packets.get(timeout=0.05)
-                except queue.Empty:
-                    if finished.is_set():
-                        if failure:
-                            raise failure[0]
-                        return
+                    packet = json.loads(line)
+                except ValueError:
+                    raise ValueError('Ollama returned an invalid response stream. Try again.') from None
+                if not isinstance(packet, dict):
+                    raise ValueError('Ollama returned an invalid response stream. Try again.')
+                if packet.get('error'):
+                    raise ValueError(str(packet['error'])[:1500])
+                message = packet.get('message', {})
+                if (not isinstance(message, dict)
+                        or any(not isinstance(message.get(key, ''), str) for key in ('content', 'thinking'))):
+                    raise ValueError('Ollama returned an invalid message.')
+                characters += len(message.get('content', '')) + len(message.get('thinking', ''))
+                if 'tool_calls' in message:
+                    _, call_characters = _tool_calls(message['tool_calls'], partial=True)
+                    characters += call_characters
+                if characters > MAX_STREAM_CHARACTERS:
+                    raise ValueError('Response is too large. Ask for a shorter answer.')
+                await publish(packet)
+                if packet.get('done') is True:
+                    return
+            if not cancel_event.is_set():
+                raise ValueError('Ollama stopped before completing its response. Try again.')
+
+        try:
+            yield from cancellable_inference(self.base + '/chat', payload, cancel_event, consume,
+                                             timeouts=self._inference_timeouts(), provider='Ollama',
+                                             response_error=self._response_json)
+        except httpx.HTTPError as exc:
+            raise self._connection_error(exc) from None
         finally:
-            stopped.set()
-            # Async cancellation interrupts reads even while the model is loading.
-            thread.join(timeout=1)
+            self._stream_lock.release()
 
     def _research(self, data):
         from ddgs import DDGS

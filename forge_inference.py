@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import base64
 import heapq
 import json
+import math
 import os
 import subprocess
 import threading
@@ -11,8 +12,9 @@ from typing import Protocol
 from uuid import uuid4
 
 import httpx
-from core import Core, AGENT_SYSTEM_PROMPT
+from core import Core, AGENT_SYSTEM_PROMPT, MAX_STREAM_CHARACTERS, _tool_calls
 from context_window import estimated_prompt_tokens
+from inference_stream import cancellable_inference, bounded_lines
 
 class InferenceProvider(Protocol):
     def models(self): ...
@@ -93,29 +95,82 @@ class CompatibleProvider:
         body=dict(model=data['model'],messages=messages,stream=True,stream_options={'include_usage':True},
                   max_tokens=payload['options']['num_predict'],temperature=data.get('temperature',.3))
         if payload.get('tools'): body['tools']=payload['tools']
-        final={}; started=time.monotonic(); completed=False
-        with httpx.Client(timeout=httpx.Timeout(600,connect=10)) as client:
-            with client.stream('POST',self.base+'/chat/completions',json=body,headers=self._headers()) as response:
-                response.raise_for_status()
-                for line in response.iter_lines():
-                    if cancel.is_set(): return
-                    if not line.startswith('data:'): continue
-                    raw=line[5:].strip()
-                    if raw=='[DONE]': completed=True; break
-                    packet=json.loads(raw); usage=packet.get('usage')
-                    if usage: final['usage']=usage
-                    timings=packet.get('timings') or {}
-                    if timings.get('predicted_ms') is not None: final['eval_duration']=int(timings['predicted_ms']*1e6)
-                    if timings.get('predicted_n') is not None and not usage: final.setdefault('eval_count',timings['predicted_n'])
-                    for choice in packet.get('choices',[]):
-                        delta=choice.get('delta',{})
-                        yield {'message':{'content':delta.get('content') or '',
-                                          'thinking':delta.get('reasoning_content') or delta.get('reasoning') or '',
-                                          'tool_calls':delta.get('tool_calls') or []}}
-                        if choice.get('finish_reason'):
-                            final['done_reason']='length' if choice['finish_reason']=='length' else 'stop'; completed=True
-        if not completed: raise ValueError('Provider stream ended before completion. Partial content is saved; tool calls were not executed.')
-        yield {**final,'done':True,'message':{},'total_duration':int((time.monotonic()-started)*1e9)}
+        cancel = cancel if cancel is not None else threading.Event()
+        started=time.monotonic()
+
+        async def consume(response,publish):
+            final={}; completed=False; characters=0
+            async for line in bounded_lines(response):
+                if cancel.is_set(): return
+                if not line.startswith('data:'): continue
+                raw=line[5:].strip()
+                if raw=='[DONE]': completed=True; break
+                if not raw: continue
+                try: packet=json.loads(raw)
+                except ValueError: raise ValueError('Provider returned an invalid response stream.') from None
+                if not isinstance(packet,dict): raise ValueError('Provider returned an invalid response packet.')
+                if packet.get('error'):
+                    error=packet['error']
+                    raise ValueError(str(error.get('message') if isinstance(error,dict) else error)[:1500])
+                usage=packet.get('usage')
+                if usage is not None and not isinstance(usage,dict): raise ValueError('Provider returned invalid usage counters.')
+                if usage:
+                    for key in ('prompt_tokens','completion_tokens','total_tokens'):
+                        if usage.get(key) is not None and (type(usage[key]) is not int or usage[key]<0):
+                            raise ValueError('Provider returned invalid usage counters.')
+                    final['usage']=usage
+                timings=packet.get('timings')
+                if timings is None: timings={}
+                if not isinstance(timings,dict): raise ValueError('Provider returned invalid generation timings.')
+                predicted_ms=timings.get('predicted_ms'); predicted_n=timings.get('predicted_n')
+                if predicted_ms is not None:
+                    if type(predicted_ms) not in (int,float) or not math.isfinite(predicted_ms) or predicted_ms<0:
+                        raise ValueError('Provider returned invalid generation timings.')
+                    final['eval_duration']=int(predicted_ms*1e6)
+                if predicted_n is not None:
+                    if type(predicted_n) is not int or predicted_n<0: raise ValueError('Provider returned invalid usage counters.')
+                    if not usage: final.setdefault('eval_count',predicted_n)
+                choices=packet.get('choices',[])
+                if not isinstance(choices,list) or len(choices)>32: raise ValueError('Provider returned invalid choices.')
+                for choice in choices:
+                    if not isinstance(choice,dict): raise ValueError('Provider returned an invalid choice.')
+                    delta=choice.get('delta')
+                    if delta is None: delta={}
+                    if not isinstance(delta,dict) or any(delta.get(key) is not None and not isinstance(delta[key],str)
+                        for key in ('content','reasoning_content','reasoning')):
+                        raise ValueError('Provider returned an invalid message.')
+                    calls=delta.get('tool_calls')
+                    if calls is None: calls=[]
+                    # SSE may first emit only an index/ID, followed by function
+                    # fields. Validate the same bounded partial-call contract.
+                    if not isinstance(calls,list) or any(not isinstance(call,dict) for call in calls):
+                        raise ValueError('Provider returned invalid tool calls.')
+                    normalized=[dict(call,function=call.get('function',{})) for call in calls]
+                    calls,call_characters=_tool_calls(normalized,partial=True)
+                    message={'content':delta.get('content') or '',
+                             'thinking':delta.get('reasoning_content') or delta.get('reasoning') or '',
+                             'tool_calls':calls}
+                    characters+=len(message['content'])+len(message['thinking'])+call_characters
+                    if characters>MAX_STREAM_CHARACTERS: raise ValueError('Response is too large. Ask for a shorter answer.')
+                    await publish({'message':message})
+                    if choice.get('finish_reason'):
+                        if not isinstance(choice['finish_reason'],str): raise ValueError('Provider returned an invalid completion reason.')
+                        final['done_reason']='length' if choice['finish_reason']=='length' else 'stop'; completed=True
+            if cancel.is_set(): return
+            if not completed: raise ValueError('Provider stream ended before completion. Partial content is saved; tool calls were not executed.')
+            await publish({**final,'done':True,'message':{},'total_duration':int((time.monotonic()-started)*1e9)})
+
+        try:
+            yield from cancellable_inference(self.base+'/chat/completions',body,cancel,consume,
+                                             headers=self._headers(),timeouts=Core._inference_timeouts(connect=10),
+                                             provider='Local provider')
+        except httpx.ConnectError:
+            raise ValueError('The local provider is offline. Start its engine, then resume the run.') from None
+        except httpx.TimeoutException:
+            raise ValueError('The local provider took too long to connect or receive the request. Check engine status, then resume the run.') from None
+        except httpx.HTTPError as exc:
+            detail=f'HTTP {exc.response.status_code}' if isinstance(exc,httpx.HTTPStatusError) else 'connection interrupted'
+            raise ValueError(f'Local provider {detail}. Partial output is retained; check engine status and resume the run.') from None
 
 class ProviderPool:
     def __init__(self,core,store,vault=None):

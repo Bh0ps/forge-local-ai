@@ -6,9 +6,10 @@
    Select the project and start a chat. Use the right panel for files and activity.
 3. Start with **Always Ask**. Review proposed edits, commands and computer actions;
    **Allow once** binds to that exact action. Configure scopes under Settings.
-4. Use `/plan your task` for inspection and planning, then **Build** to implement.
-   `/todo` saves an ordered checklist without execution. `/goal` creates or attaches
-   a checklist and continues within its configured limits.
+4. Use `/plan your task` for inspection and planning, then **Build** or `/todo`
+   to execute that saved plan as an ordered Markdown checklist. `/todo` followed
+   by tasks creates and starts a new checklist. `/goal` creates or attaches a
+   checklist and continues within its configured limits.
 5. **Pause** preserves progress. **Resume** continues after a restart or limit.
    Inspect and resolve actions labeled **Outcome unknown** before resuming them.
    Externally edited TODO files show an import/overwrite reconciliation choice.

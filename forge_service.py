@@ -70,7 +70,7 @@ class ForgeService:
         return {'ok':True}
 
     def bootstrap(self):
-        return dict(version='4.1.0',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
+        return dict(version='4.1.1',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
                     chats=self.store.list_chats(),runs=self.store.runs(limit=200),goals=self.store.entities('goals'),
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,

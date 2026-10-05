@@ -18,6 +18,12 @@ writing Git children receive distinct worktrees. One priority queue grants a GPU
 inference lease, with foreground work before waiting background requests. Network
 and file operations in unrelated runs can proceed independently.
 
+Ollama and compatible endpoint streams share a cancellable HTTP transport. A
+first-response deadline includes loading and prompt prefill (60 minutes), followed
+by a progress-based idle deadline (three minutes) and a 90-minute overall ceiling.
+Empty keep-alives do not reset model progress. Stop closes pending reads even
+before headers or the first token; metadata probes retain their short timeouts.
+
 Events have a run ID and monotonically increasing sequence. Poll responses expose
 `next_cursor` and `has_more`; terminal status becomes `finished` only after pending
 events are delivered. Token events are batched to reduce database writes and UI

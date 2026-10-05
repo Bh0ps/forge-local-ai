@@ -35,8 +35,8 @@ def compatible_response(monkeypatch, packets):
                   for packet in packets).encode()
     transport = httpx.MockTransport(lambda request: httpx.Response(200, content=raw,
                                                                   headers={"content-type": "text/event-stream"}))
-    original = httpx.Client
-    monkeypatch.setattr("forge_inference.httpx.Client", lambda **kwargs: original(transport=transport, **kwargs))
+    original = httpx.AsyncClient
+    monkeypatch.setattr("forge_inference.httpx.AsyncClient", lambda **kwargs: original(transport=transport, **kwargs))
     provider = CompatibleProvider({"url": "http://127.0.0.1:8080/v1"})
     data = {"model": "fixture", "context": 32768, "tokens": 1024,
             "messages": [{"role": "user", "content": "Complete this task."}]}

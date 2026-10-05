@@ -29,7 +29,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Dependency license collection failed' }
 & $Python scripts/prune_license_cache.py --app dist/Forge
 if ($LASTEXITCODE -ne 0) { throw 'Dependency notice sanitization failed' }
 New-Item -ItemType Directory -Force -Path release | Out-Null
-Compress-Archive -Path 'dist\Forge\*' -DestinationPath 'release\Forge-4.1.0-Portable.zip' -Force
+Compress-Archive -Path 'dist\Forge\*' -DestinationPath 'release\Forge-4.1.1-Portable.zip' -Force
 if (Get-Command $Iscc -ErrorAction SilentlyContinue) {
     & $Iscc installer.iss
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }

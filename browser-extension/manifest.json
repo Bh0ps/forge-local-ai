@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Forge — Connect this tab",
-  "version": "4.1.0",
+  "version": "4.1.1",
   "description": "Connect only the tabs you choose to your local Forge workspace.",
   "permissions": ["activeTab", "scripting", "nativeMessaging", "storage"],
   "action": {"default_title": "Connect or disconnect this tab from Forge"},

@@ -89,6 +89,10 @@ validation before activation. A listed engine feature is not a speed guarantee.
 Forge queues one inference request per GPU, prioritizes foreground work, retains
 warm models where supported, bounds active history and selects tools within the
 context budget. It never silently changes an explicit model or context selection.
+Cold model loading and prompt processing can wait up to one hour for the first
+response. Once output or tool-call progress starts, three minutes without progress
+pauses the request; the overall request ceiling is 90 minutes. Stop interrupts
+either wait promptly, and timed-out runs retain their checkpoint for Resume.
 CPU INT8 faster-whisper dictation inserts an editable transcript; raw audio is
 kept in memory and discarded. Native browsing uses the existing Windows WebView2
 runtime; speech models and the optional isolated browser are explicit downloads.

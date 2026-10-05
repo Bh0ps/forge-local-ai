@@ -5,9 +5,25 @@ configurations that still need deployment testing. Measurements use disposable
 projects and synthetic prompts. Private chats, local inventory, raw benchmark
 sessions and machine paths are not included in the repository or release.
 
+## 4.1.1 cold-start correction
+
+The previous Ollama stream's 90-second socket read could abort a larger model
+before loading or prompt processing finished. Ollama and compatible streams now
+share a cancellable transport with a 60-minute first-response allowance, a
+three-minute generation-progress idle limit and a 90-minute overall ceiling.
+Warm/release controls use the same first-response allowance. These transport
+limits are separate from configured goal budgets, which remain unchanged.
+
+A real local HTTP socket delivered its first response after 95.25 seconds and
+completed without retrying. Time-scaled regressions cover loading, empty
+keep-alives, reasoning/tool progress, idle/total limits, cancellation before
+headers/tokens, exact usage and SSE/Unicode boundaries. A paused run resumed
+without repeating its completed file write. This validates waiting and recovery;
+it is not an additional model-speed measurement.
+
 ## Automated checks
 
-The complete Python suite passed **513 tests**, with one platform-specific skip
+The complete 4.1.1 Python suite passed **550 tests**, with one platform-specific skip
 and one upstream Starlette/AnyIO deprecation warning. The frontend passed **35
 tests**, strict TypeScript checking and the Vite production build. `npm audit`
 reported zero known vulnerabilities for the locked frontend dependencies.

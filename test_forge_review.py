@@ -101,8 +101,8 @@ def test_compatible_tool_result_uses_assistant_call_id(monkeypatch):
     def handler(request):
         captured.update(json.loads(request.content))
         return httpx.Response(200, text='data: {"choices":[{"delta":{"content":"Done"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n')
-    real = httpx.Client
-    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: real(transport=httpx.MockTransport(handler), **kwargs))
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: real(transport=httpx.MockTransport(handler), **kwargs))
     provider = CompatibleProvider({'url': 'http://127.0.0.1:1234/v1'})
     messages = [{'role': 'user', 'content': 'Read file'}, {'role': 'assistant', 'content': '', 'tool_calls': [
         {'id': 'call_123', 'function': {'name': 'read_file', 'arguments': {'path': 'test.txt'}}}]},

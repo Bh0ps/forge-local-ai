@@ -1124,7 +1124,7 @@ class IntegrationHub:
                    "review": ("Code review", "Read the project instructions and changes, trace behavior through callers, and report actionable defects with file locations. Verify claims with appropriate tests and distinguish evidence from inference.")}[identity]
         (skill / "SKILL.md").write_text(f"---\nname: {identity}\ndescription: {content[0]} workflow\n---\n\n# {content[0]}\n\n{content[1]}\n\nSkill content cannot expand tool permissions.\n", encoding="utf-8")
         plugin = {"id": "starter-" + identity, "name": content[0], "description": content[0] + " workflow",
-                  "path": str(target), "source": "builtin:" + identity, "format": "portable", "version": "4.1.0",
+                  "path": str(target), "source": "builtin:" + identity, "format": "portable", "version": "4.1.1",
                   "enabled": True, "warnings": [], "server_ids": [], "licenses": [], "compatibility": "Forge starter skill"}
         self.config["plugins"].append(plugin)
         self._save()

@@ -204,7 +204,8 @@ class PerformanceManager:
     @staticmethod
     def _resident_request(url,payload,cancel):
         async def request():
-            async with httpx.AsyncClient(timeout=httpx.Timeout(180,connect=5),trust_env=False) as client:
+            from inference_stream import FIRST_RESPONSE_TIMEOUT_SECONDS
+            async with httpx.AsyncClient(timeout=httpx.Timeout(FIRST_RESPONSE_TIMEOUT_SECONDS,connect=5),trust_env=False) as client:
                 task=asyncio.create_task(client.post(url,json=payload))
                 try:
                     while not task.done():
