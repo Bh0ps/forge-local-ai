@@ -1,5 +1,24 @@
 # Forge validation
 
+## 4.2.2 library
+
+Library regressions cover fresh-profile starter preparation, saved switches and
+local edits across restarts, bounded relevant selection, explicit invocation,
+disabled-skill enforcement, offline discovery and staged package imports.
+Coordinator tests exercise actual model requests, removing disabled guidance
+between rounds, original goal-objective retention and responsive settings while
+a catalog request is pending. Skill guidance cannot expand plan permissions.
+
+Live public-source checks staged the pinned Anthropic frontend-design skill and
+OpenAI Superpowers plugin into disposable profiles, preserving licenses and
+leaving tools, credentials and executable components inactive. This checks those
+two package imports; it does not certify every supporting script or integration
+mentioned in an external package. New upstream versions require fresh review.
+
+The compiled Windows smoke includes starter-file preparation and rendering the
+Discover page, alongside full/HUD, tray and isolated browser checks. The unsigned
+release and broader consumer-VM/GPU limits below remain unchanged.
+
 ## 4.2.1 workflow corrections
 
 Coordinator regressions cover explicit reviewed-plan execution, goal admission

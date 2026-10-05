@@ -52,7 +52,6 @@ export function AgentsPage({ models, projects, projectId, settings, notify, onRu
   </>;
 }
 
-export { PluginsPage } from './pluginsPage';
 
 interface UsageResponse { totals: UsageCount & { estimated_requests?: number }; daily: { date: string; input_tokens: number; output_tokens: number }[]; by_model?: (UsageCount & { model: string })[]; average_tps?: number; tracked_since?: string; timezone?: string; }
 export function UsagePage({ projects, models, timezone }: { projects: Project[]; models: Model[]; timezone: string }) {

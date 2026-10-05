@@ -34,7 +34,8 @@ READ_ACTIONS=frozenset(('bootstrap','commands','projects','chats','get_chat','at
     'usage','providers','models','show','permission_overrides','storage_info','setup_status',
     'openrouter_status','github_status','github_repos','channel_list','channel_notifications',
     'memory_list','memory_export','update_status','browser_status','browser_native_status',
-    'dictation_status','runtime_status','hf_status','performance_status','pending_questions'))
+    'dictation_status','runtime_status','hf_status','performance_status','pending_questions',
+    'skills','skill_read','skill_preview','plugins','catalogs','catalog_discover','integrations','tools'))
 
 class ForgeService:
     def __init__(self,core=None,store=None,data_dir=None):
@@ -115,7 +116,7 @@ class ForgeService:
         return {'ok':True}
 
     def bootstrap(self):
-        return dict(version='4.2.1',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
+        return dict(version='4.2.2',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
                     chats=self.store.list_chats(),runs=self.store.runs(limit=200),goals=self.store.active_goals(),
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -161,7 +162,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='4.2.1')
+                    self.update_manager=UpdateManager(self,current_version='4.2.2')
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)

@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/forge.svg" width="96" alt="Forge"></p>
 
-# Forge 4.2.1
+# Forge 4.2.2
 
 **A local AI workspace for coding, research and computer tools. Open source under [MIT](LICENSE).**
 
@@ -19,6 +19,10 @@ The 4.2.1 correction makes Build start a tracked goal with clear implementation
 instructions, adds mid-run steering and selectable questions, and cleans up
 active goals and the Memory layout. Desktop launches are maximized.
 
+The 4.2.2 library adds ten ready-to-use, toggleable skills and a searchable
+Discover collection of portable skills and plugins. Source, license and setup
+details stay visible during review; the starter collection works offline.
+
 Cloud integrations are optional and require explicit setup. OpenRouter agents
 use free-only routes with no paid fallback, subject to provider availability
 and quotas. GitHub draft PRs always need approval. Windows packages are currently
@@ -32,11 +36,12 @@ configured. Existing installations and local state are retained for rollback.
 · [Telegram and webhooks](docs/CHANNELS.md) · [OpenRouter](docs/OPENROUTER.md)
 · [GitHub](docs/GITHUB.md) · [Updates](docs/UPDATES.md)
 · [Plans, steering and questions](docs/WORKFLOW_INPUT.md)
+· [Skills and plugins library](docs/LIBRARY.md)
 
 ## Workspace
 
 - React/TypeScript interface with system light/dark appearance, projects and
-  chats, Spaces, Scheduled, Plugins, Agents, Usage and Settings.
+  chats, Spaces, Scheduled, Library, Agents, Usage and Settings.
 - Full workspace and compact HUD share the same chat, draft and attachments.
   Reasoning cards show reasoning supplied by the model.
 - File previews, tool activity, command output, diffs and durable Markdown goal

@@ -1,5 +1,18 @@
 # Changelog
 
+## 4.2.2
+
+- Redesigned Library with Discover and Installed views, instant shared search,
+  type/category filters, source status and clear compatibility/setup details.
+- Ten MIT starter skills are available immediately, with individual enabled and
+  automatic-selection controls. Relevant guidance reaches the agent and switches
+  are reloaded between rounds. Local edits and saved selections survive upgrades.
+- A bounded official collection adds portable OpenAI plugins and Apache-licensed
+  Anthropic skill examples alongside connected catalogs and local imports.
+  Restricted document packages are excluded; discovery never installs scripts.
+- External imports preserve selected Git folders, immutable commits and licenses,
+  with staged review and explicit requirements for unsupported host components.
+
 ## 4.2.1
 
 - Build and `/goal` continue a reviewed plan with an explicit implementation

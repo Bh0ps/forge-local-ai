@@ -462,6 +462,33 @@ class RunManager:
             if local['output_tokens']-run.get('limit_baseline',{}).get('output_tokens',0)>=profile.get('tokens',25000): return 'Agent token limit reached.'
         if root.get('elapsed_seconds',0)+time.monotonic()-started-baseline.get('elapsed_seconds',0)>=limits.get('minutes',60)*60: return 'Time limit reached.'
         return None
+    def _skill_guidance(self,run):
+        """Reload toggles and relevant guidance between completed model/tool rounds."""
+        if not self.service.integrations: return run
+        project=self.store.get_project(run['project_id']) if run.get('project_id') else None
+        query=run['request'][:4000]+'\n'+(run.get('instructions') or '')[:1800]
+        if run.get('goal_id'):
+            query+='\n'+self.store.entity('goals',run['goal_id']).get('request','')[:2800]
+        with self.store._connection() as db:
+            latest=db.execute("SELECT content FROM messages WHERE chat_id=? AND role='user' ORDER BY id DESC LIMIT 1",(run['chat_id'],)).fetchone()
+        if latest: query+='\n'+latest[0][:1400]+'\n'+latest[0][-1400:]
+        selected=self.service.integrations.active_skill_instructions(project,run.get('skills'),query=query)
+        guidance=''; active=[]; budget=max(600,run['settings']['context']//2)
+        for item in selected:
+            skill=item['skill']; prefix='Source: '+skill['path']+'\n'
+            remaining=budget-len(guidance.encode())-len(prefix.encode())-1
+            if remaining<200: continue
+            text=item['text']; suffix=''
+            if len(text.encode())>remaining or item.get('truncated'):
+                suffix='\n[Excerpt: use skills_read with id '+skill['id']+' for full instructions when available.]'
+                text=text.encode()[:max(0,remaining-len(suffix.encode()))].decode('utf-8',errors='ignore')
+            piece=prefix+text+suffix+'\n'
+            guidance+=piece; active.append(skill['id'])
+            if skill['id'] not in run.get('active_skills',[]):
+                self.store.event(run['id'],'skill',name=skill['name'],source=skill['path'],skill_id=skill['id'])
+        if guidance!=run.get('skill_instructions','') or active!=run.get('active_skills',[]):
+            run=self.store.update_run(run['id'],skill_instructions=guidance,active_skills=active)
+        return run
     def _run(self,identifier,job):
         started=time.monotonic(); partial=''; thinking=''; status='paused'; failure=None
         run=self.store.run(identifier); initial_elapsed=run.get('elapsed_seconds',0)
@@ -470,16 +497,6 @@ class RunManager:
             require_model_context(run['settings']['context'],info)
             if run.get('images') and 'vision' not in info.get('capabilities',[]): raise ValueError('This model does not advertise vision. Select a vision model to use images.')
             schemas=self.registry.schemas(run,info.get('capabilities',[])); names={s['function']['name']:s for s in schemas}
-            if self.service.integrations:
-                project=self.store.get_project(run['project_id']) if run.get('project_id') else None
-                selected=self.service.integrations.active_skill_instructions(project,run.get('skills'))
-                guidance=''
-                for skill in selected:
-                    piece='Source: '+skill['skill']['path']+'\n'+skill['text']+'\n'
-                    if len((guidance+piece).encode())>max(600,run['settings']['context']//2): continue
-                    guidance+=piece
-                    self.store.event(identifier,'skill',name=skill['skill']['name'],source=skill['skill']['path'])
-                run=self.store.update_run(identifier,skill_instructions=guidance)
             self.store.update_run(identifier,status='running'); self.store.event(identifier,'status',text='Working…')
             project_lock=nullcontext()
             if run.get('project_id') and not run.get('readonly'):
@@ -492,7 +509,7 @@ class RunManager:
                     interaction.apply_steers(identifier)
                     self._wait_questions(identifier,job)
                     if job['cancel'].is_set(): break
-                    run=self.store.run(identifier)
+                    run=self._skill_guidance(self.store.run(identifier))
                     limit=self._limits(run,started)
                     if limit: raise ValueError(limit+' Review progress and Resume to extend the allowance.')
                     run=self._compact(run,schemas,job)

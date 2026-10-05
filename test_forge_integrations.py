@@ -103,7 +103,7 @@ def test_skill_discovery_scope_and_toggle(hub, tmp_path):
     (folder / "SKILL.md").write_text("---\nname: test\ndescription: Tests the workspace\n---\n\nUse project tools.", encoding="utf-8")
     installed = hub.dispatch("skill_install", {"source": str(folder)})
     assert installed["ok"]
-    skill = installed["skills"][0]
+    skill = next(item for item in installed["skills"] if item["name"] == "test")
     assert skill["name"] == "test"
     assert hub.read_skill(skill["id"])["text"].endswith("Use project tools.")
     assert hub.dispatch("skill_toggle", {"id": skill["id"], "enabled": False})["ok"]
@@ -153,8 +153,8 @@ def test_starter_catalog_install(hub):
     assert hub.dispatch("catalogs")["catalogs"][0]["reviewed"]
     result = hub.dispatch("plugin_install", {"source": "builtin:research"})
     assert result["ok"]
-    assert hub.discover_skills()[0]["name"] == "research"
-    assert not hub.dispatch("plugin_install", {"source": "builtin:research"})["ok"]
+    assert any(item.get("plugin_id") == result["plugin"]["id"] for item in hub.discover_skills())
+    assert hub.dispatch("plugin_install", {"source": "builtin:research"})["plugin"]["id"] == result["plugin"]["id"]
 
 
 def test_review_installs_exact_staged_content(hub, tmp_path):
@@ -167,7 +167,7 @@ def test_review_installs_exact_staged_content(hub, tmp_path):
     assert not hub.dispatch("plugin_install", {"source": str(package)})["ok"]
     result = hub.dispatch("plugin_install", {"inspection_id": preview["inspection_id"], "reviewed": True})
     assert result["ok"]
-    skill = hub.discover_skills()[0]
+    skill = next(item for item in hub.discover_skills() if item.get("plugin_id") == result["plugin"]["id"])
     assert hub.read_skill(skill["id"])["text"] == "# reviewed version"
     assert not hub.inspections
 

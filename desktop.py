@@ -457,6 +457,19 @@ def main():
                     deadline = time.monotonic() + 5
                     while api._window.evaluate_js("!!document.querySelector('dialog[open]')") and time.monotonic() < deadline:
                         time.sleep(.05)
+                    starters = [skill for skill in api.call('skills')['skills'] if skill.get('builtin')]
+                    if len(starters) != 10 or not all(skill['enabled'] and skill['automatic'] for skill in starters):
+                        raise ValueError('The packaged starter library was not prepared correctly.')
+                    opened = api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('nav[aria-label=\"Workspace navigation\"] button')].find(e=>e.textContent.trim()==='Library');if(button){button.click();return true;}return false;})()")
+                    if not opened: raise ValueError('The Library navigation is missing.')
+                    deadline = time.monotonic() + 10
+                    cards = 0
+                    while cards < 12 and time.monotonic() < deadline:
+                        time.sleep(.05)
+                        cards = api._window.evaluate_js("document.querySelectorAll('.library-card').length")
+                    if cards < 12: raise ValueError('The packaged Discover library did not render.')
+                    result['library'] = {'starter_skills': len(starters), 'discover_cards': cards, 'rendered': True}
+                    api._window.evaluate_js("document.querySelector('.new-chat').click()")
                     result.update(hud=api.mode('hud'), peek=api.mode('hud', True), full=api.mode('full'),
                                   pin=api.pin(True), unpin=api.pin(False), host=api.call('host_status'),
                                   projects=api.call('projects'), size=api._native(lambda form: [form.Width, form.Height]))
