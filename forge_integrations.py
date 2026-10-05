@@ -518,7 +518,12 @@ class IntegrationHub:
             if action == "tools":
                 return {"ok": True, "tools": self.schemas(data.get("project"))}
             if action == "browser_status":
-                return {"ok": True, **self.browser.status()}
+                # The default native readiness check must stay lightweight.
+                # Inspect optional isolated engines only when the UI requests it.
+                status = self.browser.status(backend=data["backend"]) if data.get("backend") else self.browser.status()
+                return {"ok": True, **status}
+            if action.startswith("browser_native_"):
+                return self.browser.native_action(action.removeprefix("browser_native_"), data)
             if action == "browser_install":
                 return self.browser.install_browser()
             if action == "browser_bridge_enable":
@@ -649,7 +654,7 @@ class IntegrationHub:
         try:
             if name.startswith("browser_"):
                 invocation_started = name in {"browser_navigate", "browser_click", "browser_type", "browser_close"}
-                return self.browser.execute(name, arguments)
+                return self.browser.execute(name, arguments, context=run_context)
             project = (run_context or {}).get("project") if isinstance(run_context, dict) else None
             if name == "skills_read":
                 return self.read_skill(arguments["id"], project)
@@ -790,7 +795,7 @@ class IntegrationHub:
         url = _safe_url(url, https_only=True)
         size = 0
         with httpx.Client(timeout=30, follow_redirects=False) as client:
-            with client.stream("GET", url, headers={"User-Agent": "Forge/4.0"}) as response:
+            with client.stream("GET", url, headers={"User-Agent": "Forge/4.1"}) as response:
                 response.raise_for_status()
                 with open(destination, "wb") as handle:
                     for chunk in response.iter_bytes():
@@ -1119,7 +1124,7 @@ class IntegrationHub:
                    "review": ("Code review", "Read the project instructions and changes, trace behavior through callers, and report actionable defects with file locations. Verify claims with appropriate tests and distinguish evidence from inference.")}[identity]
         (skill / "SKILL.md").write_text(f"---\nname: {identity}\ndescription: {content[0]} workflow\n---\n\n# {content[0]}\n\n{content[1]}\n\nSkill content cannot expand tool permissions.\n", encoding="utf-8")
         plugin = {"id": "starter-" + identity, "name": content[0], "description": content[0] + " workflow",
-                  "path": str(target), "source": "builtin:" + identity, "format": "portable", "version": "4.0.0",
+                  "path": str(target), "source": "builtin:" + identity, "format": "portable", "version": "4.1.0",
                   "enabled": True, "warnings": [], "server_ids": [], "licenses": [], "compatibility": "Forge starter skill"}
         self.config["plugins"].append(plugin)
         self._save()
@@ -1174,6 +1179,13 @@ class IntegrationHub:
             result.append({"name": str(item.get("name") or "Plugin")[:100], "description": str(item.get("description") or "")[:2000],
                            "source": str(source), "reviewed": False})
         return result
+
+    def stop(self):
+        """Stop native computer/browser activity without disconnecting configuration."""
+        self.browser.stop()
+
+    def reset(self):
+        self.browser.reset()
 
     def shutdown(self):
         if self.closed:

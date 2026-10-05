@@ -30,12 +30,12 @@ AGENT = {'model': 'qwen3.5:9b', 'messages': MESSAGES, 'tools': [TOOL]}
 def test_agent_retains_complete_tool_history_and_detaches_mutable_values():
     original = copy.deepcopy(AGENT)
     payload = Core._agent_payload(AGENT)
-    assert payload['messages'] == [{'role': 'system', 'content': AGENT_SYSTEM_PROMPT}] + MESSAGES
+    assert payload['messages'] == [{'role': 'system', 'content': AGENT_SYSTEM_PROMPT+'\n\n'+MESSAGES[0]['content']}] + MESSAGES[1:]
     assert payload['tools'] == [TOOL]
     assert payload['options'] == {'temperature': 0.3, 'num_predict': 2048, 'num_ctx': 8192}
     assert payload['think'] is False
     assert payload['truncate'] is False and payload['shift'] is False
-    payload['messages'][3]['tool_calls'][0]['function']['arguments']['path'] = 'changed'
+    payload['messages'][2]['tool_calls'][0]['function']['arguments']['path'] = 'changed'
     payload['tools'][0]['function']['parameters']['required'].append('other')
     assert AGENT == original
 
@@ -73,7 +73,8 @@ def test_stream_agent_returns_unexecuted_tool_chunks_and_uses_one_lock(monkeypat
     def handler(request):
         payload = json.loads(request.content)
         assert payload['tools'] == [TOOL]
-        assert payload['messages'][1:] == MESSAGES
+        assert payload['messages'][1:] == MESSAGES[1:]
+        assert MESSAGES[0]['content'] in payload['messages'][0]['content']
         assert payload['truncate'] is False and payload['shift'] is False
         return httpx.Response(200, content=('\n'.join(json.dumps(packet) for packet in packets) + '\n').encode())
 
@@ -81,6 +82,18 @@ def test_stream_agent_returns_unexecuted_tool_chunks_and_uses_one_lock(monkeypat
     core = Core()
     assert list(core.stream_agent(AGENT)) == packets
     assert not core._stream_lock.locked()
+
+def test_interleaved_system_guidance_is_combined_without_losing_tool_order():
+    messages=copy.deepcopy(MESSAGES)+[{'role':'system','content':'Saved summary 漢字 🌍'},
+        {'role':'system','content':'Prepare a numbered plan.'},{'role':'user','content':'Continue exactly.'}]
+    original=copy.deepcopy(messages)
+    payload=Core._agent_payload({**AGENT,'messages':messages,'num_thread':8})
+    assert [m['role'] for m in payload['messages']]==['system','user','assistant','tool','user']
+    for text in ('Project: C:/Projects/Example','Saved summary 漢字 🌍','Prepare a numbered plan.'):
+        assert text in payload['messages'][0]['content']
+    assert payload['messages'][2]['tool_calls']==[CALL]
+    assert payload['messages'][3]['tool_name']=='read_file'
+    assert payload['options']['num_thread']==8 and messages==original
 
 
 @pytest.mark.parametrize('calls', [

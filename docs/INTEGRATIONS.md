@@ -57,10 +57,18 @@ rejects traversal, links, reserved Windows paths and oversized packages.
 
 ## Browsers
 
-The isolated browser uses Playwright and a separate persistent profile. Use
-**Install browser** on first use if Chromium is missing. The background download
+Forge desktop provides a built-in WebView2 research browser with a navigation
+bar, Back/Forward/Reload controls and its own browsing profile. It uses the Windows
+web runtime and does not require a separate Chromium download. Open it from
+Browser settings; approved agent browser tools use it by default on the desktop.
+Remote pages do not receive Forge's application bridge. Window/session, navigation
+and snapshot checks reject stale actions before clicking or typing.
+
+The optional isolated browser uses Playwright and a separate persistent profile.
+Select the isolated backend when needed. Use **Install browser** if Chromium is
+missing. The background download
 reports progress and places its runtime beneath `.forge/runtimes/playwright`.
-It does not read the user's Chrome/Edge profile, cookies or passwords.
+Neither browser reads the user's Chrome/Edge profile, cookies or passwords.
 
 Browser inspections return a snapshot ID and target selectors. Click/type calls
 must cite that snapshot; changed URLs and changed targets require reinspection.
@@ -73,6 +81,48 @@ to connect a selected tab. Cross-origin navigation drops the grant and requires 
 new click. Native messaging authenticates a loopback bridge and registers only the
 specified extension ID. Windows native host setup changes current-user registry
 entries through an explicit settings action.
+
+## Hugging Face models
+
+In **Settings → Models → Hugging Face**, search public GGUF repositories or enter
+an `owner/repository` identifier. Forge shows repository licenses, gated access,
+quantization labels, file sizes and projector files before download. Every selected
+revision resolves to an immutable commit SHA through the official
+[Hugging Face Hub SDK](https://huggingface.co/docs/huggingface_hub/package_reference/hf_api).
+Public models need no account. For gated/private models, accept their terms on
+Hugging Face and enter a read token; **Clear token** removes its OS-vault reference.
+Forge does not reuse an unrelated global Hugging Face login or write plaintext
+tokens to its configuration.
+
+Downloads run in the background beneath
+`.forge/models/huggingface/<owner>--<repository>/<commit>/`. Jobs show byte progress,
+verification and errors. Selected GGUF files retain their original filenames;
+available small license/readme notices are preserved alongside them. File sizes
+and SHA256 checksums are verified against the inspected Hub metadata. Cancellation
+retains partial SDK downloads for an explicit Retry. After restart, unfinished
+jobs show Interrupted rather than pretending a model is installed. Forge never
+loads repository Python code, converts Safetensors automatically, or enables
+`trust_remote_code`.
+
+Choose **Import to Ollama** after the download completes. Enter a new model name
+and select the target Ollama provider. Forge validates GGUF metadata, streams
+verified blobs through the [Ollama API](https://github.com/ollama/ollama/blob/main/docs/api.md),
+then creates the model and refreshes the actual engine model list. It does not
+overwrite an existing name or modify Ollama's manifest folders. Split models need
+all shards. Vision repositories require a matching downloaded projector or an
+explicit text-only choice; recognized projector metadata and available embedding
+dimensions are checked. The tested projector import path requires Ollama 0.35.1
+or newer. Unsupported combinations leave the downloaded files available for an
+explicit llama.cpp model/projector configuration.
+
+Capabilities after import are reported by the engine. A successful import does
+not establish model quality, tool correctness, vision quality or compatibility
+with every cache profile. Test a prompt/image/tool round before promoting a
+performance profile. For example, a tiny model with an 8-element attention head
+cannot use q8 KV blocks of 32; Forge does not silently reconfigure an external
+engine to work around that mismatch. If an import is interrupted after creation
+starts, **Inspect outcome** checks the target model list before Retry becomes
+available. It never automatically repeats an uncertain model creation.
 
 ## Docker coordinator
 

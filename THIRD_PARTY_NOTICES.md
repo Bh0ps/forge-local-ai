@@ -19,6 +19,8 @@ generate the same notice bundle with `python scripts/collect_licenses.py`.
 | FastAPI | MIT | https://github.com/fastapi/fastapi |
 | HTTPX / Uvicorn | BSD-3-Clause | https://github.com/encode/httpx / https://github.com/encode/uvicorn |
 | MCP Python SDK | MIT | https://github.com/modelcontextprotocol/python-sdk |
+| Hugging Face Hub | Apache-2.0 | https://github.com/huggingface/huggingface_hub |
+| GGUF Python / llama.cpp | MIT | https://github.com/ggml-org/llama.cpp |
 | Playwright | Apache-2.0 | https://github.com/microsoft/playwright |
 | PyYAML | MIT | https://github.com/yaml/pyyaml |
 | pywebview | BSD-3-Clause | https://github.com/r0x0r/pywebview |

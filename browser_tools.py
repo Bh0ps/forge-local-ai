@@ -58,10 +58,13 @@ class BrowserTools:
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(self.root / "runtimes" / "playwright")
         self.binary_available = False
         self.last_installation_check = 0
+        self.native = None
 
-    def status(self):
+    def status(self, backend=None):
+        if backend not in (None, 'native', 'isolated'):
+            raise ValueError('Choose native or isolated browser diagnostics.')
         installed = importlib.util.find_spec("playwright") is not None
-        if installed and time.monotonic() - self.last_installation_check > 30:
+        if installed and (self.native is None or backend == 'isolated') and time.monotonic() - self.last_installation_check > 30:
             self.last_installation_check = time.monotonic()
             try:
                 self.binary_available = self.pool.submit(self._check_installation).result(timeout=3)
@@ -69,11 +72,30 @@ class BrowserTools:
                 pass
         with self.install_lock:
             installation = {**self.installation, "progress": list(self.installation["progress"])}
-        return {"available": installed and self.binary_available, "dependency_available": installed, "running": self.context is not None,
+        isolated = {"available": installed and self.binary_available, "dependency_available": installed, "running": self.context is not None,
                 "message": "Ready" if self.binary_available else "Install Chromium using Install browser" if installed else "Install requirements-integrations.txt to enable browser tools",
-                "installation": installation,
+                "installation": installation}
+        native = self.native.status() if self.native else {"available": False, "running": False, "engine": "WebView2", "message": "Open Forge desktop to use the built-in browser"}
+        return {**isolated, "available": native.get('available', False) or isolated['available'],
+                "running": native.get('running', False) or isolated['running'],
+                "message": native['message'] if native.get('available') else isolated['message'],
+                "default_backend": "native" if native.get('available') else "isolated",
+                "native": native, "isolated": isolated,
                 "connected_tabs": self.bridge.tabs() if self.bridge else [],
                 "extension_available": self.bridge is not None}
+
+    def native_action(self, action, data=None):
+        if not self.native:
+            if action == 'status':
+                return self.status()['native']
+            raise RuntimeError('Open Forge desktop to use its built-in browser.')
+        return self.native.dispatch(action, data)
+
+    def describe_target(self, arguments, context=None):
+        if self.native and arguments.get('tab_id') is None and arguments.get('backend', 'native') == 'native':
+            return self.native.describe_target(arguments, context)
+        return {'app': 'browser:connected-tab' if arguments.get('tab_id') is not None else 'browser:isolated',
+                'target': arguments.get('url') or ('Connected tab ' + str(arguments['tab_id']) if arguments.get('tab_id') is not None else 'Forge isolated browser')}
 
     def _check_installation(self):
         if self.playwright:
@@ -128,18 +150,19 @@ class BrowserTools:
     @staticmethod
     def schemas():
         text = {"type": "string"}
-        target = {"tab_id": {"type": "integer", "description": "Optional explicitly connected extension tab"}}
+        target = {"tab_id": {"type": "integer", "description": "Optional explicitly connected extension tab"},
+                  "backend": {"type": "string", "enum": ["native", "isolated"], "description": "Default is built-in native desktop browser when available"}}
         return [
-            function_schema("browser_navigate", "Navigate the isolated browser or an explicitly connected tab", {**target, "url": text}, ["url"]),
+            function_schema("browser_navigate", "Navigate Forge's built-in browser, optional isolated browser or explicitly connected tab", {**target, "url": text}, ["url"]),
             function_schema("browser_inspect", "Read page text and target selectors; returns a snapshot_id for actions", target),
             function_schema("browser_click", "Click a target from the current snapshot", {**target, "selector": text, "snapshot_id": text}, ["selector", "snapshot_id"]),
             function_schema("browser_type", "Replace a form field using the current snapshot", {**target, "selector": text, "text": text, "snapshot_id": text}, ["selector", "text", "snapshot_id"]),
             function_schema("browser_screenshot", "Capture the current browser viewport", target),
             function_schema("browser_tabs", "List only user-connected extension tabs"),
-            function_schema("browser_close", "Close Forge's isolated browser"),
+            function_schema("browser_close", "Close Forge's browser", {"backend": target['backend']}),
         ]
 
-    def execute(self, name, arguments):
+    def execute(self, name, arguments, context=None):
         if self.closed:
             raise RuntimeError("Browser tools have stopped")
         if arguments.get("tab_id") is not None:
@@ -156,10 +179,26 @@ class BrowserTools:
                 raise RuntimeError(str(result.get("error", "Browser action failed")))
             return self._bounded_result(result)
         if name == "browser_tabs":
-            return {"ok": True, "tabs": self.bridge.tabs() if self.bridge else []}
+            return {"ok": True, "tabs": self.bridge.tabs() if self.bridge else [],
+                    "native": self.native.status() if self.native else None}
         if name not in {schema["function"]["name"] for schema in self.schemas()}:
             raise ValueError("Unknown browser tool")
+        backend = arguments.get('backend', 'native' if self.native else 'isolated')
+        if backend not in ('native', 'isolated'):
+            return {'ok': False, 'error': 'Unknown browser backend.', 'not_executed': True}
+        if backend == 'native':
+            if not self.native:
+                return {'ok': False, 'error': 'Open Forge desktop to use the built-in browser.', 'not_executed': True}
+            return self.native.execute(name, arguments, context)
         return self.pool.submit(self._perform, name, dict(arguments)).result(timeout=50)
+
+    def stop(self):
+        if self.native:
+            self.native.stop()
+
+    def reset(self):
+        if self.native:
+            self.native.reset()
 
     def _start(self):
         if self.context:
@@ -264,6 +303,8 @@ class BrowserTools:
     def shutdown(self):
         if self.closed:
             return
+        if self.native:
+            self.native.shutdown()
         try:
             self.pool.submit(self._perform, "browser_close", {}).result(timeout=10)
         except Exception:

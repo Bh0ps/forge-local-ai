@@ -50,7 +50,12 @@ class Bridge:
         if not getattr(self._service, 'computer_broker', None):
             self._service.computer_broker = ComputerBroker(home)
         if not getattr(self._service, 'host_dictation', None):
-            self._service.host_dictation = Dictation(home)
+            selected = self._service.store.get_settings().get('dictation_model', 'base') if hasattr(self._service.store, 'get_settings') else 'base'
+            self._service.host_dictation = Dictation(home, model=selected)
+        integrations = getattr(self._service, 'integrations', None)
+        if integrations and not getattr(integrations.browser, 'native', None):
+            from native_browser import NativeBrowser
+            integrations.browser.native = NativeBrowser(home, ui_dispatch=self._native)
         if self._lifecycle is None:
             self._lifecycle = HostLifecycle(self._service, self._pairing)
         return self._service
@@ -64,7 +69,16 @@ class Bridge:
                 raise ValueError('Expected an object')
             service = self._ensure_service()
             if action.startswith('dictation_'):
-                return service.host_dictation.dispatch(action.removeprefix('dictation_'), data)
+                state = service.host_dictation.status()['state']
+                sync = (action in ('dictation_start', 'dictation_upload') and
+                        state not in ('starting', 'recording', 'stopping', 'transcribing', 'installing') or
+                        action == 'dictation_status' and state in ('idle', 'ready', 'error', 'cancelled'))
+                if sync and hasattr(service.store, 'get_settings'):
+                    service.host_dictation.select_model(service.store.get_settings().get('dictation_model', 'base'))
+                result = service.host_dictation.dispatch(action.removeprefix('dictation_'), data)
+                if action == 'dictation_install' and data.get('model'):
+                    service.dispatch('settings', {'dictation_model': data['model']})
+                return result
             if action == 'host_status':
                 return {'native': True, 'mode': self._mode, 'pinned': self._pin,
                         'url': self._server_url, 'tray': self._tray is not None,
@@ -381,6 +395,81 @@ def main():
                     result['close_hides'] = api._on_closing() is False and not api._closing
                     result['background_api'] = api.call('projects')
                     api.show()
+                    if '--dictation-smoke' in sys.argv:
+                        # SAPI makes a disposable phrase in memory. No microphone
+                        # input or user's spoken audio is captured by this test.
+                        import wave
+                        import win32com.client
+                        voice = win32com.client.Dispatch('SAPI.SpVoice')
+                        speech = win32com.client.Dispatch('SAPI.SpMemoryStream')
+                        speech.Format.Type = 22  # 22.05 kHz, 16-bit mono PCM
+                        voice.AudioOutputStream = speech
+                        voice.Speak('Hello Forge. Create a new project.', 0)
+                        audio = io.BytesIO()
+                        with wave.open(audio, 'wb') as writer:
+                            writer.setnchannels(1)
+                            writer.setsampwidth(2)
+                            writer.setframerate(22050)
+                            writer.writeframes(bytes(speech.GetData()))
+                        current = api.call('dictation_upload', {'audio': base64.b64encode(audio.getvalue()).decode()})
+                        deadline = time.monotonic() + 45
+                        while current.get('state') == 'transcribing' and time.monotonic() < deadline:
+                            time.sleep(.1)
+                            current = api.call('dictation_status')
+                        audio.close()
+                        text = current.get('text', '').lower()
+                        if current.get('state') != 'done' or not all(word in text for word in ('forge', 'project')):
+                            raise ValueError('Dictation fixture failed: ' + str(current.get('error') or current.get('state')))
+                        result['dictation'] = {'state': 'done', 'fixture_transcribed': True,
+                            'device': current['device'], 'compute_type': current['compute_type'],
+                            'model': current['model'], 'audio_memory_only': True}
+                    if '--native-browser-smoke' in sys.argv:
+                        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+                        class Fixture(BaseHTTPRequestHandler):
+                            def do_GET(self):
+                                body = b'''<!doctype html><title>Forge disposable browser fixture</title>
+                                <input id="name" placeholder="Fixture name"><button onclick="document.querySelector('#result').innerText=document.querySelector('#name').value">Apply fixture</button><p id="result">Before</p>'''
+                                self.send_response(200)
+                                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                                self.end_headers()
+                                self.wfile.write(body)
+                            def log_message(self, *args):
+                                pass
+                        fixture = ThreadingHTTPServer(('127.0.0.1', 0), Fixture)
+                        threading.Thread(target=fixture.serve_forever, daemon=True).start()
+                        try:
+                            browser = service.integrations.browser
+                            url = 'http://127.0.0.1:' + str(fixture.server_address[1]) + '/'
+                            run = {'id': 'native-smoke', 'settings': service.store.get_settings(), 'project_id': None}
+                            schema = next(s for s in browser.schemas() if s['function']['name'] == 'browser_navigate')
+                            result['browser_permission'] = service.jobs.registry.permission(run, schema, {'url': url})
+                            cancel = threading.Event()
+                            def tool(name, arguments):
+                                outcome = service.jobs.registry.execute(run, name, arguments, cancel)
+                                if outcome.get('ok') is False:
+                                    raise ValueError(outcome.get('error', 'Native browser fixture failed'))
+                                return outcome
+                            tool('browser_navigate', {'url': url})
+                            deadline = time.monotonic() + 20
+                            while browser.native.status()['loading'] and time.monotonic() < deadline:
+                                time.sleep(.1)
+                            inspected = tool('browser_inspect', {})
+                            field = next(t for t in inspected['targets'] if t['tag'] == 'input')
+                            tool('browser_type', {'snapshot_id': inspected['snapshot_id'], 'selector': field['selector'], 'text': 'Native WebView2 works'})
+                            inspected = tool('browser_inspect', {})
+                            button = next(t for t in inspected['targets'] if t['tag'] == 'button')
+                            tool('browser_click', {'snapshot_id': inspected['snapshot_id'], 'selector': button['selector']})
+                            inspected = tool('browser_inspect', {})
+                            if 'Native WebView2 works' not in inspected['text']:
+                                raise ValueError('Native form edit/click did not update the fixture.')
+                            capture = tool('browser_screenshot', {})
+                            result['native_browser'] = dict(engine='WebView2', bridge_exposed=browser.native.view.evaluate('typeof window.pywebview'),
+                                fixture_updated=True, screenshot_bytes=Path(capture['artifact']).stat().st_size,
+                                same_page_url=inspected['url'] == url)
+                            browser.native.dispatch('close')
+                        finally:
+                            fixture.shutdown()
+                            fixture.server_close()
                 except Exception as exc:
                     result['error'] = str(exc)
                 finally:

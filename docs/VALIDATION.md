@@ -1,4 +1,4 @@
-# Forge 4.0 validation
+# Forge 4.1 validation
 
 This report distinguishes automated contracts, live Windows/model checks and
 configurations that still need deployment testing. Measurements use disposable
@@ -7,12 +7,23 @@ sessions and machine paths are not included in the repository or release.
 
 ## Automated checks
 
-The complete Python suite passed **425 tests**, with one platform-specific skip
-and one upstream Starlette/AnyIO deprecation warning. The frontend passed **15
+The complete Python suite passed **513 tests**, with one platform-specific skip
+and one upstream Starlette/AnyIO deprecation warning. The frontend passed **35
 tests**, strict TypeScript checking and the Vite production build. `npm audit`
 reported zero known vulnerabilities for the locked frontend dependencies.
 
 Covered contracts include:
+
+- Saved `/plan` → `/todo` execution, reviewed Build deduplication, legacy plan
+  recovery, three truncated plan fragments across Resume and immutable goal data.
+- Chat/project mutation races, archive/restore, deletion preserving folders and
+  usage, schema-4 backup and moved-project continuation guards.
+- Real byte/GiB telemetry, capability-gated residency controls, benchmark accounting
+  and prompt cancellation, including missing and nullable engine counters.
+- HF pinned downloads, checksums, safe paths, cancel/retry, import-name races,
+  import reconciliation and matching model/projector checks.
+- Dictation capture cancellation races, microphone start failure and the tested
+  faster-whisper/PyAV compatibility pin.
 
 - Current-request retention, Unicode budgeting, large tool output artifacts,
   failed-summary fallback, cancellation, truncated model streams and output limits.
@@ -34,6 +45,16 @@ Covered contracts include:
 
 ## Windows and interface checks
 
+The compiled 4.1 frontend passed eight live coordinator workflow groups without
+JavaScript errors. These exercised context presets, telemetry, native/HF setup,
+right-click chat actions, move/archive/restore, saved-plan execution, Build by run
+ID, exact TPS and a 620×188 HUD preserving its draft.
+
+The frozen 4.1 WebView2 app passed full/HUD/tray/Quit plus native browser navigation,
+inspection, typing, clicking and PNG capture. Website pages have no Forge Python
+bridge. Real CPU INT8 dictation transcribed a synthetic in-memory speech fixture;
+the microphone format was checked without recording ambient audio.
+
 The real WebView2 host was exercised from source and a frozen portable build.
 Checks included initial navigation, workspace/HUD switching, bounds restoration,
 reply expansion, pinning, closing to the tray, reopening and Quit termination.
@@ -48,6 +69,24 @@ system themes, compact model selection and recovery/approval controls are covere
 by the frontend tests and manual smoke checks.
 
 ## Live local inference
+
+The 4.1 upgrade completed a real 9B-class model `/plan` followed by `/todo`: the
+plan made no file changes; the goal completed 15 rounds and 14 tool actions,
+including file creation, Python verification and saved checklist evidence. At
+16K context with reasoning disabled, warm short coding probes reported about
+85–87 output tokens/s; the streamed harmless tool probe passed at about 83
+tokens/s. A large-text vision fixture returned the exact expected text. Smaller
+text was misread, so recognition quality remains model-dependent. Short probes
+do not validate a filled 16K or 256K window.
+
+A public 1.19 MB GGUF was downloaded at an immutable revision, checksum-verified,
+imported through Ollama's blob/create API and discovered with its actual completion
+capability. Its generation was incompatible with the external engine's q8 cache
+block size; Forge did not change that engine or promote the toy model. All synthetic
+test models were removed. Download/import success is distinct from inference
+compatibility.
+
+The following are retained observations from the 4.0 baseline:
 
 Identical short coding prompts and settings were sent through Forge to the same
 installed 9B-class quantized model, with an 8K context and reasoning disabled:
@@ -82,10 +121,10 @@ no aggregate peak-memory or cold-start improvement claim is published here.
   profiles were **not executed**. They require testing on the deployment host.
 - MCP OAuth flow was tested against fixtures. Signing into each external vendor
   is a separate setup and interoperability check.
-- Browser automation was checked with an isolated installed Chromium instance.
+- Browser automation was checked with native WebView2 and an isolated Chromium instance.
   Existing-tab access requires explicitly loading/enabling the extension and
   registering its native host for that browser installation.
-- Dictation is implemented with CPU INT8 faster-whisper and in-memory audio.
+- Dictation is validated with CPU INT8 faster-whisper and in-memory audio.
   A transcription model must be installed explicitly; microphone recognition
   quality depends on the device, language and model.
 - Quantized KV cache, speculation, MTP, n-grams, CUDA graph tuning and native NVFP4

@@ -43,14 +43,16 @@ def test_image_request_is_pinned_but_chat_and_run_json_keep_only_references(tmp_
     context=svc.jobs._context(stored,[])
     assert context[-1]['images']==[encoded] and context[-1]['content']=='Look at this image';svc.shutdown()
 
-def test_truncated_tool_call_is_saved_without_execution_and_can_resume(tmp_path):
+def test_truncated_tool_call_is_quarantined_and_continuation_does_not_execute_it(tmp_path):
     def truncated(data,cancel):
         yield {'message':{'content':'Partial','tool_calls':[call('write_file',{'path':'x','content':'x'})]},'done':True,'done_reason':'length'}
     svc=service(tmp_path,Engine([truncated,{'content':'Continuation complete'}]))
-    run=svc.jobs.start({'text':'Build something'});assert finished(svc,run)['status']=='paused'
+    run=svc.jobs.start({'text':'Build something'});assert finished(svc,run)['status']=='completed'
     assert not svc.store.get_chat(run['chat_id'])['messages'][-1].get('tool_calls')
     assert not svc.store.unknown_actions(run['id'])
-    assert finished(svc,svc.jobs.resume(run['id']))['status']=='completed';svc.shutdown()
+    with svc.store._connection() as db: assert db.execute('SELECT COUNT(*) FROM invocations').fetchone()[0]==0
+    assert any(event['type']=='status' and 'Continuing' in event.get('text','') for event in svc.jobs.poll(run['id'])['events'])
+    svc.shutdown()
 
 def test_advanced_runtime_is_bound_to_supported_flags_and_verification(tmp_path,monkeypatch):
     manager=RuntimeManager(tmp_path/'forge');executable=tmp_path/'llama-server.exe';executable.write_bytes(b'fixture')

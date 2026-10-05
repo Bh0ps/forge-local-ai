@@ -28,7 +28,7 @@ SYSTEM_PROMPT = (
     'Give concrete code in fenced blocks and state assumptions.'
 )
 AGENT_SYSTEM_PROMPT = (
-    'You are Sidekick, a local coding agent working alongside the user. '
+    'You are Forge, a local coding agent working alongside the user. '
     'Use the available tools to inspect and change the selected project, maintain tasks, '
     'and research the web when useful. You are in a tool loop: inspect results, then '
     'continue with the next necessary step until the request is complete. '
@@ -287,9 +287,14 @@ class Core:
             raise ValueError(f'The prompt and tools exceed the estimated {context:,}-token context budget '
                              f'after reserving {response_tokens:,} tokens for the response. '
                              'Increase Context, shorten the message, or compact older turns.')
+        # Many model templates (including Qwen GGUFs) permit exactly one system
+        # message, at the beginning. Runtime instructions and continuity must
+        # survive this normalization instead of creating mid-turn system roles.
+        system_parts=[AGENT_SYSTEM_PROMPT]+[m['content'] for m in history if m['role']=='system']
+        normalized=[{'role':'system','content':'\n\n'.join(system_parts)}]+[m for m in history if m['role']!='system']
         payload = {
             'model': model.strip(),
-            'messages': [{'role': 'system', 'content': AGENT_SYSTEM_PROMPT}] + history,
+            'messages': normalized,
             'stream': stream,
             # Agent turns must remain intact. Ollama 0.34+ otherwise silently
             # drops prompt messages or shifts context as the window fills.
@@ -298,6 +303,10 @@ class Core:
         }
         if schemas:
             payload['tools'] = schemas
+        threads=data.get('num_thread')
+        if threads is not None:
+            if type(threads) is not int or not 1<=threads<=64: raise ValueError('CPU threads must be from 1 to 64.')
+            payload['options']['num_thread']=threads
         if thinking or 'qwen' in model.lower():
             payload['think'] = thinking
         return payload

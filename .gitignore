@@ -50,6 +50,9 @@ webview/
 exports/
 screenshots/
 benchmarks/local/
+models/
+*.gguf
+*.safetensors
 *.sqlite*
 *.db
 *.db-*

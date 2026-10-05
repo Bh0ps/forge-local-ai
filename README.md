@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/forge.svg" width="96" alt="Forge"></p>
 
-# Forge 4.0
+# Forge 4.1
 
 **A local AI workspace for coding, research and computer tools. Open source under [MIT](LICENSE).**
 
@@ -22,12 +22,18 @@ configured local inference engine. No cloud AI account is required.
 - File previews, tool activity, command output, diffs and durable Markdown goal
   checklists live in the right panel.
 - Searchable model chooser beside the composer; install/delete controls are in
-  Settings. Context is adjustable from 2K to 256K, initially 32K.
+  Settings. Hugging Face search, GGUF downloads and Ollama import use managed local
+  folders with progress, cancellation and compatibility checks. Context presets
+  and the slider cover 2K–256K, initially 32K.
+- Chat menus support moving, archiving and deleting; project removal preserves
+  folders and moves chats to Unassigned. Both menus support right-click.
 
 ## Agents and tools
 
 - Project reads, writes, backups, conflict checks, bounded commands, public web
-  research, local Windows accessibility/screenshot tools and an isolated browser.
+  research, local Windows accessibility/screenshot tools and a native WebView2
+  browser. An isolated Playwright browser and explicit existing-tab extension
+  connections remain available.
 - **Always Ask** initially permits connected-project reads and asks before edits,
   commands, computer actions and unknown MCP operations. Full Access and Deny
   Access, plus project/app/server/tool overrides, are configurable.
@@ -48,10 +54,17 @@ configured local inference engine. No cloud AI account is required.
 `/status`, `/compact`, `/new`, `/project`, `/model`, `/agents`, `/worktree`, `/skill`,
 `/mcp`, `/schedule` and `/help`.
 
+`/plan` saves a reviewable Markdown plan without editing the project. Select Build
+or enter `/todo` (also `/to-do`) in that chat to start its ordered goal checklist.
+`/todo` followed by tasks creates and starts a new checklist. The agent reloads
+saved progress after compaction and restart and records completion evidence.
+
 Each run retains its exact request, settings, event cursor and tool outcomes.
 Compaction runs between completed rounds. Full tool results remain retrievable
 artifacts; summaries use bounded excerpts and a deterministic checkpoint if
-summary retries fail. Context, output and goal limits pause with Resume available.
+summary retries fail. Truncated responses receive two bounded continuation
+attempts; unfinished tool calls are never executed. Context and goal limits pause
+with Resume available.
 Interrupted side effects require outcome inspection before continuation.
 
 Goal checklists are saved at `~/.forge/state/goals/<id>/TODO.md`, with ordered tasks,
@@ -77,7 +90,10 @@ Forge queues one inference request per GPU, prioritizes foreground work, retains
 warm models where supported, bounds active history and selects tools within the
 context budget. It never silently changes an explicit model or context selection.
 CPU INT8 faster-whisper dictation inserts an editable transcript; raw audio is
-kept in memory and discarded. Model and browser downloads are explicit setup steps.
+kept in memory and discarded. Native browsing uses the existing Windows WebView2
+runtime; speech models and the optional isolated browser are explicit downloads.
+Performance shows live RAM/VRAM, loaded models, warm/release controls and measured
+coding, image and tool probes. Model/context recommendations require acceptance.
 
 ## Run from source
 

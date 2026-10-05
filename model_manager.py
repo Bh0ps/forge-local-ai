@@ -183,7 +183,7 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
 
     @app.get('/api/v1/health')
     def health():
-        return {'app': 'Forge', 'version': '4.0.0', 'pairing_required': not legacy}
+        return {'app': 'Forge', 'version': '4.1.0', 'pairing_required': not legacy}
 
     @app.get('/')
     def index():

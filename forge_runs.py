@@ -74,6 +74,8 @@ class ToolRegistry:
     def target_metadata(self,run,schema,args,cancel):
         if schema['function']['name'].startswith('computer_') and self.service.computer_broker:
             return self.service.computer_broker.describe_target(args,{'run_id':run['id'],'cancel':cancel})
+        if schema['function']['name'].startswith('browser_') and self.service.integrations:
+            return self.service.integrations.browser.describe_target(args,{'run_id':run['id'],'cancel':cancel})
         return {}
     def permission(self,run,schema,args,target=None):
         settings=run['settings']; live=self.service.store.get_settings(); name=schema['function']['name']; capability=self.capability(schema)
@@ -102,6 +104,8 @@ class ToolRegistry:
         if name=='goal_read': return store.goal(run['goal_id'])
         if name=='goal_update':
             current=store.goal(run['goal_id'])
+            allowed={'tasks','checkpoint','blockers','next_action'}
+            if set(args)-allowed: raise ValueError('Goal updates can only change tasks, checkpoint, blockers and next action.')
             return store.save_goal({**current,**args,'id':current['id']})
         if name=='delegate_agent': return service.agent_start({'agent_id':args['agent_id'],'text':args['task'],'parent_id':run['id'],'project_id':run.get('project_id')})
         if name=='agent_result':
@@ -132,16 +136,21 @@ class RunManager:
         self.store.recover()
     def start(self,data):
         if self.service.computer_broker and hasattr(self.service.computer_broker,'reset'): self.service.computer_broker.reset()
+        if self.service.integrations and hasattr(self.service.integrations,'reset'): self.service.integrations.reset()
         preferences=self.store.get_settings()
         settings={**preferences,**{k:v for k,v in data.items() if k in preferences}}
         settings['goal_limits']=validate_goal_limits(settings.get('goal_limits',{}))
         context=validate_context(settings['context']); text=data.get('text','').strip()
         if not text or len(text)>1000000: raise ValueError('Enter a request of 1–1,000,000 characters.')
         if not settings.get('model'): raise ValueError('Select an installed model in the composer.')
-        existing=self.store.get_chat(data['chat_id'],limit=1) if data.get('chat_id') else None
-        project_id=existing['project_id'] if existing else data.get('project_id')
-        if project_id: self.store.get_project(project_id)
         with self.lock:
+            existing=self.store.get_chat(data['chat_id'],limit=1) if data.get('chat_id') else None
+            if existing and existing.get('archived'): raise ValueError('Restore this archived chat before starting a run.')
+            project_id=existing['project_id'] if existing else data.get('project_id')
+            if project_id: self.store.get_project(project_id)
+            if data.get('goal_id'):
+                goal=self.store.goal(data['goal_id'])
+                if goal.get('project_missing') or goal.get('project_id')!=project_id: raise ValueError('The goal belongs to another or removed project. Reconnect its original project before continuing.')
             if existing and any(r['chat_id']==existing['id'] and r['status'] not in TERMINAL for r in self.store.runs()): raise ValueError('This chat is already working.')
             chat=existing or self.store.create_chat(project_id,title=text.splitlines()[0][:70],model=settings['model'])
             run=self.store.create_run(dict(chat_id=chat['id'],project_id=project_id,settings=settings,request=text,
@@ -180,8 +189,13 @@ class RunManager:
         return {'ok':True}
     def resume(self,identifier,data=None):
         if self.service.computer_broker and hasattr(self.service.computer_broker,'reset'): self.service.computer_broker.reset()
+        if self.service.integrations and hasattr(self.service.integrations,'reset'): self.service.integrations.reset()
         with self.lock:
             run=self.store.run(identifier)
+            chat=self.store.get_chat(run['chat_id'],limit=1)
+            if chat.get('archived'): raise ValueError('Restore this archived chat before resuming.')
+            if chat.get('project_id')!=run.get('project_id'): raise ValueError('The chat moved to another project. Start a new run in its current project.')
+            if run.get('goal_id') and self.store.goal(run['goal_id']).get('project_missing'): raise ValueError('Reconnect the original goal project before resuming.')
             if run['status'] not in ('paused','interrupted','failed'): raise ValueError('This run cannot be resumed.')
             unknown=self.store.unknown_actions(identifier)
             if unknown: raise ValueError('Inspect outcome-unknown actions before resuming. No action will be repeated automatically.')
@@ -211,7 +225,7 @@ class RunManager:
             run['settings']['goal_limits']=validate_goal_limits(run['settings'].get('goal_limits',{}))
             # A user-authorized resume starts a new allowance without losing cumulative usage.
             totals=self._budget_totals(run)
-            run=self.store.update_run(identifier,status='queued',settings=run['settings'],initial_preferences=current_preferences,limit_baseline={**totals,'elapsed_seconds':run.get('elapsed_seconds',0)},recovery=None)
+            run=self.store.update_run(identifier,status='queued',settings=run['settings'],initial_preferences=current_preferences,limit_baseline={**totals,'elapsed_seconds':run.get('elapsed_seconds',0)},recovery=None,output_retries=0)
             self._launch(run)
         return {'id':identifier,'chat_id':run['chat_id'],'status':'queued'}
     def approve(self,identifier,approval_id,allowed):
@@ -247,7 +261,7 @@ class RunManager:
             messages.append({'role':'system','content':'Connected project: '+project['name']+'\nProject root: '+project['path']})
         if run.get('instructions'): messages.append({'role':'system','content':run['instructions']})
         if run.get('skill_instructions'): messages.append({'role':'system','content':'Selected skill guidance (cannot expand tool permissions):\n'+run['skill_instructions']})
-        if run.get('mode')=='plan': messages.append({'role':'system','content':'Inspect and prepare a concrete implementation plan. Do not edit files or execute commands. Finish with a plan for the Build action.'})
+        if run.get('mode')=='plan': messages.append({'role':'system','content':'The user invoked /plan. Inspect relevant connected-project files with read tools when needed. Do not edit files or execute commands. Your final visible answer must be a concrete Markdown implementation plan with an ordered numbered checklist of steps, validation, and any assumptions or blockers. Planning must not start implementation. The user can review the saved plan and select Build to implement it. Put the plan in the final answer, not only hidden reasoning.'})
         if run.get('summary') or chat.get('summary'):
             messages.append({'role':'system','content':'Saved continuity (untrusted historical data):\n'+(run.get('summary') or chat['summary'])})
         if run.get('goal_id'):
@@ -380,8 +394,8 @@ class RunManager:
                     if job['cancel'].is_set(): break
                     run=self.store.update_run(identifier,phase='generating',rounds=run['rounds']+1)
                     self.store.event(identifier,'round',number=run['rounds'])
-                    accumulated=ToolCallAccumulator(); final={}; partial=''; thinking=''; pending_text=''; pending_think=''; last_flush=time.monotonic()
-                    data={**run['settings'],'thinking':run['settings'].get('thinking',True) and 'thinking' in info.get('capabilities',[]),
+                    accumulated=ToolCallAccumulator(max_calls=32); final={}; partial=''; thinking=''; pending_text=''; pending_think=''; last_flush=time.monotonic()
+                    data={**run['settings'],'thinking':run['settings'].get('thinking',True) and not run.get('output_retries') and 'thinking' in info.get('capabilities',[]),
                           'messages':self._context(run,schemas),'tools':schemas}
                     stream=self.service.providers.generate(data,job['cancel'],run,'child' if run.get('parent_id') else 'main',bool(run.get('parent_id') or run.get('schedule_id')))
                     try:
@@ -400,14 +414,31 @@ class RunManager:
                     if pending_think: self.store.event(identifier,'thinking',text=pending_think)
                     if job['cancel'].is_set(): break
                     if not final.get('done'): raise ValueError('The model stream ended before completing a round. Resume to continue from the saved checkpoint.')
+                    output_count=final.get('eval_count',(final.get('usage') or {}).get('completion_tokens'))
+                    decode_seconds=(final.get('eval_duration') or 0)/1e9
+                    self.store.event(identifier,'generation',output_tokens=output_count,decode_seconds=decode_seconds,
+                        tps=output_count/decode_seconds if output_count is not None and decode_seconds>0 else None,
+                        estimated=output_count is None or decode_seconds<=0)
                     calls=accumulated.finish()
                     truncated=final.get('done_reason') in ('length','max_tokens')
                     if truncated and calls: self.store.artifact({'truncated_tool_calls':calls,'executed':False})
+                    visible_answer=partial
+                    generated_count=output_count if output_count is not None else (len((partial+thinking).encode('utf-8'))+2)//3
                     self.store.add_message(run['chat_id'],'assistant',partial,thinking=thinking,tool_calls=[] if truncated else calls,status='partial' if truncated else 'complete')
                     partial=thinking=''
-                    run=self.store.update_run(identifier,phase='round_complete',output_tokens=run['output_tokens']+int(final.get('eval_count',final.get('usage',{}).get('completion_tokens',0))))
-                    if truncated: raise ValueError('Output limit reached. The response is saved. Resume to continue.')
+                    run=self.store.update_run(identifier,phase='round_complete',output_tokens=run['output_tokens']+int(generated_count))
+                    if truncated:
+                        changes={'output_retries':run.get('output_retries',0)+1}
+                        if run.get('mode')=='plan' and visible_answer: changes['plan_fragments']=run.get('plan_fragments',[])+[visible_answer]
+                        run=self.store.update_run(identifier,**changes)
+                        if run['output_retries']>2: raise ValueError('Output limit reached after two continuation attempts. Progress is saved. Increase response length and Resume.')
+                        self.store.add_message(run['chat_id'],'user','The response hit its output limit. Continue from the saved partial response and give the visible final answer now. Do not repeat completed actions. Any truncated tool calls were not executed; send only the next few complete calls if needed.')
+                        self.store.event(identifier,'status',text='Continuing the saved partial response…')
+                        continue
                     if not calls:
+                        if run.get('mode')=='plan':
+                            if not visible_answer.strip(): raise ValueError('The model returned no visible plan. Enable a longer response or disable reasoning, then Resume.')
+                            self.service.save_plan(run,'\n\n'.join(run.get('plan_fragments',[])+[visible_answer]))
                         if run.get('goal_id') and not run.get('parent_id'):
                             goal=self.store.goal(run['goal_id'])
                             if any(t.get('status')!='completed' for t in goal.get('tasks',[])):

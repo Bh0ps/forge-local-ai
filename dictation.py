@@ -16,39 +16,74 @@ class Dictation:
         self.model_factory = model_factory
         self.stream_factory = stream_factory
         self._lock = threading.RLock()
+        self._capture_lock = threading.RLock()
         self._chunks = []
         self._stream = None
         self._model = None
+        self._model_error = False
         self._generation = 0
         self._job = None
         self._state = {'state': 'idle'}
         self.max_seconds = 120
         self.sample_rate = 16000
 
+    def select_model(self, model):
+        if model not in ('tiny', 'base', 'small'):
+            raise ValueError('Choose tiny, base or small for CPU dictation.')
+        with self._lock:
+            if model == self.model_name:
+                return
+            if self._state['state'] in ('starting', 'recording', 'stopping', 'transcribing', 'installing'):
+                raise ValueError('Finish the current dictation operation before changing its model.')
+            self.model_name = model
+            self._model = None
+            self._model_error = False
+            self._state = {'state': 'idle'}
+
     def status(self):
         with self._lock:
-            return dict(self._state)
+            installed = not self._model_error and (self._model is not None or self.model_factory is not None or any(
+                (self.model_dir / ('models--Systran--faster-whisper-' + self.model_name) / 'snapshots').glob('*/model.bin')))
+            result = dict(self._state)
+            result.update(model=self.model_name, model_installed=installed, device='cpu', compute_type='int8',
+                          setup_required=not installed, setup_action='dictation_install' if not installed else None)
+            if result['state'] in ('idle', 'ready'):
+                result['message'] = ('Ready for local dictation' if installed else
+                    'Install the ' + self.model_name + ' speech model in Settings → Dictation before using the microphone.')
+            elif result['state'] == 'error':
+                result['message'] = result.get('error', 'Dictation failed. Try again.')
+            return result
 
     def install(self, model=None):
         model = model or self.model_name
         if model not in ('tiny', 'base', 'small'):
             raise ValueError('Choose tiny, base or small for CPU dictation.')
         with self._lock:
-            if self._state['state'] in ('recording', 'transcribing', 'installing'):
+            if self._state['state'] in ('starting', 'recording', 'stopping', 'transcribing', 'installing'):
                 raise ValueError('Finish the current dictation operation first.')
+            if model != self.model_name:
+                self._model = None
+            self.model_name = model
+            self._model_error = False
             self._state = {'state': 'installing', 'model': model}
+            self._generation += 1
+            generation = self._generation
         def worker():
             try:
                 from faster_whisper.utils import download_model
                 self.model_dir.mkdir(parents=True, exist_ok=True)
                 download_model(model, cache_dir=str(self.model_dir))
                 with self._lock:
+                    if generation != self._generation:
+                        return
                     self.model_name = model
                     self._model = None
+                    self._model_error = False
                     self._state = {'state': 'ready', 'model': model}
             except Exception as exc:
                 with self._lock:
-                    self._state = {'state': 'error', 'error': str(exc)[:500]}
+                    if generation == self._generation:
+                        self._state = {'state': 'error', 'error': 'Speech model download failed: ' + str(exc)[:400]}
         threading.Thread(target=worker, name='forge-dictation-install', daemon=True).start()
         return self.status()
 
@@ -62,26 +97,35 @@ class Dictation:
                     factory = WhisperModel
                 self._model = factory(self.model_name, device='cpu', compute_type='int8',
                                       cpu_threads=4, download_root=str(self.model_dir), local_files_only=True)
+                self._model_error = False
             except ImportError:
+                self._model_error = True
                 raise ValueError('Install requirements-host.txt to enable local dictation.') from None
             except Exception:
+                self._model_error = True
                 raise ValueError('Dictation model is not installed. Use Settings → Dictation → Install model.') from None
         return self._model
 
     def start(self):
         with self._lock:
-            if self._state['state'] in ('recording', 'transcribing', 'installing'):
+            if self._state['state'] in ('starting', 'recording', 'stopping', 'transcribing', 'installing'):
                 raise ValueError('Dictation is already active.')
             # Fail before recording a user's speech if the local model is absent.
             # This is the first microphone action, never app startup inference.
-            self._load_model()
+            try:
+                self._load_model()
+            except ValueError as exc:
+                self._state = {'state': 'error', 'error': str(exc)}
+                return self.status()
             self._clear_audio()
             self._generation += 1
+            generation = self._generation
+            self._state = {'state': 'starting'}
             count = 0
             def callback(indata, frames, callback_time, status):
                 nonlocal count
                 with self._lock:
-                    if self._state.get('state') != 'recording':
+                    if self._state.get('state') != 'recording' or self._generation != generation:
                         return
                     remaining = self.max_seconds * self.sample_rate - count
                     if remaining > 0:
@@ -90,31 +134,50 @@ class Dictation:
                     self._state['seconds'] = min(count / self.sample_rate, self.max_seconds)
                     if count >= self.max_seconds * self.sample_rate:
                         self._state['limit_reached'] = True
+        # PortAudio may wait for a callback during start/stop. Never hold its
+        # callback-state lock while invoking either capture lifecycle operation.
+        with self._capture_lock:
+            with self._lock:
+                if generation != self._generation:
+                    return self.status()
             try:
                 factory = self.stream_factory
                 if factory is None:
                     import sounddevice
                     factory = sounddevice.RawInputStream
-                self._stream = factory(samplerate=self.sample_rate, channels=1, dtype='int16', callback=callback)
-                self._state = {'state': 'recording', 'seconds': 0, 'max_seconds': self.max_seconds}
-                self._stream.start()
+                stream = factory(samplerate=self.sample_rate, channels=1, dtype='int16', callback=callback)
+                with self._lock:
+                    cancelled = generation != self._generation
+                    if not cancelled:
+                        self._stream = stream
+                        self._state = {'state': 'recording', 'seconds': 0, 'max_seconds': self.max_seconds}
+                if cancelled:
+                    stream.close()
+                    return self.status()
+                stream.start()
                 return self.status()
             except ImportError:
-                self._state = {'state': 'error', 'error': 'Install requirements-host.txt to enable microphone capture.'}
+                with self._lock:
+                    if generation == self._generation:
+                        self._state = {'state': 'error', 'error': 'Install requirements-host.txt to enable microphone capture.'}
                 return self.status()
             except Exception as exc:
                 self._stop_capture()
-                self._clear_audio()
-                self._state = {'state': 'error', 'error': 'Microphone unavailable: ' + str(exc)[:400]}
+                with self._lock:
+                    self._clear_audio()
+                    if generation == self._generation:
+                        self._state = {'state': 'error', 'error': 'Microphone unavailable: ' + str(exc)[:400]}
                 return self.status()
 
     def _stop_capture(self):
-        stream, self._stream = self._stream, None
-        if stream:
-            try:
-                stream.stop()
-            finally:
-                stream.close()
+        with self._capture_lock:
+            with self._lock:
+                stream, self._stream = self._stream, None
+            if stream:
+                try:
+                    stream.stop()
+                finally:
+                    stream.close()
 
     def _clear_audio(self):
         for chunk in self._chunks:
@@ -126,9 +189,12 @@ class Dictation:
         with self._lock:
             if self._state['state'] != 'recording':
                 raise ValueError('Dictation is not recording.')
+            generation = self._generation
             self._state['state'] = 'stopping'
         self._stop_capture()
         with self._lock:
+            if generation != self._generation:
+                return self.status()
             audio = io.BytesIO()
             with wave.open(audio, 'wb') as writer:
                 writer.setnchannels(1)
@@ -138,7 +204,7 @@ class Dictation:
                     writer.writeframesraw(chunk)
             self._clear_audio()
             audio.seek(0)
-        return self._transcribe(audio, language)
+        return self._transcribe(audio, language, generation)
 
     def upload(self, encoded, language=None):
         """Browser MediaRecorder bytes are decoded in memory, never as a file."""
@@ -150,9 +216,13 @@ class Dictation:
             raise ValueError('Invalid audio payload.') from None
         return self._transcribe(audio, language)
 
-    def _transcribe(self, audio, language=None):
+    def _transcribe(self, audio, language=None, expected_generation=None):
         with self._lock:
-            if self._state['state'] in ('transcribing', 'installing', 'recording'):
+            if expected_generation is not None and expected_generation != self._generation:
+                audio.close()
+                return self.status()
+            if (self._state['state'] in ('starting', 'transcribing', 'installing', 'recording') or
+                self._state['state'] == 'stopping' and expected_generation is None):
                 audio.close()
                 raise ValueError('Dictation is already active.')
             self._generation += 1

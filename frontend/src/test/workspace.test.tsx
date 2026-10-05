@@ -55,9 +55,9 @@ describe('Forge workspace', () => {
     expect(screen.getByRole('button', { name: 'Select model' })).toBeTruthy(); await userEvent.type(screen.getByRole('textbox', { name: 'Message Forge' }), 'Hello'); expect((screen.getByRole('button', { name: 'Send message' }) as HTMLButtonElement).disabled).toBe(true);
   });
   it('routes /todo through the shared command registry and opens the durable goal panel', async () => {
-    const { call } = bridge({ command: { navigate: 'goals', message: 'Checklist saved.' }, goals: { goals: [] } }); render(<App />); await ready();
+    const { call } = bridge({ command: { id: 'todo-run', chat_id: 'todo-chat', status: 'running', mode: 'goal' }, poll: { events: [], finished: false, status: 'running' }, goals: { goals: [] } }); render(<App />); await ready();
     await userEvent.type(screen.getByRole('textbox', { name: 'Message Forge' }), '/todo Build the feature'); await userEvent.click(screen.getByRole('button', { name: 'Send message' }));
-    await waitFor(() => expect(call).toHaveBeenCalledWith('command', expect.objectContaining({ text: '/todo Build the feature' }))); expect(await screen.findByText('Durable goals')).toBeTruthy(); expect(screen.getByRole('status').textContent).toContain('Checklist saved.');
+    await waitFor(() => expect(call).toHaveBeenCalledWith('command', expect.objectContaining({ text: '/todo Build the feature' }))); expect(await screen.findByText('Durable goals')).toBeTruthy(); expect(screen.getByRole('button', { name: 'Stop generation' })).toBeTruthy();
   });
   it('rejects backend errors instead of showing a fake success', async () => {
     bridge({ bad_action: { error: 'Permission denied' } }); await expect(api('bad_action')).rejects.toThrow('Permission denied');

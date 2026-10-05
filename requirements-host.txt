@@ -3,4 +3,6 @@ pystray==0.19.5
 pywinauto==0.6.9; sys_platform == 'win32'
 sounddevice==0.5.2
 faster-whisper==1.2.1
+# faster-whisper 1.2.1 still uses av.open(metadata_errors=...). PyAV 19 removed it.
+av==16.1.0
 gguf==0.19.0

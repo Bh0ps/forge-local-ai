@@ -17,7 +17,7 @@ DEFAULTS = dict(context=32768, model='', provider_id='ollama', permission_profil
                 permission_overrides={}, theme='system', tokens=4096, temperature=0.3,
                 thinking=True, web=True, timezone='UTC', performance='balanced', keep_alive='10m',
                 auto_compact=True, auto_delegate=False, startup=False, dictation_model='base',allow_edits=True,
-                computer_tools=False,browser_tools=True,
+                computer_tools=False,browser_tools=True,num_thread=4,
                 goal_limits={'minutes':60, 'tokens':100000, 'rounds':128, 'tools':256})
 TERMINAL = {'completed', 'cancelled', 'failed', 'paused', 'interrupted'}
 
@@ -90,14 +90,14 @@ class ForgeStore(Store):
         with self._connection() as db:
             present=db.execute("SELECT 1 FROM sqlite_master WHERE name='forge_migrations'").fetchone()
             previous=db.execute('SELECT COALESCE(MAX(version),0) FROM forge_migrations').fetchone()[0] if present else 0
-        if 0<previous<3:
-            backup=self.home/'backups'/('pre-schema-3-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f'))
+        if 0<previous<4:
+            backup=self.home/'backups'/('pre-schema-4-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f'))
             backup.mkdir()
             with sqlite3.connect(self.db_path) as src, sqlite3.connect(backup/'forge.sqlite3') as dst: src.backup(dst)
         with self._connection(transaction='write') as db:
             db.execute('CREATE TABLE IF NOT EXISTS forge_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
             version = db.execute('SELECT COALESCE(MAX(version),0) FROM forge_migrations').fetchone()[0]
-            if version > 3: raise ValueError('This workspace requires a newer Forge version.')
+            if version > 4: raise ValueError('This workspace requires a newer Forge version.')
             if version < 1:
                 for statement in (
                     'CREATE TABLE forge_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)',
@@ -118,6 +118,10 @@ class ForgeStore(Store):
             if version < 3:
                 db.execute('ALTER TABLE invocations ADD COLUMN message_id INTEGER REFERENCES messages(id)')
                 db.execute('INSERT INTO forge_migrations VALUES(3,?)',(_now(),))
+            if version < 4:
+                db.execute('ALTER TABLE chats ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1))')
+                db.execute('CREATE INDEX chats_archived_updated ON chats(archived,updated_at)')
+                db.execute('INSERT INTO forge_migrations VALUES(4,?)',(_now(),))
         if not self.entities('agents'):
             for role, instruction in (
                 ('Researcher','Research using primary sources. Cite sources and explain uncertainty. Do not edit the project.'),
@@ -125,6 +129,24 @@ class ForgeStore(Store):
                 ('Reviewer','Inspect changes and identify actionable correctness problems. Do not modify files.')):
                 self.save_entity('agents',dict(id=role.lower(),name=role,role=role.lower(),instructions=instruction,
                     model='',context=32768,tools=[],skills=[],enabled=True,tokens=25000,rounds=32))
+
+    @staticmethod
+    def _chat(connection,chat_id):
+        chat=Store._chat(connection,chat_id)
+        chat['archived']=bool(chat.get('archived',False))
+        return chat
+
+    def list_chats(self,project_id=None,*,archived=False):
+        if archived is not None and type(archived) is not bool:
+            raise ValueError('Archived filter must be true, false or null.')
+        with self._connection() as db:
+            where=[]; parameters=[]
+            if project_id is not None:
+                self._project(db,project_id); where.append('project_id=?'); parameters.append(project_id)
+            if archived is not None:
+                where.append('archived=?'); parameters.append(int(archived))
+            query='SELECT * FROM chats'+(' WHERE '+' AND '.join(where) if where else '')+' ORDER BY updated_at DESC,id'
+            return [{**dict(row),'archived':bool(row['archived'])} for row in db.execute(query,parameters)]
 
     def store_images(self,images):
         if not isinstance(images,list) or len(images)>1: raise ValueError('Attach one image per turn.')
@@ -179,6 +201,10 @@ class ForgeStore(Store):
     def get_settings(self):
         result = json.loads(encode(DEFAULTS))
         try:
+            import psutil
+            result['num_thread']=min(64,psutil.cpu_count(logical=False) or 4)
+        except ImportError: pass
+        try:
             from tzlocal import get_localzone_name
             result['timezone']=get_localzone_name()
         except (ImportError,ValueError,KeyError): pass
@@ -194,6 +220,7 @@ class ForgeStore(Store):
             raise ValueError('Unknown permission profile.')
         if 'timezone' in settings: ZoneInfo(settings['timezone'])
         if 'tokens' in settings and settings['tokens'] not in (1024,2048,4096,8192): raise ValueError('Invalid response length.')
+        if 'num_thread' in settings and (type(settings['num_thread']) is not int or not 1<=settings['num_thread']<=64): raise ValueError('CPU threads must be between 1 and 64.')
         if 'temperature' in settings and (type(settings['temperature']) not in (float,int) or not 0<=settings['temperature']<=1): raise ValueError('Invalid temperature.')
         if 'goal_limits' in settings: settings={**settings,'goal_limits':validate_goal_limits(settings['goal_limits'])}
         if 'permission_overrides' in settings:

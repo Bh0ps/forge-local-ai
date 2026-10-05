@@ -21,7 +21,7 @@ from project_tools import ProjectTools
 from storage import _now
 
 COMMANDS=[dict(name=name,description=description) for name,description in (
- ('plan','Inspect and prepare a plan; Build starts implementation'),('todo','Create or open an ordered Markdown checklist'),
+ ('plan','Inspect and prepare a plan; Build starts implementation'),('todo','Run the saved plan as a durable Markdown checklist'),
  ('goal','Work through a saved checklist'),('pause','Pause the active run'),('resume','Continue a saved run'),
  ('status','Show current progress'),('compact','Save a continuity checkpoint'),('new','Create a new chat'),
  ('project','Select or create a project'),('model','Select a model'),('agents','Configure or launch an agent'),
@@ -39,6 +39,7 @@ class ForgeService:
             self.vault=None; self.integrations=None
         self.providers=ProviderPool(self.core,self.store,self.vault)
         self.jobs=RunManager(self); self.stop_event=threading.Event(); self.background=None; self.runtime=None
+        self.performance_manager=None; self.model_manager=None; self.plan_lock=threading.RLock(); self.manager_lock=threading.RLock()
         self.worktree_lock=threading.RLock()
         self.schedule_lock=threading.RLock()
 
@@ -52,6 +53,8 @@ class ForgeService:
         for thread in threads: thread.join(timeout=2)
         if self.integrations: self.integrations.shutdown()
         if self.runtime and hasattr(self.runtime,'shutdown'): self.runtime.shutdown()
+        if self.performance_manager: self.performance_manager.shutdown()
+        if self.model_manager: self.model_manager.shutdown()
         if self.host_dictation and hasattr(self.host_dictation,'shutdown'): self.host_dictation.shutdown()
         if self.computer_broker and hasattr(self.computer_broker,'shutdown'): self.computer_broker.shutdown()
         if self.background: self.background.join(timeout=2)
@@ -60,10 +63,14 @@ class ForgeService:
         for run in self.store.runs():
             if run['status'] not in TERMINAL: self.jobs.cancel(run['id'],pause=True)
         if self.computer_broker and hasattr(self.computer_broker,'stop'): self.computer_broker.stop()
+        if self.integrations and hasattr(self.integrations,'stop'): self.integrations.stop()
+        if self.performance_manager:
+            with self.performance_manager.lock:
+                for job in self.performance_manager.jobs.values(): job['cancel'].set()
         return {'ok':True}
 
     def bootstrap(self):
-        return dict(version='4.0.0',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
+        return dict(version='4.1.0',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
                     chats=self.store.list_chats(),runs=self.store.runs(limit=200),goals=self.store.entities('goals'),
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -92,7 +99,13 @@ class ForgeService:
         if action=='command': return self.command(data)
         if action=='projects': return {'projects':self.store.list_projects()}
         if action=='create_project': return self.create_project(data)
-        if action=='chats': return {'chats':self.store.list_chats(data.get('project_id'))}
+        if action=='chats': return {'chats':self.store.list_chats(data.get('project_id'),archived=None if data.get('archived')=='all' else data.get('archived',False))}
+        if action in ('chat_move','chat_archive','chat_delete'):
+            from forge_chats import dispatch_chat
+            return dispatch_chat(self,action,data)
+        if action=='project_delete':
+            from forge_chats import dispatch_chat
+            return dispatch_chat(self,action,data)
         if action=='get_chat': return self.store.get_chat(data['id'],limit=data.get('limit',200))
         if action=='attachment':
             image=self.store.hydrate_images([data['id']])[0]
@@ -112,6 +125,9 @@ class ForgeService:
         if action=='resume': return self.jobs.resume(data['id'],data)
         if action=='approve': return self.jobs.approve(data.get('job_id') or data.get('run_id') or data['id'],data['approval_id'],data['allowed'])
         if action=='compact': return self.jobs.compact(data['id'])
+        if action=='plans': return {'plans':self.store.entities('plans')}
+        if action=='plan_get': return self.store.entity('plans',data['id'])
+        if action=='plan_build': return self.plan_build(data)
         if action=='unknown_actions': return {'actions':self.store.unknown_actions(data['run_id'])}
         if action=='resolve_action': return self.resolve_action(data)
         if action=='goals': return {'goals':self.store.entities('goals')}
@@ -146,7 +162,18 @@ class ForgeService:
             if action=='show': return provider.capabilities(data.get('model') or data['name'])
             if not hasattr(provider,'core'): raise ValueError('Manage this endpoint model through its runtime. Ollama pull/delete are available on Ollama providers.')
             return provider.core.dispatch(action,{**data,'model':data.get('model') or data.get('name')})
-        if action=='performance': return self.performance()
+        if action.startswith('performance'):
+            with self.manager_lock:
+                if self.performance_manager is None:
+                    from forge_performance import PerformanceManager
+                    self.performance_manager=PerformanceManager(self)
+            return self.performance_manager.dispatch(action,data)
+        if action.startswith('hf_'):
+            with self.manager_lock:
+                if self.model_manager is None:
+                    from forge_models import ModelManager
+                    self.model_manager=ModelManager(self.store,self.providers,self.vault)
+            return self.model_manager.dispatch(action,data)
         if action.startswith('runtime_'):
             if self.runtime is None:
                 from forge_runtime import RuntimeManager
@@ -206,9 +233,62 @@ class ForgeService:
             tasks=[dict(text=line,status='pending',evidence=[]) for line in lines]
         return self.store.save_goal(dict(title=data.get('title',text.splitlines()[0][:120]),request=text,project_id=data.get('project_id'),chat_id=data.get('chat_id'),
                                          tasks=tasks,status='ready',checkpoint='Checklist created. Execution has not started.',next_action='Review tasks, then start the goal.'))
+
+    def save_plan(self,run,markdown):
+        tasks=[]
+        for line in markdown.splitlines():
+            match=re.match(r'^\s*(?:\d+[.)]|[-*]\s+\[[ xX]\])\s*(?:\[[ xX]\]\s*)?(.+)',line)
+            if match: tasks.append({'text':match[1].strip(),'status':'pending','evidence':[]})
+        # The complete model plan is preserved even if it did not use checklist syntax.
+        if not tasks: tasks=[{'text':run['request'],'status':'pending','evidence':[]}]
+        path=self.store.home/'state'/'plans'/run['id']/'PLAN.md'
+        atomic_text(path,markdown)
+        plan=self.store.save_entity('plans',{'id':run['id'],'run_id':run['id'],'chat_id':run['chat_id'],
+            'project_id':run.get('project_id'),'request':run['request'],'status':'ready','markdown':markdown,
+            'tasks':tasks,'path':str(path)})
+        self.store.event(run['id'],'plan',plan_id=plan['id'],text='Plan saved. Review it, then select Build.')
+        return plan
+
+    def plan_build(self,data):
+        with self.plan_lock, self.jobs.lock:
+            identifier=data.get('run_id') or data.get('id')
+            try: plan=self.store.entity('plans',identifier)
+            except ValueError:
+                older=self.store.run(identifier)
+                if older.get('mode')!='plan' or older['status']!='completed': raise ValueError('Finish the plan before running /todo or selecting Build.') from None
+                # Completed plans from the previous installation have messages
+                # but no plan entity. Recover only the final visible plan from
+                # that run's message interval, preserving later chat turns.
+                next_request=min([r.get('request_message_id',2**63-1) for r in self.store.runs()
+                    if r['chat_id']==older['chat_id'] and r.get('request_message_id',0)>older.get('request_message_id',0)] or [2**63-1])
+                with self.store._connection() as db:
+                    rows=db.execute("SELECT content,metadata FROM messages WHERE chat_id=? AND role='assistant' AND id>? AND id<? ORDER BY id DESC",
+                        (older['chat_id'],older.get('request_message_id',0),next_request)).fetchall()
+                answer=next((row['content'] for row in rows if row['content'].strip() and not json.loads(row['metadata']).get('tool_calls') and json.loads(row['metadata']).get('status','complete')=='complete'),None)
+                if not answer: raise ValueError('No visible saved plan was found. Resume planning or create a new /plan.')
+                plan=self.save_plan(older,answer)
+            if plan.get('project_missing'): raise ValueError('Reconnect the original project or create a new plan before building.')
+            if not plan.get('chat_id') or not plan.get('run_id'): raise ValueError('The original chat was deleted. Open the saved plan and start a new goal in its project.')
+            if self.store.get_chat(plan['chat_id'],limit=1).get('project_id')!=plan.get('project_id'): raise ValueError('This chat moved to another project. Create a new plan in the selected project.')
+            run=self.store.run(plan['run_id'])
+            if plan.get('goal_id'):
+                existing=next((r for r in self.store.runs() if r.get('goal_id')==plan['goal_id']),None)
+                if existing: return {'id':existing['id'],'chat_id':existing['chat_id'],'status':existing['status'],'goal_id':plan['goal_id']}
+            if run['mode']!='plan' or run['status']!='completed' or plan['status']!='ready': raise ValueError('Finish and review a saved plan before selecting Build.')
+            if self.store.get_chat(plan['chat_id'],limit=1).get('archived'): raise ValueError('Restore this chat before building the plan.')
+            if not plan.get('goal_id'):
+                goal=self.goal_create({'text':plan['request'],'tasks':plan['tasks'],'project_id':plan.get('project_id'),'chat_id':plan['chat_id']})
+                plan=self.store.save_entity('plans',{**plan,'goal_id':goal['id']})
+            result=self.goal_resume({'id':plan['goal_id'],'instructions':'Implement the user-reviewed plan:\n'+plan['markdown']})
+            return {**result,'goal_id':plan['goal_id']}
     def goal_resume(self,data):
+        with self.jobs.lock: return self._goal_resume(data)
+    def _goal_resume(self,data):
         goal=self.store.goal(data['id'])
+        if goal.get('project_missing'): raise ValueError('Reconnect the original project or export this checklist into a new goal before continuing.')
         if goal['external_edits']: raise ValueError('Reconcile the edited checklist first.')
+        if goal.get('chat_id') and self.store.get_chat(goal['chat_id'],limit=1).get('project_id')!=goal.get('project_id'):
+            raise ValueError('The chat moved to another project. Export this checklist into the intended project and create a new goal.')
         previous=next((r for r in self.store.runs() if r.get('goal_id')==goal['id']),None)
         if previous and previous['status'] in ('paused','interrupted','failed'): return self.jobs.resume(previous['id'],data)
         if previous and previous['status'] not in TERMINAL: return {'id':previous['id'],'chat_id':previous['chat_id'],'status':previous['status']}
@@ -230,14 +310,20 @@ class ForgeService:
         return ProjectTools(project['path'],self.store.home/'backups').execute('write_file',{'path':data.get('path','FORGE_TODO.md'),'content':goal['markdown']})
 
     def command(self,data):
-        text=data.get('text','').strip(); head,_,argument=text.partition(' '); name=head.lstrip('/').lower()
+        text=data.get('text','').strip(); parts=text.split(maxsplit=1)
+        head=parts[0] if parts else ''; argument=parts[1] if len(parts)>1 else ''; name=head.lstrip('/').lower()
+        if name=='to-do': name='todo'
         if name not in {c['name'] for c in COMMANDS}: raise ValueError('Unknown command. Use /help.')
         arguments={**data,'text':argument.strip()}
         if name=='help': return {'commands':COMMANDS,'message':'Choose a slash command in the composer.'}
         if name=='new': return {'chat':self.store.create_chat(data.get('project_id'),model=data.get('model','')),'navigate':'chat'}
         if name=='todo':
-            if not argument: return {'navigate':'goals','goals':self.store.entities('goals')}
-            goal=self.goal_create(arguments); return {'goal':goal,'navigate':'goals','message':'Checklist saved. Execution has not started.'}
+            if not argument:
+                latest=next((r for r in self.store.runs() if r['chat_id']==data.get('chat_id')),None)
+                if latest and latest.get('mode')=='plan': return self.plan_build({'run_id':latest['id']})
+                return {'navigate':'goals','goals':self.store.entities('goals'),'message':'Use /plan first, or /todo followed by an ordered checklist to start.'}
+            goal=self.goal_create(arguments); result=self.goal_resume({**data,'id':goal['id']})
+            return {**result,'goal_id':goal['id']}
         if name=='goal':
             if not argument: return {'navigate':'goals'}
             goal=self.goal_create(arguments); return self.goal_resume({**data,'id':goal['id']})
@@ -307,11 +393,7 @@ class ForgeService:
         profile['base_url']=profile['url']; profile['type']=profile['kind']
         return self.store.save_entity('providers',profile)
     def performance(self):
-        telemetry=memory_telemetry(); notes=['Explicit model and context selections are never changed automatically.',
-            'Flash Attention and cache flags affect Forge-managed processes only. Validate images and tools before promotion.']
-        return {'telemetry':telemetry,'profiles':ENGINE_PROFILES,'recommendations':[
-            {'id':'balanced','label':'Balanced','context':32768,'requires_acceptance':True,
-             'description':'Choose a tool/vision model that leaves GPU memory for KV cache and image processing.'}], 'notes':notes}
+        return self.dispatch('performance')
 
     @staticmethod
     def _git(folder,args,check=True):
@@ -369,7 +451,7 @@ class ForgeService:
         addresses=socket.getaddrinfo(parsed.hostname,parsed.port or (443 if parsed.scheme=='https' else 80))
         if any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses): raise ValueError('Research URLs must resolve to public addresses.')
         with httpx.Client(timeout=15,follow_redirects=False) as client:
-            with client.stream('GET',url,headers={'User-Agent':'Forge/4.0'}) as response:
+            with client.stream('GET',url,headers={'User-Agent':'Forge/4.1'}) as response:
                 response.raise_for_status()
                 if response.is_redirect: raise ValueError('Open the final public URL after the redirect.')
                 content=bytearray()
@@ -414,6 +496,7 @@ class ForgeService:
     def schedule_run(self,schedule):
         with self.schedule_lock: return self._schedule_run(schedule)
     def _schedule_run(self,schedule):
+        if schedule.get('project_missing'): raise ValueError('Reconnect the original project and review this schedule before running it.')
         existing=next((r for r in self.store.runs() if r.get('schedule_id')==schedule['id'] and r['status'] not in TERMINAL),None)
         if existing: return {'id':existing['id'],'chat_id':existing['chat_id'],'queued':False,'message':'This occurrence is already active.'}
         settings=self.store.get_settings(); profile=schedule.get('permission_profile','always_ask')

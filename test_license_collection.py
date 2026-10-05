@@ -34,3 +34,16 @@ def test_notice_collection_excludes_code_and_private_bytecode(tmp_path, monkeypa
     assert 'Upstream author <author@example.org>' in contents
     assert 'Permission notice' in contents
     assert 'private installation filename' not in contents
+
+
+def test_notice_cache_pruning_preserves_runtime_bytecode_and_license_text(tmp_path):
+    from scripts.prune_license_cache import prune
+    notice=tmp_path/'app'/'_internal'/'dependency.dist-info'/'licenses'
+    cache=notice/'__pycache__';cache.mkdir(parents=True)
+    (cache/'AUTHORS.cpython-312.pyc').write_bytes(b'generated build cache')
+    (notice/'LICENSE').write_text('Dependency license',encoding='utf-8')
+    runtime=tmp_path/'app'/'_internal'/'runtime'/'__pycache__';runtime.mkdir(parents=True)
+    (runtime/'module.pyc').write_bytes(b'needed runtime')
+    assert prune(tmp_path/'app')==1
+    assert not cache.exists() and (notice/'LICENSE').read_text()=='Dependency license'
+    assert (runtime/'module.pyc').read_bytes()==b'needed runtime'

@@ -343,4 +343,175 @@ def test_cancelled_dictation_never_delivers_late_transcript(tmp_path):
     dictation.cancel()
     proceed.set()
     time.sleep(.05)
-    assert dictation.status() == {'state': 'cancelled'}
+    status = dictation.status()
+    assert status['state'] == 'cancelled' and 'text' not in status and 'id' not in status
+
+
+def test_dictation_reports_missing_setup_before_recording(tmp_path):
+    capture = []
+    def missing_model(*args, **kwargs):
+        raise FileNotFoundError('Missing cached speech weights')
+    dictation = Dictation(tmp_path, model_factory=missing_model, stream_factory=lambda **kwargs: capture.append(kwargs))
+    result = dictation.start()
+    assert result['state'] == 'error'
+    assert 'Settings' in result['error'] and result['setup_action'] == 'dictation_install'
+    assert not capture and not dictation._chunks
+
+
+def test_dictation_cached_model_status_does_not_load_or_record(tmp_path):
+    directory = tmp_path / 'runtimes/whisper/models--Systran--faster-whisper-tiny/snapshots/local'
+    directory.mkdir(parents=True)
+    (directory / 'model.bin').write_bytes(b'fixture weights')
+    dictation = Dictation(tmp_path, model='tiny')
+    status = dictation.status()
+    assert status['model_installed'] and not status['setup_required'] and status['model'] == 'tiny'
+    assert status['device'] == 'cpu' and status['compute_type'] == 'int8'
+    assert dictation._model is None and dictation._stream is None
+
+
+def test_dictation_real_codec_decodes_wave_in_memory():
+    # Decode through faster-whisper itself: fake model tests miss PyAV API
+    # incompatibilities, which otherwise fail every real microphone transcript.
+    from faster_whisper.audio import decode_audio
+    audio = io.BytesIO()
+    with __import__('wave').open(audio, 'wb') as writer:
+        writer.setnchannels(1)
+        writer.setsampwidth(2)
+        writer.setframerate(16000)
+        writer.writeframes(b'\0\0' * 1600)
+    audio.seek(0)
+    decoded = decode_audio(audio)
+    assert len(decoded) == 1600 and decoded.dtype.name == 'float32'
+    assert not decoded.any() and not audio.closed
+    audio.close()
+
+
+def test_dictation_record_stop_transcribes_and_discards_pcm(tmp_path):
+    observed = {}
+    def model_factory(*args, **options):
+        class Model:
+            def transcribe(self, audio, **settings):
+                with __import__('wave').open(audio, 'rb') as reader:
+                    observed['rate'] = reader.getframerate()
+                    observed['pcm'] = reader.readframes(reader.getnframes())
+                return iter([SimpleNamespace(text=' Fixture transcript')]), SimpleNamespace(language='en')
+        return Model()
+    class Stream:
+        def __init__(self, **settings): self.callback = settings['callback']; self.closed = False
+        def start(self): self.callback(b'\1\0' * 1600, 1600, None, None)
+        def stop(self): observed['stopped'] = True
+        def close(self): self.closed = True; observed['closed'] = True
+    dictation = Dictation(tmp_path, model_factory=model_factory, stream_factory=Stream)
+    assert dictation.start()['state'] == 'recording'
+    chunk = dictation._chunks[0]
+    dictation.stop()
+    assert wait_dictation(dictation)['text'] == 'Fixture transcript'
+    assert observed['rate'] == 16000 and observed['pcm'] == b'\1\0' * 1600
+    assert observed['stopped'] and observed['closed'] and not any(chunk)
+    assert not dictation._chunks and not list(tmp_path.rglob('*'))
+
+
+def test_dictation_selection_resets_cached_model_and_preserves_error(tmp_path):
+    dictation = Dictation(tmp_path)
+    dictation._model = object()
+    dictation.select_model('tiny')
+    assert dictation.model_name == 'tiny' and dictation._model is None
+    dictation._state = {'state': 'error', 'error': 'Microphone permission denied'}
+    assert dictation.status()['message'] == 'Microphone permission denied'
+    dictation._state = {'state': 'recording'}
+    with pytest.raises(ValueError, match='Finish'):
+        dictation.select_model('small')
+    assert dictation.model_name == 'tiny'
+
+
+def test_changed_dictation_preference_never_blocks_active_stop_or_cancel(tmp_path):
+    from desktop import Bridge
+    settings = {'dictation_model': 'base'}
+    class Model:
+        def transcribe(self, audio, **kwargs):
+            return iter([SimpleNamespace(text=' Active model transcript')]), SimpleNamespace(language='en')
+    class Stream:
+        def __init__(self, **kwargs): self.callback = kwargs['callback']
+        def start(self): self.callback(b'\0\0' * 1600, 1600, None, None)
+        def stop(self): pass
+        def close(self): pass
+    dictation = Dictation(tmp_path, model_factory=lambda *args, **kwargs: Model(), stream_factory=Stream)
+    service = SimpleNamespace(host_dictation=dictation, store=SimpleNamespace(get_settings=lambda: settings))
+    bridge = Bridge(service)
+    bridge._ensure_service = lambda: service
+    assert bridge.call('dictation_start')['state'] == 'recording'
+    settings['dictation_model'] = 'tiny'
+    assert bridge.call('dictation_status')['state'] == 'recording'
+    assert bridge.call('dictation_stop').get('state') in ('transcribing', 'done')
+    assert wait_dictation(dictation)['text'] == 'Active model transcript'
+    assert dictation.model_name == 'base'
+    assert bridge.call('dictation_status')['text'] == 'Active model transcript'
+    assert bridge.call('dictation_start')['model'] == 'tiny'
+    settings['dictation_model'] = 'small'
+    assert bridge.call('dictation_cancel')['state'] == 'cancelled'
+
+
+def test_capture_start_callback_and_failure_cleanup_do_not_deadlock(tmp_path):
+    completed = threading.Event()
+    capture = {}
+    class Stream:
+        def __init__(self, **kwargs): self.callback = kwargs['callback']
+        def start(self):
+            def invoke():
+                self.callback(b'\1\0' * 160, 160, None, None)
+                completed.set()
+            self.thread = threading.Thread(target=invoke)
+            self.thread.start()
+            if not completed.wait(1):
+                raise AssertionError('Callback state lock blocked during capture start')
+            raise RuntimeError('Disposable microphone start failure')
+        def stop(self): self.thread.join(1); capture['stopped'] = True
+        def close(self): capture['closed'] = True
+    dictation = Dictation(tmp_path, model_factory=lambda *args, **kwargs: object(), stream_factory=Stream)
+    result = dictation.start()
+    assert completed.is_set() and result['state'] == 'error'
+    assert 'Disposable microphone start failure' in result['error']
+    assert capture == {'stopped': True, 'closed': True} and not dictation._chunks
+
+
+def test_cancel_during_capture_creation_prevents_late_microphone_start(tmp_path):
+    entered, proceed = threading.Event(), threading.Event()
+    seen = []
+    class Stream:
+        def __init__(self, **kwargs): entered.set(); proceed.wait(2)
+        def start(self): seen.append('start')
+        def stop(self): seen.append('stop')
+        def close(self): seen.append('close')
+    dictation = Dictation(tmp_path, model_factory=lambda *args, **kwargs: object(), stream_factory=Stream)
+    worker = threading.Thread(target=dictation.start)
+    worker.start()
+    assert entered.wait(1)
+    cancel = threading.Thread(target=dictation.cancel)
+    cancel.start()
+    deadline = time.monotonic() + 1
+    while dictation.status()['state'] != 'cancelled' and time.monotonic() < deadline: time.sleep(.005)
+    proceed.set()
+    worker.join(2); cancel.join(2)
+    assert not worker.is_alive() and not cancel.is_alive()
+    assert dictation.status()['state'] == 'cancelled' and seen == ['close']
+    assert dictation._stream is None and not dictation._chunks
+
+
+def test_cancel_between_capture_stop_and_transcription_cannot_restart_job(tmp_path):
+    observed = []
+    class Model:
+        def transcribe(self, *args, **kwargs): observed.append('transcribed'); return [], None
+    class Stream:
+        def __init__(self, **kwargs): self.callback = kwargs['callback']
+        def start(self): self.callback(b'\0\0' * 160, 160, None, None)
+        def stop(self): pass
+        def close(self): pass
+    dictation = Dictation(tmp_path, model_factory=lambda *args, **kwargs: Model(), stream_factory=Stream)
+    transcribe = dictation._transcribe
+    def cancel_then_transcribe(audio, language=None, expected_generation=None):
+        dictation.cancel()
+        return transcribe(audio, language, expected_generation)
+    dictation._transcribe = cancel_then_transcribe
+    assert dictation.start()['state'] == 'recording'
+    assert dictation.stop()['state'] == 'cancelled'
+    assert observed == [] and not dictation._chunks

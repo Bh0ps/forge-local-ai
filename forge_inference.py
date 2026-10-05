@@ -50,7 +50,7 @@ class OllamaProvider:
     def estimate_tokens(self,messages,tools): return estimated_prompt_tokens(messages,tools,AGENT_SYSTEM_PROMPT)
     def generate(self,data,cancel):
         payload=Core._agent_payload(data)
-        payload['messages'][0]['content']=AGENT_SYSTEM_PROMPT.replace('Sidekick','Forge')
+        payload['messages'][0]['content']=payload['messages'][0]['content'].replace('You are Sidekick','You are Forge',1)
         keep_alive=data.get('keep_alive','10m')
         payload['keep_alive']=('10m' if keep_alive else 0) if type(keep_alive) is bool else keep_alive
         if hasattr(self.core,'_stream_payload'):
@@ -104,6 +104,9 @@ class CompatibleProvider:
                     if raw=='[DONE]': completed=True; break
                     packet=json.loads(raw); usage=packet.get('usage')
                     if usage: final['usage']=usage
+                    timings=packet.get('timings') or {}
+                    if timings.get('predicted_ms') is not None: final['eval_duration']=int(timings['predicted_ms']*1e6)
+                    if timings.get('predicted_n') is not None and not usage: final.setdefault('eval_count',timings['predicted_n'])
                     for choice in packet.get('choices',[]):
                         delta=choice.get('delta',{})
                         yield {'message':{'content':delta.get('content') or '',
@@ -146,8 +149,8 @@ class ProviderPool:
             duration=max(0,time.monotonic()-start); usage=final.get('usage') or {}
             prompt=final.get('prompt_eval_count',usage.get('prompt_tokens'))
             output=final.get('eval_count',usage.get('completion_tokens'))
-            cached=final.get('prompt_eval_cached_count',usage.get('prompt_tokens_details',{}).get('cached_tokens',0))
-            decode=final.get('eval_duration',0)/1e9
+            cached=final.get('prompt_eval_cached_count',(usage.get('prompt_tokens_details') or {}).get('cached_tokens',0))
+            decode=(final.get('eval_duration') or 0)/1e9
             estimated=prompt is None or output is None
             self.store.record_usage(dict(id=identifier,run_id=run.get('id'),project_id=run.get('project_id'),
                 provider=provider_id,model=data['model'],purpose=purpose,

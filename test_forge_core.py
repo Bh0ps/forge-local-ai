@@ -112,8 +112,8 @@ def test_unknown_outcome_requires_inspection_and_never_reexecutes(tmp_path):
     svc.shutdown()
 
 def test_todo_external_edits_are_not_overwritten_and_import_reconciles(tmp_path):
-    svc=service(tmp_path); result=svc.command({'text':'/todo First step\nSecond step'})
-    goal=result['goal']; assert len(goal['tasks'])==2 and svc.store.runs()==[]
+    svc=service(tmp_path); goal=svc.goal_create({'text':'First step\nSecond step'})
+    assert len(goal['tasks'])==2 and svc.store.runs()==[]
     Path(goal['path']).write_text('# Edited\n1. [x] First step\n2. [ ] Changed next step\n',encoding='utf-8')
     with pytest.raises(ValueError,match='externally'): svc.store.save_goal({**goal,'checkpoint':'New'})
     goal=svc.goal_reconcile({'id':goal['id'],'mode':'import'})
