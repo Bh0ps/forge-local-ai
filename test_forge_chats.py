@@ -41,11 +41,14 @@ def test_schema4_backup_is_consistent_and_keeps_chat_project_identity(tmp_path):
     with sqlite3.connect(store.db_path) as db:
         db.execute('DROP INDEX chats_archived_updated')
         db.execute('ALTER TABLE chats DROP COLUMN archived')
-        db.execute('DELETE FROM forge_migrations WHERE version=4')
+        db.execute('DELETE FROM forge_migrations WHERE version>=4')
+        for table in ('memory_vectors','memory_fts','memory_items','memory_skills','channel_inbound','channel_routes','channel_checkpoints','channel_outbox','channel_callbacks','channel_notifications','channel_replays','channel_event_journal','request_keys'):
+            db.execute('DROP TABLE '+table)
+        db.execute("DELETE FROM forge_settings WHERE key='setup_origin'")
     upgraded=ForgeStore(home)
     assert upgraded.get_chat(chat['id'])['archived'] is False
     assert upgraded.get_project(proj['id'])['path']==str(folder)
-    backups=list((home/'backups').glob('pre-schema-4-*/forge.sqlite3'))
+    backups=list((home/'backups').glob('pre-schema-5-*/forge.sqlite3'))
     assert len(backups)==1
     with sqlite3.connect(backups[0]) as snapshot:
         assert snapshot.execute('SELECT MAX(version) FROM forge_migrations').fetchone()[0]==3
@@ -53,7 +56,7 @@ def test_schema4_backup_is_consistent_and_keeps_chat_project_identity(tmp_path):
         assert snapshot.execute('SELECT content FROM messages').fetchone()[0]=='Synthetic old history'
         assert 'archived' not in [row[1] for row in snapshot.execute('PRAGMA table_info(chats)')]
     ForgeStore(home)
-    assert len(list((home/'backups').glob('pre-schema-4-*/forge.sqlite3')))==1
+    assert len(list((home/'backups').glob('pre-schema-5-*/forge.sqlite3')))==1
 
 
 def test_archive_restore_lists_boolean_state_and_prevents_running_or_resuming(service):

@@ -21,7 +21,7 @@ export function WorkspaceSidebar(props: SidebarProps) {
   const visible = chats.filter(chat => !chat.archived && matches(chat));
   const archived = chats.filter(chat => chat.archived && matches(chat));
   const row = (chat: Chat, recent = false) => <ChatRow key={chat.id} chat={chat} projects={projects} selected={chatId === chat.id && page === 'chat'} active={activeChatIds.includes(chat.id)} recent={recent} onSelect={props.onChat} onChanged={props.onChatChanged} />;
-  return <aside className="sidebar"><div className="sidebar-brand"><img src="./forge.svg" alt="" /><span>Forge</span><span className="version">4.1</span><IconButton label="Collapse sidebar" onClick={props.onCollapse}><PanelLeftClose size={17} /></IconButton></div>
+  return <aside className="sidebar"><div className="sidebar-brand"><img src="./forge.svg" alt="" /><span>Forge</span><span className="version">4.2</span><IconButton label="Collapse sidebar" onClick={props.onCollapse}><PanelLeftClose size={17} /></IconButton></div>
     <button className="new-chat" onClick={props.onNew}><Plus size={17} />New chat<span>Ctrl N</span></button>
     <div className="sidebar-search"><Search size={14} /><input aria-label="Search chats" placeholder="Search chats" value={search} onChange={event => props.onSearch(event.target.value)} /></div>
     <nav aria-label="Workspace navigation">{props.navItems.map(item => <button className={`nav-item ${page === item.page ? 'active' : ''}`} key={item.page} onClick={() => props.onPage(item.page)}><item.icon size={16} />{item.label}{item.page === 'scheduled' && activeChatIds.length > 0 && <span className="nav-count">{activeChatIds.length}</span>}</button>)}</nav>

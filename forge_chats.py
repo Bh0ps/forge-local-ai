@@ -93,11 +93,24 @@ def _delete(service,chat_id):
         with service.store._connection(transaction='write') as db:
             service.store._chat(db,chat_id)
             identifiers=[row[0] for row in db.execute('SELECT id FROM runs WHERE chat_id=?',(chat_id,))]
+            # A deleted route may receive a later, freshly authenticated request,
+            # but accepted inbound identities must remain deduplicated forever.
+            for route in db.execute('SELECT channel_id,recipient FROM channel_routes WHERE chat_id=?',(chat_id,)).fetchall():
+                db.execute("UPDATE channel_outbox SET status='cancelled',last_error='Source chat was deleted.',updated_at=? WHERE channel_id=? AND recipient=? AND status IN ('pending','retry','failed','outcome_unknown')",
+                    (_now(),route['channel_id'],route['recipient']))
+                db.execute("UPDATE channel_outbox SET payload='{}' WHERE channel_id=? AND recipient=? AND status!='sending'",
+                    (route['channel_id'],route['recipient']))
+            db.execute('DELETE FROM channel_routes WHERE chat_id=?',(chat_id,))
             # Usage is an independent historical ledger; keep totals and filters.
             # No inference is repeated because a schedule occurrence loses its run.
             for identifier in identifiers:
                 db.execute('UPDATE usage SET run_id=NULL WHERE run_id=?',(identifier,))
                 db.execute('UPDATE occurrences SET run_id=NULL WHERE run_id=?',(identifier,))
+                db.execute('DELETE FROM request_keys WHERE run_id=?',(identifier,))
+                db.execute('UPDATE channel_inbound SET run_id=NULL WHERE run_id=?',(identifier,))
+                db.execute('DELETE FROM channel_callbacks WHERE run_id=?',(identifier,))
+                db.execute('DELETE FROM channel_notifications WHERE run_id=?',(identifier,))
+                db.execute('DELETE FROM channel_event_journal WHERE run_id=?',(identifier,))
                 db.execute('DELETE FROM approvals WHERE run_id=?',(identifier,))
                 db.execute('DELETE FROM run_events WHERE run_id=?',(identifier,))
                 db.execute('DELETE FROM invocations WHERE run_id=?',(identifier,))
@@ -155,10 +168,13 @@ def _project_delete(service,project_id):
                 for field in ('project_id','parent_project_id'):
                     if data.get(field)==project_id:
                         data['detached_'+field]=project_id;data[field]=None;changed=True
-                        if row['kind'] in ('goals','plans','schedules'):
+                        if row['kind'] in ('goals','plans','schedules','channels'):
                             data['project_missing']=True
                             data['blockers']='Original project registration was removed. Reconnect the original folder or export this artifact before continuing.'
-                            if row['kind']=='schedules': data['enabled']=False
+                            if row['kind'] in ('schedules','channels'): data['enabled']=False
+                            if row['kind']=='channels':
+                                db.execute("UPDATE channel_outbox SET status='cancelled',last_error='Original project registration was removed.',updated_at=? WHERE channel_id=? AND status IN ('pending','retry','failed','outcome_unknown')",
+                                    (_now(),row['id']))
                 if project_id in (data.get('project_ids') or []):
                     data['project_ids']=[value for value in data['project_ids'] if value!=project_id];changed=True
                 if changed:

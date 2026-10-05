@@ -1,0 +1,66 @@
+name: Windows test and unsigned preview
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.14'
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.14.0'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install exact hashed Python dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements-build.lock
+          python -m pip install --require-hashes --no-build-isolation -r requirements-ci.lock
+          python -m pip check
+      - name: Test Python
+        run: python -m pytest -q
+      - name: Test and compile frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm test
+          npm run build
+      - name: Determine package version
+        shell: pwsh
+        run: |
+          $number = (Get-Content frontend/package.json -Raw | ConvertFrom-Json).version
+          if ($number -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { throw 'Invalid package version' }
+          "FORGE_RELEASE_VERSION=$number" >> $env:GITHUB_ENV
+      - name: Build unsigned application
+        run: python scripts/release_build.py build --work C:/ForgeCI --version "$env:FORGE_RELEASE_VERSION"
+      - name: Verify native lifecycle on disposable state
+        run: ./scripts/release_smoke.ps1 -Executable C:/ForgeCI/dist/Forge/Forge.exe -Output C:/ForgeCI/native-smoke
+      - name: Install verified pinned compiler
+        run: ./scripts/release_tools.ps1 -Destination C:/ForgeCI/tools
+      - name: Build clearly labeled unsigned preview
+        run: |
+          python scripts/release_build.py installer --work C:/ForgeCI --version "$env:FORGE_RELEASE_VERSION" --iscc C:/ForgeCI/tools/compiler/ISCC.exe
+          python scripts/release_build.py package --work C:/ForgeCI --version "$env:FORGE_RELEASE_VERSION"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Forge-unsigned-development-preview
+          path: C:/ForgeCI/release/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: Forge-native-smoke-report
+          path: C:/ForgeCI/native-smoke/native-smoke.json
+          if-no-files-found: ignore

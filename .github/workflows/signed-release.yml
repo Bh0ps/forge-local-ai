@@ -1,0 +1,56 @@
+name: Verify manually signed draft before publication
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact stable tag of an existing draft with CA-signed packages
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  verify-and-publish:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    environment: forge-release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FORGE_PUBLISHER_SUBJECT: ${{ secrets.FORGE_PUBLISHER_SUBJECT }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.14'
+      - name: Validate draft identity and checked-out commit
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REPOSITORY -ne 'Bh0ps/forge-local-ai') { throw 'Wrong repository' }
+          if ($env:RELEASE_TAG -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { throw 'Only stable release tags are accepted' }
+          if (-not $env:FORGE_PUBLISHER_SUBJECT) { throw 'Protected publisher configuration is absent; signing is not ready' }
+          $release = gh release view $env:RELEASE_TAG --repo Bh0ps/forge-local-ai --json isDraft,tagName | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release.isDraft -or $release.tagName -ne $env:RELEASE_TAG) { throw 'An exact draft release is required' }
+          git fetch origin "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) { throw 'Tag fetch failed' }
+          $tagCommit = git rev-parse 'FETCH_HEAD^{commit}'
+          $headCommit = git rev-parse HEAD
+          if ($tagCommit -ne $headCommit) { throw 'Run the workflow at the exact tagged commit' }
+          $number = $env:RELEASE_TAG.Substring(1)
+          "FORGE_RELEASE_VERSION=$number" >> $env:GITHUB_ENV
+      - name: Install exact verification dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements-build.lock
+          python -m pip install --require-hashes --no-build-isolation -r requirements-ci.lock
+      - name: Download only expected signed assets
+        run: |
+          New-Item -ItemType Directory -Path C:/ForgeReleaseVerification | Out-Null
+          gh release download $env:RELEASE_TAG --repo Bh0ps/forge-local-ai --dir C:/ForgeReleaseVerification --pattern "Forge-$env:FORGE_RELEASE_VERSION-Setup.exe" --pattern "Forge-$env:FORGE_RELEASE_VERSION-Portable.zip" --pattern Forge-release.json --pattern SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Expected signed draft assets are missing' }
+      - name: Require trusted signatures and clean package manifests
+        run: python scripts/release_build.py verify-downloaded --work C:/ForgeReleaseVerification --version "$env:FORGE_RELEASE_VERSION" --require-signed
+      - name: Publish verified draft
+        run: |
+          gh release edit $env:RELEASE_TAG --repo Bh0ps/forge-local-ai --draft=false
+          if ($LASTEXITCODE -ne 0) { throw 'Publication failed' }

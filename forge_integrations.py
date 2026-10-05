@@ -524,13 +524,17 @@ class IntegrationHub:
                 return {"ok": True, **status}
             if action.startswith("browser_native_"):
                 return self.browser.native_action(action.removeprefix("browser_native_"), data)
+            if action == 'browser_extension_info':
+                return {'ok':True, **self.browser.extension_info()}
+            if action == 'browser_extension_open_folder':
+                return self.browser.open_extension_folder()
             if action == "browser_install":
                 return self.browser.install_browser()
             if action == "browser_bridge_enable":
                 return self.browser.start_bridge()
             if action == "browser_host_register":
                 self.browser.start_bridge()
-                return register_native_host(data["extension_id"], data["host_executable"], self.root)
+                return register_native_host(data["extension_id"], data.get("host_executable") or None, self.root)
             if action == "skill_read":
                 return self.read_skill(data["id"], data.get("project"))
             raise ValueError("Unknown integration action")

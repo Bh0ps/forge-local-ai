@@ -72,6 +72,7 @@ class CompatibleProvider:
     def capabilities(self,model):
         return {'capabilities':self.config.get('capabilities',[]),'model_info':{'local.context_length':self.config.get('context_limit',32768)}}
     def estimate_tokens(self,messages,tools): return estimated_prompt_tokens(messages,tools,AGENT_SYSTEM_PROMPT)
+    def prepare_body(self,data,body): return body
     def generate(self,data,cancel):
         # Validate the same context and tool contract before adapting protocols.
         payload=Core._agent_payload(data)
@@ -95,6 +96,7 @@ class CompatibleProvider:
         body=dict(model=data['model'],messages=messages,stream=True,stream_options={'include_usage':True},
                   max_tokens=payload['options']['num_predict'],temperature=data.get('temperature',.3))
         if payload.get('tools'): body['tools']=payload['tools']
+        body=self.prepare_body(data,body)
         cancel = cancel if cancel is not None else threading.Event()
         started=time.monotonic()
 
@@ -109,6 +111,8 @@ class CompatibleProvider:
                 try: packet=json.loads(raw)
                 except ValueError: raise ValueError('Provider returned an invalid response stream.') from None
                 if not isinstance(packet,dict): raise ValueError('Provider returned an invalid response packet.')
+                if isinstance(packet.get('model'),str) and len(packet['model'])<=300: final['provider_model']=packet['model']
+                if isinstance(packet.get('provider'),str) and len(packet['provider'])<=300: final['response_provider']=packet['provider']
                 if packet.get('error'):
                     error=packet['error']
                     raise ValueError(str(error.get('message') if isinstance(error,dict) else error)[:1500])
@@ -118,6 +122,12 @@ class CompatibleProvider:
                     for key in ('prompt_tokens','completion_tokens','total_tokens'):
                         if usage.get(key) is not None and (type(usage[key]) is not int or usage[key]<0):
                             raise ValueError('Provider returned invalid usage counters.')
+                    details=usage.get('prompt_tokens_details')
+                    if details is not None and not isinstance(details,dict):
+                        raise ValueError('Provider returned invalid cached usage counters.')
+                    cached=(details or {}).get('cached_tokens')
+                    if cached is not None and (type(cached) is not int or cached<0):
+                        raise ValueError('Provider returned invalid cached usage counters.')
                     final['usage']=usage
                 timings=packet.get('timings')
                 if timings is None: timings={}
@@ -174,7 +184,7 @@ class CompatibleProvider:
 
 class ProviderPool:
     def __init__(self,core,store,vault=None):
-        self.core=core; self.store=store; self.vault=vault; self.queue=InferenceQueue(); self.ollama=OllamaProvider(core)
+        self.core=core; self.store=store; self.vault=vault; self.queue=InferenceQueue(); self.remote_queue=InferenceQueue(); self.ollama=OllamaProvider(core)
         self.instances={}; self.lock=threading.RLock()
     def provider(self,identifier):
         if not identifier or identifier=='ollama': return self.ollama
@@ -183,7 +193,10 @@ class ProviderPool:
         with self.lock:
             if self.instances.get(identifier,{}).get('signature')!=signature:
                 base=config['url'].rstrip('/')
-                provider=OllamaProvider(Core(base=base if base.endswith('/api') else base+'/api')) if config.get('kind')=='ollama' else CompatibleProvider(config,self.vault)
+                if config.get('kind')=='openrouter':
+                    from forge_openrouter import OpenRouterProvider
+                    provider=OpenRouterProvider(config,self.vault)
+                else: provider=OllamaProvider(Core(base=base if base.endswith('/api') else base+'/api')) if config.get('kind')=='ollama' else CompatibleProvider(config,self.vault)
                 self.instances[identifier]={'signature':signature,'provider':provider}
             return self.instances[identifier]['provider']
     def configurations(self):
@@ -191,31 +204,46 @@ class ProviderPool:
     def generate(self,data,cancel,run,purpose='main',background=False):
         identifier=uuid4().hex; provider_id=data.get('provider_id','ollama'); provider=self.provider(provider_id)
         final={}; text=''; start=time.monotonic(); first=None
+        from forge_speed import TokenSpeedEstimator
+        meter=TokenSpeedEstimator(); last_speed=0
         try:
-            with self.queue.lease(cancel,background):
+            queue=self.remote_queue if getattr(provider,'remote_inference',False) else self.queue
+            with queue.lease(cancel,background):
                 start=time.monotonic()
                 for packet in provider.generate(data,cancel):
                     content=packet.get('message',{}).get('content') or packet.get('message',{}).get('thinking') or ''
                     if content and first is None: first=time.monotonic()
                     text+=content
+                    if content:
+                        meter.observe((packet.get('message',{}).get('content') or '')+(packet.get('message',{}).get('thinking') or ''))
+                        moment=time.monotonic(); estimate=meter.estimate(moment)
+                        if estimate is not None and run.get('id') and moment-last_speed>=.5:
+                            self.store.event(run['id'],'stream_speed',tps=estimate,estimated=True,
+                                request_id=identifier,window_seconds=meter.window,source='backend_output_bytes')
+                            last_speed=moment
                     if packet.get('done'): final=packet
                     yield packet
         finally:
             duration=max(0,time.monotonic()-start); usage=final.get('usage') or {}
+            if not isinstance(usage,dict): usage={}
             prompt=final.get('prompt_eval_count',usage.get('prompt_tokens'))
             output=final.get('eval_count',usage.get('completion_tokens'))
-            cached=final.get('prompt_eval_cached_count',(usage.get('prompt_tokens_details') or {}).get('cached_tokens',0))
+            details=usage.get('prompt_tokens_details')
+            details=details if isinstance(details,dict) else {}
+            cached=final.get('prompt_eval_cached_count',details.get('cached_tokens',0))
+            if type(cached) is not int or cached<0: cached=0
             decode=(final.get('eval_duration') or 0)/1e9
             estimated=prompt is None or output is None
             self.store.record_usage(dict(id=identifier,run_id=run.get('id'),project_id=run.get('project_id'),
-                provider=provider_id,model=data['model'],purpose=purpose,
+                provider=provider_id,model=final.get('provider_model') or data['model'],purpose=purpose,
                 input_tokens=prompt if prompt is not None else provider.estimate_tokens(data['messages'],data.get('tools',[])),
                 cached_input_tokens=cached,output_tokens=output if output is not None else (len(text.encode('utf-8'))+2)//3,
                 estimated=estimated,decode_seconds=decode,total_seconds=duration,cancelled=cancel.is_set()))
             speed=output/decode if output is not None and decode>0 else None
             if run.get('id'):
                 self.store.event(run['id'],'usage',request_id=identifier,input_tokens=prompt,output_tokens=output,
-                                 tps=speed,estimated=estimated,ttft=first-start if first else None)
+                                 tps=speed,estimated=estimated,ttft=first-start if first else None,
+                                 requested_model=data['model'],actual_model=final.get('provider_model') or data['model'],response_provider=final.get('response_provider'))
 
 def memory_telemetry():
     result={'gpus':[],'ram_available':None}

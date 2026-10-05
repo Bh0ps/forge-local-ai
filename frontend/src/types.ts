@@ -21,5 +21,5 @@ export interface Connection { id: string; name: string; url?: string; command?: 
 export interface Plugin { id?: string; name: string; description?: string; version?: string; enabled?: boolean; source?: string; compatibility?: string; skills?: unknown[]; mcp_servers?: unknown[]; }
 export interface UsageCount { input_tokens: number; output_tokens: number; cached_input_tokens?: number; requests: number; tokens_per_second?: number; }
 export interface Usage { day?: UsageCount; month?: UsageCount; all_time?: UsageCount; daily?: { date: string; input_tokens: number; output_tokens: number }[]; models?: unknown[]; [key: string]: unknown; }
-export type Page = 'chat' | 'projects' | 'spaces' | 'scheduled' | 'plugins' | 'agents' | 'usage' | 'settings';
+export type Page = 'chat' | 'projects' | 'spaces' | 'scheduled' | 'plugins' | 'agents' | 'usage' | 'memory' | 'settings';
 export const DEFAULT_SETTINGS: Settings = { context: 32768, tokens: 4096, temperature: 0.3, thinking: true, theme: 'system', permission_profile: 'always_ask', model: '', web: true, allow_edits: true, performance: 'balanced', startup: false, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' };

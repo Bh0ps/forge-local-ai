@@ -59,6 +59,7 @@ class BrowserTools:
         self.binary_available = False
         self.last_installation_check = 0
         self.native = None
+        self.extension_snapshots = {}
 
     def status(self, backend=None):
         if backend not in (None, 'native', 'isolated'):
@@ -91,11 +92,33 @@ class BrowserTools:
             raise RuntimeError('Open Forge desktop to use its built-in browser.')
         return self.native.dispatch(action, data)
 
+    def extension_info(self):
+        folder = Path(__file__).resolve().parent / 'browser-extension'
+        manifest = self.root / 'config/native-messaging/org.forge.browser.json'
+        origins = []
+        try:
+            registered = json.loads(manifest.read_text(encoding='utf-8'))
+            origins = [origin for origin in registered.get('allowed_origins', []) if re.fullmatch(r'chrome-extension://[a-p]{32}/', str(origin))]
+        except (OSError,ValueError,TypeError): pass
+        return {'extension_folder':str(folder), 'available':(folder/'manifest.json').is_file(),
+                'extension_registered':bool(origins), 'extension_ids':[origin.split('/')[2] for origin in origins]}
+
+    def open_extension_folder(self):
+        information = self.extension_info()
+        if not information['available']: raise ValueError('The bundled extension is missing. Repair your Forge installation.')
+        if os.name != 'nt': raise ValueError('Open the extension folder using your file manager.')
+        os.startfile(information['extension_folder'])
+        return {'ok':True, **information}
+
     def describe_target(self, arguments, context=None):
         if self.native and arguments.get('tab_id') is None and arguments.get('backend', 'native') == 'native':
             return self.native.describe_target(arguments, context)
-        return {'app': 'browser:connected-tab' if arguments.get('tab_id') is not None else 'browser:isolated',
-                'target': arguments.get('url') or ('Connected tab ' + str(arguments['tab_id']) if arguments.get('tab_id') is not None else 'Forge isolated browser')}
+        if arguments.get('tab_id') is not None:
+            tabs = {str(tab['id']):tab for tab in self.bridge.tabs()} if self.bridge else {}
+            tab = tabs.get(str(arguments['tab_id']))
+            if not tab: return {'ok':False,'error':'This tab is not connected. Click its Forge extension button.','not_executed':True}
+            return {'app':'browser:connected-tab','target':arguments.get('url') or tab['url'], 'tab_id':tab['id']}
+        return {'app':'browser:isolated','target':arguments.get('url') or 'Forge isolated browser'}
 
     def _check_installation(self):
         if self.playwright:
@@ -150,7 +173,7 @@ class BrowserTools:
     @staticmethod
     def schemas():
         text = {"type": "string"}
-        target = {"tab_id": {"type": "integer", "description": "Optional explicitly connected extension tab"},
+        target = {"tab_id": {"type": ["string", "integer"], "description": "Optional opaque ID from browser_tabs; identifies an explicitly connected browser tab"},
                   "backend": {"type": "string", "enum": ["native", "isolated"], "description": "Default is built-in native desktop browser when available"}}
         return [
             function_schema("browser_navigate", "Navigate Forge's built-in browser, optional isolated browser or explicitly connected tab", {**target, "url": text}, ["url"]),
@@ -174,9 +197,23 @@ class BrowserTools:
             data = dict(arguments)
             if operation == "navigate":
                 data["url"] = browser_url(data["url"])
-            result = self.bridge.command(int(data.pop("tab_id")), operation, data)
+            tab_id = data.pop('tab_id')
+            run = str((context or {}).get('run_id') or 'interactive')
+            key = (run, str(tab_id))
+            if operation in ('click','type'):
+                snap = self.extension_snapshots.get(key)
+                tabs = {str(tab['id']):tab for tab in self.bridge.tabs()}
+                if not snap or data.get('snapshot_id') != snap['id'] or time.monotonic()-snap['time']>30 or str(tab_id) not in tabs or tabs[str(tab_id)]['url'] != snap['url']:
+                    return {'ok':False,'error':'Stale connected-tab snapshot. Inspect this tab in the current run.','not_executed':True}
+            result = self.bridge.command(tab_id, operation, data, context) if context is not None else self.bridge.command(tab_id, operation, data)
             if not result.get("ok", True):
+                if result.get('not_executed'): return result
                 raise RuntimeError(str(result.get("error", "Browser action failed")))
+            if operation == 'inspect':
+                self.extension_snapshots = {k:v for k,v in self.extension_snapshots.items() if time.monotonic()-v['time']<=30}
+                self.extension_snapshots[key] = {'id':result.get('snapshot_id'), 'url':result.get('url'), 'time':time.monotonic()}
+            elif operation in ('navigate','click','type'):
+                self.extension_snapshots.pop(key, None)
             return self._bounded_result(result)
         if name == "browser_tabs":
             return {"ok": True, "tabs": self.bridge.tabs() if self.bridge else [],
@@ -195,10 +232,13 @@ class BrowserTools:
     def stop(self):
         if self.native:
             self.native.stop()
+        if self.bridge: self.bridge.stop()
+        self.extension_snapshots.clear()
 
     def reset(self):
         if self.native:
             self.native.reset()
+        if self.bridge: self.bridge.reset()
 
     def _start(self):
         if self.context:
@@ -323,6 +363,7 @@ class ExtensionBridge:
         self.lock = threading.RLock()
         self.connected = {}
         self.pending = {}
+        self.stopped = threading.Event()
         bridge = self
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
@@ -364,38 +405,63 @@ class ExtensionBridge:
             return [{"id": key, "title": item["title"], "url": item["url"]} for key, item in self.connected.items()]
 
     def poll(self, message):
+        client = message.get('client_id', 'legacy')
+        if client != 'legacy' and not re.fullmatch(r'[0-9a-f]{32}', str(client)): raise ValueError('Invalid browser session identity')
+        tabs = message.get('tabs', [])
+        if not isinstance(tabs, list): raise ValueError('Invalid connected tabs')
+        tabs = tabs[:100]
+        if any(not isinstance(item,dict) or type(item.get('id')) is not int or item['id']<0 for item in tabs): raise ValueError('Invalid connected tab ID')
+        active = {item['id'] if client=='legacy' else client+':'+str(item['id']) for item in tabs}
         with self.lock:
-            for item in message.get("tabs", [])[:100]:
-                self.connected[int(item["id"])] = {"title": str(item.get("title", ""))[:300],
-                                                   "url": str(item.get("url", ""))[:2000], "seen": time.monotonic()}
-            active = {int(item["id"]) for item in message.get("tabs", [])[:100]}
+            for item in tabs:
+                key = item['id'] if client=='legacy' else client+':'+str(item['id'])
+                previous = self.connected.get(key, {})
+                self.connected[key] = {"title": str(item.get("title", previous.get('title', '')))[:300],
+                    "url": browser_url(str(item.get("url", previous.get('url', ''))))[:2000], "seen": time.monotonic(), 'client':client, 'local_id':item['id']}
             for key in list(self.connected):
-                if key not in active:
+                if self.connected[key]['client']==client and key not in active:
                     self.connected.pop(key)
             for result in message.get("results", [])[:100]:
                 item = self.pending.get(str(result.get("id")))
-                if item and not item["future"].done():
+                if item and item['client']==client and not item["future"].done():
                     item["future"].set_result(result.get("result", {"ok": False, "error": "Missing response"}))
             commands = []
             for key, item in self.pending.items():
-                if not item["sent"] and item["tab_id"] in active:
+                if not self.stopped.is_set() and not item["sent"] and item["tab_id"] in active:
                     item["sent"] = True
-                    commands.append({"id": key, "tab_id": item["tab_id"], "operation": item["operation"], "arguments": item["arguments"]})
+                    commands.append({"id": key, "tab_id": self.connected[item['tab_id']]['local_id'], "operation": item["operation"], "arguments": item["arguments"]})
             return {"ok": True, "commands": commands}
 
-    def command(self, tab_id, operation, arguments):
+    def command(self, tab_id, operation, arguments, context=None):
         if tab_id not in {item["id"] for item in self.tabs()}:
             raise ValueError("This tab has not been connected by the user")
         key = uuid.uuid4().hex
         future = concurrent.futures.Future()
         with self.lock:
+            tab = self.connected[tab_id]
             self.pending[key] = {"tab_id": tab_id, "operation": operation, "arguments": arguments,
-                                 "future": future, "sent": False}
+                                 "future": future, "sent": False, 'client':tab['client']}
         try:
-            return future.result(timeout=30)
+            deadline = time.monotonic()+30
+            while True:
+                cancel = (context or {}).get('cancel')
+                if self.stopped.is_set() or hasattr(cancel,'is_set') and cancel.is_set():
+                    with self.lock:
+                        if not self.pending[key]['sent']:
+                            return {'ok':False,'error':'Connected browser action cancelled before dispatch.','not_executed':True}
+                    raise RuntimeError('Connected browser action was dispatched before cancellation. Inspect its outcome before retrying.')
+                try: return future.result(timeout=.05)
+                except concurrent.futures.TimeoutError:
+                    if time.monotonic()>=deadline: raise TimeoutError('Connected browser command timed out. Inspect its outcome before retrying.')
         finally:
             with self.lock:
                 self.pending.pop(key, None)
+
+    def stop(self):
+        self.stopped.set()
+
+    def reset(self):
+        self.stopped.clear()
 
     def shutdown(self):
         self.server.shutdown()
@@ -413,20 +479,34 @@ class ExtensionBridge:
                     item["future"].set_exception(RuntimeError("Browser bridge stopped"))
 
 
-def register_native_host(extension_id, host_executable, data_dir=None):
+def register_native_host(extension_id, host_executable=None, data_dir=None):
     """Explicit setup action; requires the installed host executable and extension ID."""
     if os.name != "nt":
         raise RuntimeError("This setup helper currently supports Windows")
     if not re.fullmatch(r"[a-p]{32}", str(extension_id)):
         raise ValueError("Enter the 32-character extension ID from the browser Extensions page")
+    if host_executable is None:
+        if getattr(sys, 'frozen', False):
+            host_executable = Path(sys.executable).parent / 'ForgeBrowserHost.exe'
+        else:
+            candidates = (Path(__file__).parent/'dist/Forge/ForgeBrowserHost.exe',
+                          Path(os.environ.get('LOCALAPPDATA', ''))/'Programs/Forge4/ForgeBrowserHost.exe')
+            host_executable = next((path for path in candidates if path.is_file()), candidates[0])
     executable = Path(host_executable).resolve()
     if not executable.is_file() or executable.suffix.lower() != ".exe":
-        raise ValueError("Select the Forge native messaging host executable")
+        raise ValueError("The Forge browser host is missing. Repair the Windows installation or build ForgeBrowserHost.exe.")
     root = Path(data_dir or Path.home() / ".forge") / "config" / "native-messaging"
     root.mkdir(parents=True, exist_ok=True)
     manifest = root / "org.forge.browser.json"
+    origins = [f'chrome-extension://{extension_id}/']
+    try:
+        existing = json.loads(manifest.read_text(encoding='utf-8'))
+        if existing.get('name')=='org.forge.browser' and existing.get('type')=='stdio' and Path(existing.get('path','')).resolve()==executable:
+            origins += [origin for origin in existing.get('allowed_origins', []) if re.fullmatch(r'chrome-extension://[a-p]{32}/', str(origin))]
+    except (OSError,ValueError,TypeError): pass
+    origins = list(dict.fromkeys(origins))[:8]
     manifest.write_text(json.dumps({"name": "org.forge.browser", "description": "Forge selected-tab bridge",
-        "path": str(executable), "type": "stdio", "allowed_origins": [f"chrome-extension://{extension_id}/"]}, indent=2), encoding="utf-8")
+        "path": str(executable), "type": "stdio", "allowed_origins": origins}, indent=2), encoding="utf-8")
     import winreg
     for vendor in ("Google\\Chrome", "Microsoft\\Edge"):
         with winreg.CreateKey(winreg.HKEY_CURRENT_USER, f"Software\\{vendor}\\NativeMessagingHosts\\org.forge.browser") as key:
@@ -440,6 +520,7 @@ def native_host_main(data_dir=None):
     root = Path(data_dir or os.environ.get("FORGE_HOME") or Path.home() / ".forge")
     source = sys.stdin.buffer
     target = sys.stdout.buffer
+    client_id = uuid.uuid4().hex
     while True:
         header = source.read(4)
         if not header:
@@ -454,6 +535,7 @@ def native_host_main(data_dir=None):
             return
         try:
             message = json.loads(payload)
+            message['client_id'] = client_id
             config = json.loads((root / "config" / "browser-bridge.json").read_text(encoding="utf-8"))
             message["token"] = config["token"]
             with socket.create_connection(("127.0.0.1", int(config["port"])), timeout=10) as connection:
@@ -469,4 +551,5 @@ def native_host_main(data_dir=None):
 
 
 if __name__ == "__main__":
-    native_host_main()
+    from browser_native_host import main
+    main()

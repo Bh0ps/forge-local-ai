@@ -202,3 +202,25 @@ def test_native_status_never_starts_playwright_until_explicit_diagnostics(tmp_pa
             tools.status(backend='unknown')
     finally:
         tools.shutdown()
+
+
+def test_navigation_invalidates_snapshot_before_async_webview_events(tmp_path):
+    from types import SimpleNamespace
+    from native_browser import WebView2Page
+    class DeferredPage(FakePage):
+        def __init__(self, changed):
+            super().__init__(changed)
+            self.ui=lambda fn:fn(None)
+            self.control=SimpleNamespace(CoreWebView2=SimpleNamespace(Navigate=lambda url:self.effects.append('requested')))
+        def navigate(self,url): WebView2Page.navigate(self,url)
+    browser=NativeBrowser(tmp_path,view_factory=DeferredPage)
+    try:
+        browser.dispatch('open')
+        old=browser.execute('browser_inspect',{}, {'run_id':'fixture'})
+        browser.execute('browser_navigate',{'url':'https://example.org/next'},{'run_id':'fixture'})
+        assert browser.status()['loading']
+        assert browser.execute('browser_inspect',{}, {'run_id':'fixture'})['not_executed']
+        assert browser.execute('browser_click',{'snapshot_id':old['snapshot_id'],'selector':old['targets'][0]['selector']},{'run_id':'fixture'})['not_executed']
+        browser.view.url='https://example.org/next';browser.view.changed('loaded')
+        assert browser.execute('browser_inspect',{}, {'run_id':'fixture'})['ok']
+    finally:browser.shutdown()

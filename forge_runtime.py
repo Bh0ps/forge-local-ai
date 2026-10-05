@@ -73,7 +73,7 @@ class RuntimeManager:
                                 timeout=15, creationflags=flags)
         return (result.stdout + result.stderr).strip()[:2000]
 
-    def install(self, data):
+    def install(self, data, cancel=None):
         engine = data.get('engine')
         profiles = [p for p in ENGINE_PROFILES if p['engine'] == engine and p.get('version')]
         if not profiles:
@@ -110,28 +110,59 @@ class RuntimeManager:
             with tempfile.TemporaryDirectory(prefix='forge-runtime-', dir=self.directory) as stage:
                 archive = Path(stage) / 'download.zip'
                 count = 0
-                with httpx.Client(timeout=60, follow_redirects=True) as client:
-                    with client.stream('GET', url) as response:
-                        response.raise_for_status()
-                        with open(archive, 'wb') as output:
-                            for chunk in response.iter_bytes(1024 * 1024):
-                                count += len(chunk)
-                                if count > 4 * 1024**3:
-                                    raise ValueError('Runtime download exceeds 4 GB.')
-                                output.write(chunk)
+                with httpx.Client(timeout=60, follow_redirects=False, trust_env=False) as client:
+                    current_url=url
+                    for hop in range(5):
+                        parsed_download=urlsplit(current_url)
+                        if (parsed_download.scheme!='https' or parsed_download.hostname not in
+                            {'github.com','release-assets.githubusercontent.com','objects.githubusercontent.com','github-releases.githubusercontent.com'}
+                            or parsed_download.username or parsed_download.password):
+                            raise ValueError('Runtime download redirected outside the official release hosts.')
+                        if cancel is not None and cancel.is_set(): raise ValueError('Runtime installation cancelled.')
+                        with client.stream('GET',current_url) as response:
+                            if response.status_code in (301,302,303,307,308):
+                                from urllib.parse import urljoin
+                                current_url=urljoin(current_url,response.headers.get('location',''))
+                                continue
+                            response.raise_for_status()
+                            with open(archive,'wb') as output:
+                                for chunk in response.iter_bytes(1024*1024):
+                                    if cancel is not None and cancel.is_set(): raise ValueError('Runtime installation cancelled.')
+                                    count+=len(chunk)
+                                    if count>4*1024**3: raise ValueError('Runtime download exceeds 4 GB.')
+                                    output.write(chunk)
+                            break
+                    else: raise ValueError('Too many runtime download redirects.')
                 if self._hash(archive) != str(digest).lower():
                     raise ValueError('Runtime checksum does not match. Nothing was installed.')
                 extracted = Path(stage) / 'files'
                 extracted.mkdir()
                 with zipfile.ZipFile(archive) as package:
-                    total = 0
+                    total = 0; names=set()
+                    from forge_updates import safe_relative
                     for item in package.infolist():
+                        try: relative=safe_relative(item.filename.rstrip('/'))
+                        except ValueError: raise ValueError('Runtime archive contains unsafe paths or unsupported links.') from None
+                        key=str(relative).casefold()
+                        if key in names: raise ValueError('Runtime archive has colliding paths.')
+                        names.add(key)
                         total += item.file_size
                         destination = (extracted / item.filename).resolve()
                         if (not destination.is_relative_to(extracted) or (item.external_attr >> 16) & 0o170000 == 0o120000 or
                             total > 8 * 1024**3):
                             raise ValueError('Runtime archive contains unsafe paths or unsupported links.')
-                    package.extractall(extracted)
+                    for item in package.infolist():
+                        if cancel is not None and cancel.is_set(): raise ValueError('Runtime installation cancelled.')
+                        destination=extracted/safe_relative(item.filename.rstrip('/'))
+                        if item.is_dir(): destination.mkdir(parents=True,exist_ok=True); continue
+                        destination.parent.mkdir(parents=True,exist_ok=True)
+                        with package.open(item) as source,destination.open('xb') as output:
+                            while True:
+                                if cancel is not None and cancel.is_set(): raise ValueError('Runtime installation cancelled.')
+                                chunk=source.read(1024*1024)
+                                if not chunk: break
+                                output.write(chunk)
+                if cancel is not None and cancel.is_set(): raise ValueError('Runtime installation cancelled.')
                 name = ('ollama' if engine == 'ollama' else 'llama-server') + ('.exe' if os.name == 'nt' else '')
                 candidates = list(extracted.rglob(name))
                 if len(candidates) != 1:

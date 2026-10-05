@@ -123,6 +123,22 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
         response.delete_cookie('forge_session', path='/api/')
         return response
 
+    @app.post('/api/v1/channels/{channel_id}/ingest')
+    async def channel_ingest(channel_id: str, request: Request):
+        # This route authenticates a fixed channel HMAC rather than a browser
+        # session. It cannot invoke arbitrary coordinator actions.
+        if legacy or not hasattr(service,'get_channels'):
+            return JSONResponse({'error':'Channels unavailable'},status_code=404)
+        body=bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body)>65536: return JSONResponse({'error':'Request too large'},status_code=413)
+        try:
+            result=await run_in_threadpool(service.get_channels().ingest,channel_id,bytes(body),dict(request.headers))
+            return JSONResponse(result)
+        except ValueError:
+            return JSONResponse({'error':'Channel authentication or request rejected.'},status_code=403)
+
     @app.post('/api/v1/{action}')
     @app.post('/api/{action}')
     async def api(action: str, request: Request):
@@ -183,7 +199,7 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
 
     @app.get('/api/v1/health')
     def health():
-        return {'app': 'Forge', 'version': '4.1.1', 'pairing_required': not legacy}
+        return {'app': 'Forge', 'version': '4.2.0', 'pairing_required': not legacy}
 
     @app.get('/')
     def index():

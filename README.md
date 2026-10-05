@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/forge.svg" width="96" alt="Forge"></p>
 
-# Forge 4.1
+# Forge 4.2
 
 **A local AI workspace for coding, research and computer tools. Open source under [MIT](LICENSE).**
 
@@ -9,9 +9,24 @@ an always-on-top HUD and an authenticated local browser interface around one
 Python coordinator. Models run through your existing Ollama installation or a
 configured local inference engine. No cloud AI account is required.
 
+The 4.2 upgrade adds guided setup, reviewed persistent memory, Telegram tasks
+and notifications, optional free OpenRouter research agents and an explicit
+GitHub connection. The native agent browser is embedded beside Files and
+Activity. Context presets sit beside dictation; live generation speed comes
+from backend timing rather than text arriving at the interface.
+
+Cloud integrations are optional and require explicit setup. OpenRouter agents
+use free-only routes with no paid fallback, subject to provider availability
+and quotas. GitHub draft PRs always need approval. Windows packages are currently
+unsigned; automatic installation remains disabled until a trusted publisher is
+configured. Existing installations and local state are retained for rollback.
+
 [Download Windows packages](https://github.com/Bh0ps/forge-local-ai/releases)
 · [Quick start](QUICKSTART.md) · [Integrations and Docker](docs/INTEGRATIONS.md)
 · [Architecture](docs/ARCHITECTURE.md) · [Validation](docs/VALIDATION.md)
+· [Guided setup](docs/SETUP.md) · [Memory](docs/MEMORY.md)
+· [Telegram and webhooks](docs/CHANNELS.md) · [OpenRouter](docs/OPENROUTER.md)
+· [GitHub](docs/GITHUB.md) · [Updates](docs/UPDATES.md)
 
 ## Workspace
 

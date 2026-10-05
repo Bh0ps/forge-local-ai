@@ -167,3 +167,37 @@ Engine integration follows primary documentation:
 and [vLLM consumer Blackwell support](https://docs.vllm.ai/en/latest/features/quantization/b12x/).
 These references describe available mechanisms; the measurements above determine
 what this release actually verified.
+
+## Forge 4.2 release checks
+
+The October 5, 2026 upgrade passed 813 Python tests and 65 frontend tests in a
+separate environment installed from the hashed dependency locks. Subsequent
+focused updater checks include interrupted-install recovery: unknown installer
+outcomes block another automatic attempt. Source TypeScript compilation and the
+production frontend build passed.
+
+Disposable native Windows checks covered fresh first-run setup, workspace/HUD
+transitions, tray operation, closed-window API access and the embedded WebView2
+browser. Agent navigation, inspection, typing, clicking and screenshot capture
+used the same native page; websites had no Forge JavaScript bridge. Synthetic
+native-messaging fixtures covered separate Chrome/Edge tab identities and stale
+or cancelled actions. Browser controls and critical HUD controls fit at 125% scale.
+
+Production UI fixtures exercised memory review, Telegram setup/pairing, GitHub
+scope and clone confirmation, OpenRouter consent/profile creation, notifications
+and signed-update gates with no browser console errors. Protocol tests cover
+atomic run completion, permission changes on accepted connected tasks, cancelled
+chat delivery, external-event deduplication, rollback quarantine and malformed
+usage counters. A buffered output burst cannot inflate the backend speed estimate.
+
+Live public GitHub browsing, README retrieval and a disposable managed clone
+passed. Live public OpenRouter metadata returned the free router and advertised
+tool/vision capabilities after correcting optional pricing-field handling.
+Authenticated cloud generation, real Telegram deliveries and remote PR creation
+were tested with fixtures; they require account configuration for live acceptance.
+No credentials or personal profiles were used in these live public read checks.
+
+Signing setup is deferred. The Windows packages are unsigned and automatic
+installation is fail-closed until a trusted publisher is embedded. Clean-VM and
+Docker/GPU acceptance remain unexecuted on this machine. There is no new
+hardware throughput or superiority claim from these interface and protocol fixes.

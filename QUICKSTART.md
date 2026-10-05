@@ -2,6 +2,7 @@
 
 1. Install Forge or extract the portable package and open `Forge.exe`. Start your
    existing Ollama service. Select an installed model using the composer button.
+   New workspaces open guided setup; existing users can reopen it under Settings.
 2. Open **Projects** to register a folder in place or create a managed project.
    Select the project and start a chat. Use the right panel for files and activity.
 3. Start with **Always Ask**. Review proposed edits, commands and computer actions;
@@ -22,6 +23,7 @@
    packages before installation. Remote MCP supports bearer tokens and OAuth.
    Browser setup can install isolated Chromium; the optional extension connects
    selected existing Chrome/Edge tabs explicitly.
+   The globe in the header opens the native browser in the workspace sidebar.
 9. Configure agent profiles and schedules in their sidebar pages. Review a writing
    agent's worktree diff before integration. Scheduling inherits the permission
    policy; approvals can wait while the window is closed.
@@ -31,6 +33,16 @@
 **Ctrl+N** starts a chat. **Ctrl+K** focuses the composer. **Shift+Escape** stops the
 current generation. All-time usage begins with the Forge upgrade; older chats are
 retained without invented usage counts.
+
+**Memory** contains pending saves and learned skills for review. Settings includes
+optional **OpenRouter agents**, **GitHub**, **Connected workflows** for Telegram and
+webhooks, and **Updates & diagnostics**. Enter keys in those secret fields rather
+than chat. Approve Telegram pairing for the exact account before it can start tasks.
+Create a free research profile and enable automatic delegation to let the main
+model use it. Remote agents receive their assigned context and tool results.
+
+Current Windows packages are unsigned. Automatic update installation is gated
+on a configured trusted publisher; manual release downloads include checksums.
 
 For runtime setup, browser extensions, Docker and plugin formats, see
 [Integrations](docs/INTEGRATIONS.md). Context and performance recommendations require

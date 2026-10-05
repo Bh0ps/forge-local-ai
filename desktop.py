@@ -97,6 +97,17 @@ class Bridge:
             if action == 'settings' and data.get('emergency_shortcut'):
                 EmergencyHotkey.parse(data['emergency_shortcut'])
             result = service.dispatch(action, data)
+            if action in ('update_apply','update_rollback') and result.get('prepared'):
+                if not getattr(sys,'frozen',False):
+                    service.update_manager.applying=False
+                    raise ValueError('Apply updates from the installed Windows app.')
+                import subprocess
+                try:
+                    subprocess.Popen(result['command'],creationflags=subprocess.CREATE_NO_WINDOW,close_fds=True)
+                except OSError:
+                    service.update_manager.applying=False
+                    raise ValueError('The update helper could not start. The prepared backup is retained; retry from Updates.') from None
+                threading.Timer(.3,self.quit).start()
             if action == 'settings' and data.get('emergency_shortcut') and self._hotkey:
                 self._hotkey.stop()
                 self._hotkey = EmergencyHotkey(self._lifecycle.emergency_stop, data['emergency_shortcut'])
@@ -147,6 +158,10 @@ class Bridge:
         if mode not in ('full', 'hud'):
             return {'error': 'Unknown window mode'}
         try:
+            if mode == 'hud':
+                browser = getattr(getattr(getattr(self._service, 'integrations', None), 'browser', None), 'native', None)
+                if browser and browser.view and hasattr(browser.view, 'hide'):
+                    browser.view.hide()
             def update(form):
                 from System.Drawing import Size
                 from System.Windows.Forms import Screen, FormWindowState
@@ -318,12 +333,32 @@ def _tray(api):
                             pystray.MenuItem('Quit Forge', lambda icon, item: api.quit()))
         api._tray = pystray.Icon('Forge', picture, 'Forge — local AI workspace', menu)
         api._tray.run_detached()
+        def notify(kind,summary):
+            if not api._tray or api._closing: return
+            message={'approval':'A tool action needs your approval.','outcome_unknown':'Inspect an interrupted action in Forge.'}.get(kind,
+                'Your Forge run '+str(summary.get('status','finished'))+'.')
+            try: api._tray.notify(message,'Forge')
+            except Exception: pass
+        api._ensure_service().desktop_notify=notify
     except Exception:
         api._tray = None
         log.exception('Tray startup failed')
 
 
 def main():
+    if '--forge-update' in sys.argv:
+        import argparse
+        import subprocess
+        from forge_updates import helper_main
+        parser=argparse.ArgumentParser()
+        parser.add_argument('--forge-update',required=True)
+        parser.add_argument('--forge-home',required=True)
+        parser.add_argument('--forge-parent-pid',required=True,type=int)
+        args=parser.parse_args()
+        result=helper_main(args.forge_home,args.forge_update,args.forge_parent_pid)
+        if result.get('restart_command'):
+            subprocess.Popen(result['restart_command'],creationflags=subprocess.CREATE_NO_WINDOW,close_fds=True)
+        return
     import webview
     import uvicorn
     from model_manager import create_app
@@ -389,6 +424,17 @@ def main():
                         time.sleep(.2)
                     if not result.get('ui', {}).get('composer') or not result['ui']['textarea']:
                         raise ValueError('React workspace did not render its composer.')
+                    # Use the real first-run dismissal; modal browser guards
+                    # must stay active in the production path and this fixture.
+                    result['setup_dismissed'] = api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('dialog[open] button')].find(e=>e.textContent.trim()==='Skip for now');if(button){button.click();return true;}return false;})()")
+                    if not result['setup_dismissed'] and api.call('setup_status').get('first_run'):
+                        deadline = time.monotonic() + 5
+                        while not result['setup_dismissed'] and time.monotonic() < deadline:
+                            time.sleep(.05)
+                            result['setup_dismissed'] = api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('dialog[open] button')].find(e=>e.textContent.trim()==='Skip for now');if(button){button.click();return true;}return false;})()")
+                    deadline = time.monotonic() + 5
+                    while api._window.evaluate_js("!!document.querySelector('dialog[open]')") and time.monotonic() < deadline:
+                        time.sleep(.05)
                     result.update(hud=api.mode('hud'), peek=api.mode('hud', True), full=api.mode('full'),
                                   pin=api.pin(True), unpin=api.pin(False), host=api.call('host_status'),
                                   projects=api.call('projects'), size=api._native(lambda form: [form.Width, form.Height]))

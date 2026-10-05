@@ -1,5 +1,5 @@
 import { cloneElement, isValidElement, useEffect, useId, useRef, useState } from 'react';
-import { Check, ChevronDown, Copy, Search, X, Eye, Wrench, LoaderCircle, ArrowUpRight } from 'lucide-react';
+import { Check, ChevronDown, Copy, Info, Search, X, Eye, Wrench, LoaderCircle, ArrowUpRight } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { api, bytesLabel, friendlyModel, isNative, native, tokenLabel } from './api';
 import type { Message, Model, RunEvent } from './types';
@@ -22,7 +22,7 @@ export function Badge({ children, tone = '' }: { children: React.ReactNode; tone
 export function ErrorNotice({ error, retry }: { error: string; retry?: () => void }) { return <div className="inline-error" role="alert"><span>{error}</span>{retry && <button onClick={retry}>Retry</button>}</div>; }
 export function PageHeader({ title, subtitle, children }: { title: string; subtitle?: string; children?: React.ReactNode }) { return <div className="page-header"><div><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div><div className="page-actions">{children}</div></div>; }
 export function Toggle({ label, checked, onChange, description, disabled }: { label: string; checked: boolean; onChange: (v: boolean) => void; description?: string; disabled?: boolean }) {
-  return <div className="setting-row"><div><span>{label}</span>{description && <small>{description}</small>}</div><button className="toggle" role="switch" aria-checked={checked} aria-label={label} disabled={disabled} onClick={() => onChange(!checked)}><span /></button></div>;
+  return <div className="setting-row"><div><span>{label}</span>{description && <small>{description}</small>}</div><button type="button" className="toggle" role="switch" aria-checked={checked} aria-label={label} disabled={disabled} onClick={() => onChange(!checked)}><span /></button></div>;
 }
 export function Markdown({ text }: { text: string }) {
   return <div className="markdown"><ReactMarkdown components={{ a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer">{children}<ArrowUpRight size={11} /></a>, pre: ({ children }) => <pre tabIndex={0}>{children}</pre> }}>{text}</ReactMarkdown></div>;
@@ -57,7 +57,7 @@ export function MessageView({ message, streaming = false, showThinking = true }:
     {message.sources?.length ? <details className="sources"><summary>Sources · {message.sources.length}</summary>{message.sources.map((s, i) => <a key={i} href={/^https?:\/\//.test(s.url) ? s.url : undefined} target="_blank" rel="noopener noreferrer">{s.title || s.url}</a>)}</details> : null}
   </article>;
 }
-export function ToolCard({ event }: { event: RunEvent }) { return <details className="tool-card"><summary>{event.state === 'running' ? <LoaderCircle size={13} className="spin" /> : <Check size={13} />}<span>{event.name}</span><small>{event.state}</small></summary><pre>{JSON.stringify(event.arguments ?? event.result ?? {}, null, 2)}</pre>{event.arguments && event.result !== undefined ? <pre>{typeof event.result === 'string' ? event.result : JSON.stringify(event.result, null, 2)}</pre> : null}</details>; }
+export function ToolCard({ event }: { event: RunEvent }) { return <details className="tool-card"><summary>{event.state === 'running' ? <LoaderCircle size={13} className="spin" /> : event.state === 'done' ? <Check size={13} /> : <Info size={13} />}<span>{event.name?.replaceAll('_', ' ') || 'Tool action'}</span><small>{event.state}</small></summary><pre>{JSON.stringify(event.arguments ?? event.result ?? {}, null, 2)}</pre>{event.arguments && event.result !== undefined ? <pre>{typeof event.result === 'string' ? event.result : JSON.stringify(event.result, null, 2)}</pre> : null}</details>; }
 export function ModelPicker({ models, value, select, open, setOpen, refresh, providerId = 'ollama' }: { models: Model[]; value: string; select: (name: string) => void; open: boolean; setOpen: (v: boolean) => void; refresh: () => void; providerId?: string }) {
   const [search, setSearch] = useState('');
   const [metadata, setMetadata] = useState<Record<string, Partial<Model>>>({});

@@ -28,6 +28,14 @@ COMMANDS=[dict(name=name,description=description) for name,description in (
  ('worktree','Create or inspect an isolated Git workspace'),('skill','Select a skill'),('mcp','Manage tool connections'),
  ('schedule','Schedule a workflow'),('help','Show slash commands'))]
 
+# Reads stay responsive while a consistent update snapshot drains mutations.
+READ_ACTIONS=frozenset(('bootstrap','commands','projects','chats','get_chat','attachment','tasks',
+    'runs','poll','plans','plan_get','unknown_actions','goals','goal_get','spaces','agents','schedules',
+    'usage','providers','models','show','permission_overrides','storage_info','setup_status',
+    'openrouter_status','github_status','github_repos','channel_list','channel_notifications',
+    'memory_list','memory_export','update_status','browser_status','browser_native_status',
+    'dictation_status','runtime_status','hf_status','performance_status'))
+
 class ForgeService:
     def __init__(self,core=None,store=None,data_dir=None):
         self.core=core or Core(); self.store=store or ForgeStore(data_dir); self.computer_broker=None; self.host_dictation=None
@@ -42,13 +50,42 @@ class ForgeService:
         self.performance_manager=None; self.model_manager=None; self.plan_lock=threading.RLock(); self.manager_lock=threading.RLock()
         self.worktree_lock=threading.RLock()
         self.schedule_lock=threading.RLock()
+        self.admission_lock=threading.RLock()
+        self.memory_manager=None; self.channel_manager=None; self.setup_manager=None; self.update_manager=None; self.openrouter_manager=None; self.github_manager=None
+
+    def get_memory(self):
+        with self.manager_lock:
+            if self.memory_manager is None:
+                from forge_memory import ForgeMemory
+                settings=self.store.get_settings()
+                self.memory_manager=ForgeMemory(self.store,semantic_enabled=settings.get('memory_semantic',False),model_path=settings.get('memory_model_path') or None)
+            return self.memory_manager
+
+    def get_channels(self):
+        with self.manager_lock:
+            if self.channel_manager is None:
+                from forge_channels import ChannelManager
+                self.channel_manager=ChannelManager(self,self.vault)
+                self.store.subscribe_events(self.channel_manager.on_run_event)
+            return self.channel_manager
+
+    def get_github(self):
+        with self.manager_lock:
+            if self.github_manager is None:
+                from forge_github import GitHubConnection
+                self.github_manager=GitHubConnection(self)
+            return self.github_manager
 
     def start_background(self):
         if self.background and self.background.is_alive(): return
+        self.get_channels().start()
         self.background=threading.Thread(target=self._scheduler,daemon=True,name='Forge-scheduler'); self.background.start()
 
     def shutdown(self):
         self.stop_event.set(); self.emergency_stop()
+        if self.channel_manager: self.channel_manager.shutdown()
+        if self.setup_manager: self.setup_manager.shutdown()
+        if self.update_manager and hasattr(self.update_manager,'shutdown'): self.update_manager.shutdown()
         with self.jobs.lock: threads=[j['thread'] for j in self.jobs.jobs.values()]
         for thread in threads: thread.join(timeout=2)
         if self.integrations: self.integrations.shutdown()
@@ -70,19 +107,58 @@ class ForgeService:
         return {'ok':True}
 
     def bootstrap(self):
-        return dict(version='4.1.1',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
+        return dict(version='4.2.0',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
                     chats=self.store.list_chats(),runs=self.store.runs(limit=200),goals=self.store.entities('goals'),
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
                     capabilities=dict(durable_runs=True,goals=True,usage=True,spaces=True,worktrees=True,schedules=True,
                        mcp=bool(self.integrations),skills=bool(self.integrations),plugins=bool(self.integrations),
-                       browser=bool(self.integrations),computer=os.name=='nt',dictation=os.name=='nt',managed_runtimes=True))
+                       browser=bool(self.integrations),computer=os.name=='nt',dictation=os.name=='nt',managed_runtimes=True,
+                       setup=True,memory=True,channels=True,updates=True))
 
     def dispatch(self,action,data=None):
-        data=data or {}
+        data={} if data is None else data
         if not isinstance(data,dict): raise ValueError('Expected an object.')
+        if action in READ_ACTIONS or action in ('pause','cancel','goal_pause','approve') or action=='settings' and not data:
+            return self._dispatch(action,data)
+        # The updater acquires this same gate before its snapshot; a request
+        # which began earlier either commits first or sees the prepared state.
+        with self.admission_lock:
+            if self.update_manager and self.update_manager.applying and action not in ('quit','emergency_stop'):
+                raise ValueError('Forge is preparing an update. Changes are paused until restart.')
+            return self._dispatch(action,data)
+
+    def _dispatch(self,action,data):
         if action=='bootstrap': return self.bootstrap()
-        if action=='settings': return self.store.update_settings(data) if data else self.store.get_settings()
+        if action=='settings':
+            result=self.store.update_settings(data) if data else self.store.get_settings()
+            if data and any(k in data for k in ('memory_semantic','memory_model_path')):
+                with self.manager_lock: self.memory_manager=None
+            return result
+        if action.startswith('setup_'):
+            with self.manager_lock:
+                if self.setup_manager is None:
+                    from forge_setup import SetupManager
+                    self.setup_manager=SetupManager(self)
+            return self.setup_manager.dispatch(action,data)
+        if action.startswith('openrouter_'):
+            with self.manager_lock:
+                if self.openrouter_manager is None:
+                    from forge_openrouter import OpenRouterConnection
+                    self.openrouter_manager=OpenRouterConnection(self)
+            return self.openrouter_manager.dispatch(action,data)
+        if action.startswith('github_'):
+            return self.get_github().dispatch(action,data)
+        if action.startswith(('update_','diagnostics_')):
+            with self.manager_lock:
+                if self.update_manager is None:
+                    from forge_updates import UpdateManager
+                    self.update_manager=UpdateManager(self,current_version='4.2.0')
+            return self.update_manager.dispatch(action,data)
+        if action.startswith(('channel_','notification_')):
+            return self.get_channels().dispatch(action,data)
+        if action.startswith('memory_') or action in ('skill_suggest','skill_promote'):
+            return self.get_memory().dispatch(action,data,human=True,project_id=data.get('project_id'),agent_id=data.get('agent_id'))
         if action=='permission_overrides': return {'overrides':self.store.get_settings().get('permission_overrides',{})}
         if action=='permission_override_save':
             if data.get('scope') not in ('tool','server','app','project') or data.get('profile') not in ('always_ask','full_access','deny_access'): raise ValueError('Invalid permission override.')
@@ -197,6 +273,7 @@ class ForgeService:
         if action in ('files','file_read','file_search','workspace_files','workspace_read'):
             project=self.store.get_project(data['project_id']); tool={'files':'list_files','file_read':'read_file','file_search':'search_files','workspace_files':'list_files','workspace_read':'read_file'}[action]
             args={k:v for k,v in data.items() if k!='project_id'}
+            if tool=='list_files' and not args.get('path'): args['path']='.'
             result=ProjectTools(project['path'],self.store.home/'backups').execute(tool,args)
             if action=='workspace_files':
                 entries=result.get('entries',result.get('files',[]))
@@ -212,6 +289,45 @@ class ForgeService:
             result=set_startup(data['enabled']); self.store.update_settings({'startup':result['enabled']}); return result
         if action in ('pull','delete') and 'name' in data and 'model' not in data: data={**data,'model':data['name']}
         return self.core.dispatch(action,data)
+
+    def channel_start(self,data,channel_id,external_id):
+        """The paired gateway binds identity and scope; commit its request once."""
+        source_key='channel:'+channel_id+':'+external_id
+        with self.jobs.lock:
+            with self.store._connection() as db:
+                row=db.execute('SELECT run_id FROM request_keys WHERE source_key=?',(source_key,)).fetchone()
+            if row:
+                run=self.store.run(row[0]); return {'id':run['id'],'chat_id':run['chat_id'],'status':run['status']}
+            current=self.store.get_settings()
+            from forge_channels import permission_ceiling
+            data={**data,'source_key':source_key,
+                'permission_profile':permission_ceiling(data.get('permission_profile','always_ask'),current['permission_profile']),
+                'permission_ceiling':permission_ceiling(data.get('permission_profile','always_ask'),current['permission_profile'])}
+            if data.get('agent_profile_id'):
+                profile=self.store.entity('agents',data['agent_profile_id'])
+                if not profile.get('enabled'): raise ValueError('Enable the configured agent first.')
+                data.update(agent_id=profile['id'],instructions=profile.get('instructions',''),
+                    agent_tools=profile.get('tools',[]),skills=profile.get('skills',[]),
+                    context=profile.get('context',current['context']),model=profile.get('model') or data.get('model') or current['model'],
+                    readonly=profile.get('role') in ('researcher','reviewer'))
+                if profile.get('provider_id'): data['provider_id']=profile['provider_id']
+                if data.get('project_id') and not data['readonly']:
+                    from hashlib import sha256
+                    key=sha256((channel_id+':'+data['chat_id']).encode()).hexdigest()
+                    with self.worktree_lock:
+                        workspace=next((w for w in self.store.entities('channel_workspaces') if w['id']==key),None)
+                        if workspace:
+                            self.store.get_project(workspace['workspace_project_id'])
+                            data.update(workspace_project_id=workspace['workspace_project_id'],worktree_id=workspace['worktree_id'])
+                        else:
+                            project=self.store.get_project(data['project_id'])
+                            if self._git(Path(project['path']),['rev-parse','--is-inside-work-tree'],check=False).returncode==0:
+                                worktree=self.worktree_create({'project_id':project['id']})
+                                workspace=self.store.save_entity('channel_workspaces',dict(id=key,channel_id=channel_id,
+                                    chat_id=data['chat_id'],workspace_project_id=worktree['project']['id'],worktree_id=worktree['worktree']['id']))
+                                data.update(workspace_project_id=workspace['workspace_project_id'],worktree_id=workspace['worktree_id'])
+                            # Non-Git projects retain the coordinator's writer lock.
+            return self.jobs.start(data,channel=(channel_id,external_id))
 
     def create_project(self,data):
         name=data.get('name','New project'); path=data.get('path')
@@ -350,6 +466,7 @@ class ForgeService:
         from context_window import validate_context
         validate_context(profile['context'])
         if profile['role'] not in ('researcher','coder','reviewer'): raise ValueError('Unknown agent role.')
+        if profile.get('provider_id') and profile['provider_id']!='ollama': self.store.entity('providers',profile['provider_id'])
         if 'goal_limits' in profile: profile['goal_limits']=validate_goal_limits(profile['goal_limits'])
         for key in ('rounds','tokens'):
             if key in profile and (type(profile[key]) is not int or not 1<=profile[key]<=1_000_000_000): raise ValueError('Agent '+key+' limit must be a positive integer.')
@@ -366,20 +483,24 @@ class ForgeService:
         if project_id and not readonly:
             project=self.store.get_project(project_id)
             if self._git(Path(project['path']),['rev-parse','--is-inside-work-tree'],check=False).returncode==0:
-                worktree=self.worktree_create({'project_id':project_id}); project_id=worktree['project']['id']
+                worktree=self.worktree_create({'project_id':project_id})
             elif parent and parent.get('project_id')==project_id:
                 raise ValueError('Writing delegation requires a Git worktree. Initialize and commit this project, or run the agent after the main writer pauses.')
         result=self.jobs.start({**settings,'context':profile.get('context',settings['context']),
+            'provider_id':profile.get('provider_id') or settings['provider_id'],
             'model':profile.get('model') or settings['model'],'text':data.get('text') or data.get('prompt') or 'Inspect the project.',
             'project_id':project_id,'parent_id':data.get('parent_id'),'readonly':readonly,
             'instructions':profile.get('instructions',''),'agent_id':profile['id'],'agent_tools':profile.get('tools',[]),'skills':profile.get('skills',[]),
             'worktree_id':worktree['worktree']['id'] if worktree else None,
+            'workspace_project_id':worktree['project']['id'] if worktree else None,
+            'permission_ceiling':(parent or {}).get('permission_ceiling') or data.get('permission_ceiling'),
             'goal_id':parent.get('goal_id') if parent else None})
         self.store.update_run(result['id'],instructions=profile.get('instructions',''),agent_id=profile['id'],
             agent_tools=profile.get('tools',[]),skills=profile.get('skills',[]),worktree_id=worktree['worktree']['id'] if worktree else None)
         return {**result,'worktree':worktree}
 
     def provider_save(self,data):
+        if data.get('kind')=='openrouter': return self.dispatch('openrouter_save',data)
         data={**data,'url':data.get('url') or data.get('base_url',''),'kind':data.get('kind') or data.get('type','openai-compatible')}
         url=data.get('url',''); parsed=urlparse(url)
         if parsed.scheme not in ('http','https') or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:

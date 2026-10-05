@@ -18,6 +18,7 @@ DEFAULTS = dict(context=32768, model='', provider_id='ollama', permission_profil
                 thinking=True, web=True, timezone='UTC', performance='balanced', keep_alive='10m',
                 auto_compact=True, auto_delegate=False, startup=False, dictation_model='base',allow_edits=True,
                 computer_tools=False,browser_tools=True,num_thread=4,
+                memory_enabled=True,memory_suggestions=True,memory_semantic=False,memory_model_path='',
                 goal_limits={'minutes':60, 'tokens':100000, 'rounds':128, 'tools':256})
 TERMINAL = {'completed', 'cancelled', 'failed', 'paused', 'interrupted'}
 
@@ -54,10 +55,15 @@ class ForgeStore(Store):
                           'skills','plugins','runtimes','artifacts'):
             (self.home/directory).mkdir(exist_ok=True)
         destination = self.home/'state'/'forge.sqlite3'
+        existing_data=destination.exists()
         if not explicit and not destination.exists():
             self._import_sidekick(destination)
+            existing_data=destination.exists()
+        self.installation_origin='upgraded' if existing_data else 'new'
         super().__init__(self.home/'state', db_name='forge.sqlite3')
         self._goal_lock = threading.RLock()
+        self._event_listeners = []
+        self._listener_lock = threading.RLock()
         self._migrate()
 
     def _import_sidekick(self, destination):
@@ -90,14 +96,14 @@ class ForgeStore(Store):
         with self._connection() as db:
             present=db.execute("SELECT 1 FROM sqlite_master WHERE name='forge_migrations'").fetchone()
             previous=db.execute('SELECT COALESCE(MAX(version),0) FROM forge_migrations').fetchone()[0] if present else 0
-        if 0<previous<4:
-            backup=self.home/'backups'/('pre-schema-4-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f'))
+        if 0<previous<5:
+            backup=self.home/'backups'/('pre-schema-5-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f'))
             backup.mkdir()
             with sqlite3.connect(self.db_path) as src, sqlite3.connect(backup/'forge.sqlite3') as dst: src.backup(dst)
         with self._connection(transaction='write') as db:
             db.execute('CREATE TABLE IF NOT EXISTS forge_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
             version = db.execute('SELECT COALESCE(MAX(version),0) FROM forge_migrations').fetchone()[0]
-            if version > 4: raise ValueError('This workspace requires a newer Forge version.')
+            if version > 5: raise ValueError('This workspace requires a newer Forge version.')
             if version < 1:
                 for statement in (
                     'CREATE TABLE forge_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)',
@@ -122,6 +128,14 @@ class ForgeStore(Store):
                 db.execute('ALTER TABLE chats ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1))')
                 db.execute('CREATE INDEX chats_archived_updated ON chats(archived,updated_at)')
                 db.execute('INSERT INTO forge_migrations VALUES(4,?)',(_now(),))
+            if version < 5:
+                from forge_memory import MEMORY_SCHEMA
+                from forge_channels import CHANNEL_SCHEMA
+                for statement in (*MEMORY_SCHEMA, *CHANNEL_SCHEMA,
+                    'CREATE TABLE request_keys(source_key TEXT PRIMARY KEY,run_id TEXT NOT NULL REFERENCES runs(id))'):
+                    db.execute(statement)
+                db.execute('INSERT INTO forge_settings VALUES(?,?) ON CONFLICT(key) DO NOTHING',('setup_origin',encode(self.installation_origin)))
+                db.execute('INSERT INTO forge_migrations VALUES(5,?)',(_now(),))
         if not self.entities('agents'):
             for role, instruction in (
                 ('Researcher','Research using primary sources. Cite sources and explain uncertainty. Do not edit the project.'),
@@ -222,6 +236,9 @@ class ForgeStore(Store):
         if 'tokens' in settings and settings['tokens'] not in (1024,2048,4096,8192): raise ValueError('Invalid response length.')
         if 'num_thread' in settings and (type(settings['num_thread']) is not int or not 1<=settings['num_thread']<=64): raise ValueError('CPU threads must be between 1 and 64.')
         if 'temperature' in settings and (type(settings['temperature']) not in (float,int) or not 0<=settings['temperature']<=1): raise ValueError('Invalid temperature.')
+        for key in ('memory_enabled','memory_suggestions','memory_semantic'):
+            if key in settings and type(settings[key]) is not bool: raise ValueError('Memory preferences must be true or false.')
+        if 'memory_model_path' in settings and (not isinstance(settings['memory_model_path'],str) or len(settings['memory_model_path'])>1000): raise ValueError('Invalid local embedding directory.')
         if 'goal_limits' in settings: settings={**settings,'goal_limits':validate_goal_limits(settings['goal_limits'])}
         if 'permission_overrides' in settings:
             overrides=settings['permission_overrides']
@@ -266,6 +283,43 @@ class ForgeStore(Store):
             db.execute('INSERT INTO runs VALUES(?,?,?,?,?,?,?,?)',(data['id'],data['chat_id'],data.get('parent_id'),data.get('goal_id'),'queued',encode(data),stamp,stamp))
         return data
 
+    def accept_request(self,data,chat_id=None,*,source_key=None,channel=None):
+        """Commit chat, original request and run together before inference starts."""
+        stamp=_now(); data=dict(data)
+        images=data.get('images',[])
+        metadata=self._metadata({'images':images} if images else {})
+        with self._connection(transaction='write') as db:
+            if source_key:
+                if not isinstance(source_key,str) or len(source_key)>500: raise ValueError('Invalid request identity.')
+                prior=db.execute('SELECT run_id FROM request_keys WHERE source_key=?',(source_key,)).fetchone()
+                if prior:
+                    run=json.loads(db.execute('SELECT data FROM runs WHERE id=?',(prior[0],)).fetchone()[0])
+                    return run,False
+            if chat_id:
+                chat=self._chat(db,chat_id)
+                if chat.get('archived'): raise ValueError('Restore this archived chat before starting a run.')
+                if chat.get('project_id')!=data.get('project_id'): raise ValueError('The chat project changed. Refresh before starting.')
+            else:
+                if data.get('project_id'): self._project(db,data['project_id'])
+                chat_id=uuid4().hex
+                db.execute('INSERT INTO chats(id,project_id,title,model,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                    (chat_id,data.get('project_id'),data['request'].splitlines()[0][:70],data['settings']['model'],stamp,stamp))
+                chat=self._chat(db,chat_id)
+            active=db.execute("SELECT id FROM runs WHERE chat_id=? AND status NOT IN ('completed','cancelled','failed','paused','interrupted')",(chat_id,)).fetchone()
+            if active: raise ValueError('This chat already has an active run.')
+            cursor=db.execute('INSERT INTO messages(chat_id,role,content,metadata,created_at) VALUES(?,?,?,?,?)',
+                (chat_id,'user',data['request'],metadata,stamp))
+            data.update(id=data.get('id') or uuid4().hex,chat_id=chat_id,request_message_id=cursor.lastrowid,
+                boundary=chat.get('compacted_through',0),status='queued',created_at=stamp,updated_at=stamp,source_key=source_key)
+            db.execute('INSERT INTO runs VALUES(?,?,?,?,?,?,?,?)',(data['id'],chat_id,data.get('parent_id'),data.get('goal_id'),'queued',encode(data),stamp,stamp))
+            db.execute('UPDATE chats SET model=?,updated_at=? WHERE id=?',(data['settings']['model'],stamp,chat_id))
+            if source_key: db.execute('INSERT INTO request_keys VALUES(?,?)',(source_key,data['id']))
+            if channel:
+                changed=db.execute("UPDATE channel_inbound SET status='dispatched',run_id=?,updated_at=? WHERE channel_id=? AND external_id=? AND status IN ('pending','dispatching')",
+                    (data['id'],stamp,*channel)).rowcount
+                if changed!=1: raise ValueError('The channel request is no longer pending.')
+        return data,True
+
     def run(self,identifier):
         with self._connection() as db:
             row=db.execute('SELECT data FROM runs WHERE id=?',(identifier,)).fetchone()
@@ -286,11 +340,43 @@ class ForgeStore(Store):
             db.execute('UPDATE runs SET status=?,data=?,updated_at=? WHERE id=?',(data['status'],encode(data),data['updated_at'],identifier))
         return data
 
+    def finish_run(self,identifier,changes,payload):
+        """Publish terminal state and its final event in one journal transaction."""
+        with self._connection(transaction='write') as db:
+            row=db.execute('SELECT data FROM runs WHERE id=?',(identifier,)).fetchone()
+            if not row: raise ValueError('Run not found.')
+            data=json.loads(row[0]); data.update(changes,updated_at=_now())
+            db.execute('UPDATE runs SET status=?,data=?,updated_at=? WHERE id=?',(data['status'],encode(data),data['updated_at'],identifier))
+            seq=db.execute('SELECT COALESCE(MAX(seq),0)+1 FROM run_events WHERE run_id=?',(identifier,)).fetchone()[0]
+            db.execute('INSERT INTO run_events VALUES(?,?,?,?,?)',(identifier,seq,'done',encode(payload),_now()))
+            db.execute('INSERT INTO channel_event_journal(run_id,seq) VALUES(?,?)',(identifier,seq))
+        event=dict(payload,seq=seq,type='done',run_id=identifier)
+        with self._listener_lock: listeners=list(self._event_listeners)
+        for listener in listeners:
+            try: listener(event)
+            except Exception: pass
+        return data
+
     def event(self,identifier,event_type,**payload):
         with self._connection(transaction='write') as db:
             seq=db.execute('SELECT COALESCE(MAX(seq),0)+1 FROM run_events WHERE run_id=?',(identifier,)).fetchone()[0]
             db.execute('INSERT INTO run_events VALUES(?,?,?,?,?)',(identifier,seq,event_type,encode(payload),_now()))
-        return dict(payload,seq=seq,type=event_type,run_id=identifier)
+            db.execute('INSERT INTO channel_event_journal(run_id,seq) VALUES(?,?)',(identifier,seq))
+        event=dict(payload,seq=seq,type=event_type,run_id=identifier)
+        # Listeners journal local notifications only; never perform network I/O here.
+        with self._listener_lock: listeners=list(self._event_listeners)
+        for listener in listeners:
+            try: listener(event)
+            except Exception: pass
+        return event
+
+    def subscribe_events(self,listener):
+        with self._listener_lock:
+            if listener not in self._event_listeners: self._event_listeners.append(listener)
+
+    def unsubscribe_events(self,listener):
+        with self._listener_lock:
+            if listener in self._event_listeners: self._event_listeners.remove(listener)
 
     def events(self,identifier,after=0,limit=500):
         if type(after) is not int or after<0: raise ValueError('Invalid event cursor.')

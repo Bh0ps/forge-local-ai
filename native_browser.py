@@ -64,6 +64,7 @@ class NativeBrowser:
         with self.lock:
             available = not self.closed and bool(self.view_factory or os.name == 'nt' and self.ui_dispatch)
             return dict(available=available, engine='WebView2', **self.state,
+                embedded=True, visible=bool(getattr(self.view, 'visible', False)),
                 message=self.state['error'] or ('Ready — uses the Windows web runtime' if available else 'Open Forge desktop to use the built-in browser'),
                 capabilities=['navigate', 'inspect', 'click', 'type', 'screenshot', 'back', 'forward', 'reload'])
 
@@ -75,7 +76,8 @@ class NativeBrowser:
         if self.view_factory:
             view = self.view_factory(self._changed)
         else:
-            view = self.ui_dispatch(lambda owner: WebView2Page(owner, self.home, self.ui_dispatch, self._changed))
+            from embedded_browser import EmbeddedWebView2Page
+            view = self.ui_dispatch(lambda owner: EmbeddedWebView2Page(owner, self.home, self.ui_dispatch, self._changed))
         with self.lock:
             self.view = view
             self.state.update(running=True, error=None)
@@ -83,7 +85,7 @@ class NativeBrowser:
             view.ready()
         except Exception as exc:
             try:
-                view.close()
+                (getattr(view, 'dispose', None) or view.close)()
             finally:
                 with self.lock:
                     self.view = None
@@ -96,12 +98,12 @@ class NativeBrowser:
             raise ValueError('Expected browser controls object.')
         if action == 'status':
             return self.status()
-        if action not in ('open', 'show', 'navigate', 'back', 'forward', 'reload', 'close'):
+        if action not in ('open', 'show', 'resize', 'hide', 'navigate', 'back', 'forward', 'reload', 'close'):
             raise ValueError('Unknown native browser control.')
         return self.pool.submit(self._manual, action, data).result(timeout=45)
 
     def _manual(self, action, data):
-        if action == 'close':
+        if action in ('close', 'hide'):
             if self.view:
                 self.view.close()
             return {'ok': True, **self.status()}
@@ -110,7 +112,11 @@ class NativeBrowser:
         self.cancelled.clear()
         self._check()
         self._start()
-        self.view.show()
+        if action in ('show', 'resize') and data.get('rect') is not None:
+            if not hasattr(self.view, 'bind'): raise BrowserGuard('This browser does not support an embedded pane.')
+            self.view.bind(data)
+        elif action != 'open' or not getattr(self.view, 'embedded', False):
+            self.view.show()
         if action in ('open', 'navigate') and (action == 'navigate' or data.get('url')):
             self.view.navigate(browser_url(data.get('url', 'about:blank')))
         elif action in ('back', 'forward', 'reload'):
@@ -189,6 +195,7 @@ class NativeBrowser:
             return {'ok': True, 'artifact': str(artifact), 'mimeType': 'image/png', 'url': self.state['url'],
                 'content': [{'type': 'image', 'artifact': str(artifact), 'mimeType': 'image/png'}]}
         snapshot = self._snapshot(data, context, focus=False)
+        if hasattr(self.view, 'preflight'): self.view.preflight()
         selector = data.get('selector')
         if selector not in snapshot['signatures']:
             raise BrowserGuard('Choose a selector returned by browser_inspect.')
@@ -213,6 +220,7 @@ class NativeBrowser:
             raise RuntimeError('Owned browser focus changed after focusing. Inspect before retrying.')
         try:
             self._check(context)
+            if hasattr(self.view, 'preflight'): self.view.preflight()
         except BrowserGuard as exc:
             if focused_effect:
                 raise RuntimeError('Browser focused, then action cancelled before dispatch.') from exc
@@ -264,7 +272,7 @@ class NativeBrowser:
             return
         self.cancelled.set()
         if self.view:
-            self.view.close()
+            (getattr(self.view, 'dispose', None) or self.view.close)()
         self.closed = True
         self.pool.shutdown(wait=False, cancel_futures=True)
 
@@ -440,6 +448,9 @@ class WebView2Page:
         return self.ui(lambda _: bool(self.form.ContainsFocus and self.form.Visible))
 
     def navigate(self, url):
+        # Navigate schedules WebView2 events asynchronously. Mark loading before
+        # returning so a client cannot inspect between dispatch and Starting.
+        self.changed('navigation', url)
         self.ui(lambda _: self.control.CoreWebView2.Navigate(url))
 
     def history(self, action):
