@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY model_manager.py .
+COPY core.py .
+COPY runtime.py .
+COPY agent_runtime.py service.py storage.py project_tools.py tool_calls.py recovery.py context_window.py ./
+COPY frontend/ frontend/
+
+# Expose port
+EXPOSE 8081
+
+# Run the model manager
+CMD ["python", "model_manager.py"]

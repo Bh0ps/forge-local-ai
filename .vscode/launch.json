@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Desktop companion",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/desktop.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Web server",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/model_manager.py",
+      "console": "integratedTerminal"
+    }
+  ]
+}

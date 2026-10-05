@@ -1,0 +1,10 @@
+{
+    "python": {
+        "default": {
+            "justMyCode": true,
+            "env": {
+                "OLLAMA_API_BASE": "http://localhost:11434/api"
+            }
+        }
+    }
+}

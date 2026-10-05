@@ -1,0 +1,4 @@
+httpx==0.28.1
+fastapi==0.141.1
+uvicorn==0.52.4
+ddgs==9.16.0
