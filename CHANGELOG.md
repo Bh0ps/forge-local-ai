@@ -20,6 +20,9 @@
   tool invocation.
 - Atomic run completion, channel-safe chat deletion, isolated goal Coder workspaces
   and remote compaction failure recovery without automatic quota retries.
+- Continued streaming across replayed completion records and rediscovery of
+  chats resumed from another client, preserving consumed event cursors. Saved
+  assistant rounds are reconciled without removing legitimate repeated answers.
 - Hash-locked Windows CI, installer/portable build stages, dependency notices,
   privacy-safe diagnostics and signed-update verification/rollback infrastructure.
   Public packages remain unsigned while signing setup is deferred.

@@ -9,7 +9,7 @@ export interface Settings {
   model: string; web: boolean; allow_edits: boolean; performance: string; startup: boolean; num_thread?: number;
   timezone: string; [key: string]: unknown;
 }
-export interface Run { id: string; chat_id?: string; project_id?: string; created_at?: string; status?: string; mode?: string; recovery?: string; model?: string; text?: string; request?: string; settings?: Partial<Settings>; parent_id?: string; goal_id?: string; cursor?: number; }
+export interface Run { id: string; chat_id?: string; project_id?: string; created_at?: string; status?: string; mode?: string; recovery?: string; model?: string; text?: string; request?: string; request_message_id?: number; settings?: Partial<Settings>; parent_id?: string; goal_id?: string; cursor?: number; }
 export interface RunEvent { seq?: number; type: string; text?: string; name?: string; state?: string; number?: number; result?: unknown; arguments?: unknown; approval_id?: string; command?: string; cancelled?: boolean; reason?: string; [key: string]: unknown; }
 export interface Approval { job_id: string; approval_id: string; name: string; arguments?: unknown; command?: string; }
 export interface Goal { id: string; title?: string; text?: string; status: string; markdown?: string; path?: string; tasks?: Task[]; next_action?: string; }

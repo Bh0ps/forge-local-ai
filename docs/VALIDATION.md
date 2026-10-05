@@ -170,7 +170,7 @@ what this release actually verified.
 
 ## Forge 4.2 release checks
 
-The October 5, 2026 upgrade passed 813 Python tests and 65 frontend tests in a
+The October 5, 2026 upgrade passed 813 Python tests and 77 frontend tests in a
 separate environment installed from the hashed dependency locks. Subsequent
 focused updater checks include interrupted-install recovery: unknown installer
 outcomes block another automatic attempt. Source TypeScript compilation and the
@@ -189,6 +189,10 @@ and signed-update gates with no browser console errors. Protocol tests cover
 atomic run completion, permission changes on accepted connected tasks, cancelled
 chat delivery, external-event deduplication, rollback quarantine and malformed
 usage counters. A buffered output burst cannot inflate the backend speed estimate.
+Long event histories continue across old completion records after Resume, and
+clients rediscover runs resumed elsewhere without repeating a start action.
+Saved assistant rounds render once after replay, while legitimate identical
+rounds and newly streamed answers remain visible.
 
 Live public GitHub browsing, README retrieval and a disposable managed clone
 passed. Live public OpenRouter metadata returned the free router and advertised
