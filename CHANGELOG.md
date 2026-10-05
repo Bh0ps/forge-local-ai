@@ -1,5 +1,23 @@
 # Changelog
 
+## 4.2.1
+
+- Build and `/goal` continue a reviewed plan with an explicit implementation
+  request and a durable goal checkpoint. Goal/chat admission commits atomically;
+  inherited child runs cannot replace the main goal's identity.
+- One `/todo` palette entry; the older `/to-do` spelling remains compatible.
+  The Goals panel contains only active goals whose conversations still exist.
+- Mid-run text steering interrupts generation, preserves partial replies and
+  waits for started tool actions before changing direction. Unstarted actions
+  and pending approvals are superseded, with no repeated completed writes.
+- Selectable agent questions include a recommendation and custom answers.
+  Questions survive pause/restart and become answerable only after tool results
+  are paired. Answers never grant action permissions.
+- Latest steering and answered choices remain exact across context compaction.
+  Accepted human inputs appear during the run without duplicating saved replies.
+- Desktop launch is maximized; HUD/Expand and tray reopening preserve it.
+  Memory review/search is on the left, with categories and preferences on the right.
+
 ## 4.2.0
 
 - Guided hardware, engine and model setup with resumable downloads and explicit

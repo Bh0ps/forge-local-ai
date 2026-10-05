@@ -1,4 +1,26 @@
-# Forge 4.1 validation
+# Forge validation
+
+## 4.2.1 workflow corrections
+
+Coordinator regressions cover explicit reviewed-plan execution, goal admission
+and original-objective retention, main/child goal identity, single slash discovery,
+active-goal filtering, generation and approval steering, completed-action
+preservation, exact retained input after compaction, and question recovery after
+an interruption before its tool response. Rapid answers in mixed tool batches
+cannot appear before the batch's protocol responses.
+
+A disposable production UI test completed `/plan` → selectable question → saved
+plan → Build goal → steer → HUD question → completed checklist. It made six
+fixture inference requests across four goal rounds, updated the checklist once,
+and produced no unknown actions, duplicate messages, project-file edits or
+JavaScript errors. This tests the coordinator and UI contract, not whether every
+local model chooses the question tool reliably.
+
+Memory layout was checked at 1440, 1024, 800 and 540 pixel viewports with 125%
+scaling, without horizontal overflow. Desktop regressions verify maximized launch,
+HUD/Expand restoration and tray reopening. Public Windows packages remain an
+unsigned preview; signing and clean consumer-VM/Docker/GPU acceptance limits from
+4.2.0 still apply.
 
 This report distinguishes automated contracts, live Windows/model checks and
 configurations that still need deployment testing. Measurements use disposable

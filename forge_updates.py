@@ -188,7 +188,7 @@ async def _get_bytes(client, url, limit, cancel=None, progress=None, consume=Non
 
 
 class UpdateManager:
-    def __init__(self, service, current_version='4.2.0', install_dir=None, trust_policy=None,
+    def __init__(self, service, current_version='4.2.1', install_dir=None, trust_policy=None,
                  client_factory=None, verifier=authenticode):
         self.service, self.store = service, service.store
         self.home = self.store.home

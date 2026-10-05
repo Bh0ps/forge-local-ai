@@ -121,6 +121,9 @@ def _delete(service,chat_id):
                     db.execute('UPDATE runs SET parent_id=NULL,data=? WHERE id=?',(encode(data),row['id']))
             for row in db.execute('SELECT kind,id,data FROM entities').fetchall():
                 data=json.loads(row['data']); changed=False
+                if row['kind'] in ('questions','steers') and data.get('chat_id')==chat_id:
+                    db.execute('DELETE FROM entities WHERE kind=? AND id=?',(row['kind'],row['id']))
+                    continue
                 if data.get('chat_id')==chat_id:
                     data.update(chat_id=None,detached_chat_id=chat_id);changed=True
                 if chat_id in (data.get('chat_ids') or []):

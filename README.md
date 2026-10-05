@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/forge.svg" width="96" alt="Forge"></p>
 
-# Forge 4.2
+# Forge 4.2.1
 
 **A local AI workspace for coding, research and computer tools. Open source under [MIT](LICENSE).**
 
@@ -15,6 +15,10 @@ GitHub connection. The native agent browser is embedded beside Files and
 Activity. Context presets sit beside dictation; live generation speed comes
 from backend timing rather than text arriving at the interface.
 
+The 4.2.1 correction makes Build start a tracked goal with clear implementation
+instructions, adds mid-run steering and selectable questions, and cleans up
+active goals and the Memory layout. Desktop launches are maximized.
+
 Cloud integrations are optional and require explicit setup. OpenRouter agents
 use free-only routes with no paid fallback, subject to provider availability
 and quotas. GitHub draft PRs always need approval. Windows packages are currently
@@ -27,6 +31,7 @@ configured. Existing installations and local state are retained for rollback.
 · [Guided setup](docs/SETUP.md) · [Memory](docs/MEMORY.md)
 · [Telegram and webhooks](docs/CHANNELS.md) · [OpenRouter](docs/OPENROUTER.md)
 · [GitHub](docs/GITHUB.md) · [Updates](docs/UPDATES.md)
+· [Plans, steering and questions](docs/WORKFLOW_INPUT.md)
 
 ## Workspace
 

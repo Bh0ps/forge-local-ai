@@ -99,6 +99,7 @@ describe('reviewed memory controls', () => {
   it('promotes a learned skill with edited instructions, source license and explicit acceptance', async () => {
     const { call } = bridge({ memory_list: { items: [], skills: [{ id: 'skill_fixture', name: 'fixture-workflow', description: 'Review before use.', markdown: '---\nname: fixture-workflow\n---\nProvisional instructions.', scope: 'global', status: 'pending', revision: 2, license: 'Unspecified; review required' }] }, skill_promote: { ok: true } });
     render(<MemoryPage projects={[project]} settings={settings} onChange={vi.fn(async () => {})} notify={vi.fn()} />);
+    await userEvent.click(await screen.findByRole('button', { name: /Learned skills/ }));
     await userEvent.click(await screen.findByRole('button', { name: 'Review skill' }));
     expect((screen.getByRole('button', { name: 'Promote skill' }) as HTMLButtonElement).disabled).toBe(true);
     fireEvent.change(screen.getByLabelText('Instructions'), { target: { value: 'Inspect local files, make one reviewed change, and verify it.' } });

@@ -197,4 +197,10 @@ describe('saved transcript reconciliation', () => {
     const live = { ...active([assistant('Different first round.')]), text: 'Repeat.', currentPersisted: true };
     expect(reconcileRunMessages(live, transcript([request, assistant('Saved first round.', 11), assistant('Repeat.', 12)])).showCurrent).toBe(true);
   });
+  it('reconciles saved rounds across same-run steering or answers without crossing unrelated users', () => {
+    const live = active([assistant('Before the steer.'), assistant('After the steer.')]);
+    const accepted = { id: 12, role: 'user', content: 'Use the simpler option.', interaction_run_id: 'run' };
+    expect(reconcileRunMessages(live, transcript([request, assistant('Before the steer.', 11), accepted, assistant('After the steer.', 13)])).parts).toHaveLength(0);
+    expect(reconcileRunMessages(live, transcript([request, assistant('Before the steer.', 11), { ...accepted, interaction_run_id: 'other-run' }, assistant('After the steer.', 13)])).parts.map(message => message.content)).toEqual(['After the steer.']);
+  });
 });

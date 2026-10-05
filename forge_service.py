@@ -34,7 +34,7 @@ READ_ACTIONS=frozenset(('bootstrap','commands','projects','chats','get_chat','at
     'usage','providers','models','show','permission_overrides','storage_info','setup_status',
     'openrouter_status','github_status','github_repos','channel_list','channel_notifications',
     'memory_list','memory_export','update_status','browser_status','browser_native_status',
-    'dictation_status','runtime_status','hf_status','performance_status'))
+    'dictation_status','runtime_status','hf_status','performance_status','pending_questions'))
 
 class ForgeService:
     def __init__(self,core=None,store=None,data_dir=None):
@@ -52,6 +52,14 @@ class ForgeService:
         self.schedule_lock=threading.RLock()
         self.admission_lock=threading.RLock()
         self.memory_manager=None; self.channel_manager=None; self.setup_manager=None; self.update_manager=None; self.openrouter_manager=None; self.github_manager=None
+        self.interaction_manager=None
+
+    def get_interaction(self):
+        with self.manager_lock:
+            if self.interaction_manager is None:
+                from forge_interaction import RunInteraction
+                self.interaction_manager=RunInteraction(self)
+            return self.interaction_manager
 
     def get_memory(self):
         with self.manager_lock:
@@ -107,8 +115,8 @@ class ForgeService:
         return {'ok':True}
 
     def bootstrap(self):
-        return dict(version='4.2.0',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
-                    chats=self.store.list_chats(),runs=self.store.runs(limit=200),goals=self.store.entities('goals'),
+        return dict(version='4.2.1',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
+                    chats=self.store.list_chats(),runs=self.store.runs(limit=200),goals=self.store.active_goals(),
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
                     capabilities=dict(durable_runs=True,goals=True,usage=True,spaces=True,worktrees=True,schedules=True,
@@ -153,7 +161,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='4.2.0')
+                    self.update_manager=UpdateManager(self,current_version='4.2.1')
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)
@@ -195,6 +203,9 @@ class ForgeService:
         if action=='create_task': return self.store.create_task(data['project_id'],data['title'])
         if action=='update_task': return self.store.update_task(data['project_id'],data['task_id'],data['status'])
         if action=='start_chat': return self.jobs.start(data)
+        if action=='run_steer': return self.jobs.steer(data['run_id'],data.get('text'),data.get('client_id'))
+        if action=='pending_questions': return {'questions':self.get_interaction().pending(data.get('chat_id'),data.get('run_id'))}
+        if action=='answer_question': return self.get_interaction().answer(data['question_id'],data.get('answers'))
         if action=='runs': return {'runs':self.store.runs(limit=200)}
         if action=='poll': return self.jobs.poll(data['id'],data.get('after',0))
         if action in ('pause','cancel'): return self.jobs.cancel(data['id'],pause=action=='pause')
@@ -206,7 +217,7 @@ class ForgeService:
         if action=='plan_build': return self.plan_build(data)
         if action=='unknown_actions': return {'actions':self.store.unknown_actions(data['run_id'])}
         if action=='resolve_action': return self.resolve_action(data)
-        if action=='goals': return {'goals':self.store.entities('goals')}
+        if action=='goals': return {'goals':self.store.active_goals() if data.get('active_only') or data.get('active') else self.store.entities('goals')}
         if action=='goal_get':
             goal=self.store.goal(data['id']); return {'goal':goal,**goal}
         if action=='goal_create': return self.goal_create(data)
@@ -388,14 +399,20 @@ class ForgeService:
             if self.store.get_chat(plan['chat_id'],limit=1).get('project_id')!=plan.get('project_id'): raise ValueError('This chat moved to another project. Create a new plan in the selected project.')
             run=self.store.run(plan['run_id'])
             if plan.get('goal_id'):
-                existing=next((r for r in self.store.runs() if r.get('goal_id')==plan['goal_id']),None)
-                if existing: return {'id':existing['id'],'chat_id':existing['chat_id'],'status':existing['status'],'goal_id':plan['goal_id']}
+                existing=next((r for r in self.store.runs() if r.get('goal_id')==plan['goal_id'] and
+                    not r.get('parent_id') and r['chat_id']==plan['chat_id']),None)
+                if existing: return {'id':existing['id'],'chat_id':existing['chat_id'],'status':existing['status'],'goal_id':plan['goal_id'],
+                    'mode':existing.get('mode','goal'),'request':existing['request'],'request_message_id':existing.get('request_message_id')}
             if run['mode']!='plan' or run['status']!='completed' or plan['status']!='ready': raise ValueError('Finish and review a saved plan before selecting Build.')
             if self.store.get_chat(plan['chat_id'],limit=1).get('archived'): raise ValueError('Restore this chat before building the plan.')
             if not plan.get('goal_id'):
                 goal=self.goal_create({'text':plan['request'],'tasks':plan['tasks'],'project_id':plan.get('project_id'),'chat_id':plan['chat_id']})
+                self.store.save_goal({**goal,'plan_id':plan['id'],'reviewed_plan':plan['markdown']})
                 plan=self.store.save_entity('plans',{**plan,'goal_id':goal['id']})
-            result=self.goal_resume({'id':plan['goal_id'],'instructions':'Implement the user-reviewed plan:\n'+plan['markdown']})
+            else:
+                goal=self.store.goal(plan['goal_id'])
+                self.store.save_goal({**goal,'plan_id':plan['id'],'reviewed_plan':plan['markdown']})
+            result=self.goal_resume({**data,'id':plan['goal_id']})
             return {**result,'goal_id':plan['goal_id']}
     def goal_resume(self,data):
         with self.jobs.lock: return self._goal_resume(data)
@@ -405,11 +422,54 @@ class ForgeService:
         if goal['external_edits']: raise ValueError('Reconcile the edited checklist first.')
         if goal.get('chat_id') and self.store.get_chat(goal['chat_id'],limit=1).get('project_id')!=goal.get('project_id'):
             raise ValueError('The chat moved to another project. Export this checklist into the intended project and create a new goal.')
-        previous=next((r for r in self.store.runs() if r.get('goal_id')==goal['id']),None)
-        if previous and previous['status'] in ('paused','interrupted','failed'): return self.jobs.resume(previous['id'],data)
-        if previous and previous['status'] not in TERMINAL: return {'id':previous['id'],'chat_id':previous['chat_id'],'status':previous['status']}
-        result=self.jobs.start({**data,'text':goal['request'],'project_id':goal.get('project_id'),'chat_id':goal.get('chat_id'),'goal_id':goal['id'],'mode':'goal'})
-        self.store.save_goal({**goal,'status':'running','chat_id':result['chat_id']}); return result
+        if goal.get('status')=='completed': raise ValueError('This goal is completed. Create a new goal for additional work.')
+        previous=next((r for r in self.store.runs() if r.get('goal_id')==goal['id'] and
+            not r.get('parent_id') and r['chat_id']==goal.get('chat_id')),None)
+        if previous and previous['status'] in ('paused','interrupted','failed'):
+            # Retain tool outcomes and the exact accepted request on Resume.
+            legacy_checkpoint=goal.get('checkpoint')=='Checklist created. Execution has not started.'
+            if legacy_checkpoint:
+                next_task=next((task['text'] for task in goal.get('tasks',[]) if task.get('status')!='completed'),None)
+                self.store.save_goal({**goal,'checkpoint':'Implementation is continuing from the saved checklist.',
+                    'next_action':('Execute the first unfinished task: '+next_task) if next_task else 'Review completion evidence and finish the goal.'})
+            try: result=self.jobs.resume(previous['id'],data)
+            except Exception:
+                if legacy_checkpoint:self.store.save_goal(goal)
+                raise
+            with self.store._goal_lock:
+                fresh=self.store.goal(goal['id'])
+                if fresh.get('status')!='completed' and self.store.run(previous['id'])['status'] not in TERMINAL:
+                    self.store.save_goal({**fresh,'status':'running'})
+            return {**result,'goal_id':goal['id']}
+        if previous and previous['status'] not in TERMINAL:
+            return {'id':previous['id'],'chat_id':previous['chat_id'],'status':previous['status'],'goal_id':goal['id'],
+                'mode':previous.get('mode','goal'),'request':previous['request'],'request_message_id':previous.get('request_message_id')}
+        next_task=next((task['text'] for task in goal.get('tasks',[]) if task.get('status')!='completed'),None)
+        starting=previous is None or goal.get('checkpoint')=='Checklist created. Execution has not started.'
+        checkpoint=('The reviewed plan was accepted. Implementation is starting.' if goal.get('reviewed_plan') else
+            'Goal execution is starting.') if starting else goal.get('checkpoint','Continue from the saved progress.')
+        active={**goal,'status':'running','checkpoint':checkpoint,
+            'next_action':('Execute the first unfinished task: '+next_task) if next_task else 'Review completion evidence and finish the goal.'}
+        # Persist the execution checkpoint before inference can read TODO.md.
+        self.store.save_goal(active)
+        request=('Start implementing the reviewed plan now.' if goal.get('reviewed_plan') else 'Start executing this goal now.')+(
+            '\nThis action starts implementation. Continue the existing workflow; do not treat the objective below as a resubmitted planning prompt.'
+            '\nFollow the saved ordered checklist, update completion evidence, and continue until complete, blocked, paused or limited.'
+            '\nGoal objective:\n'+goal['request'])
+        instructions=data.get('instructions','')
+        if goal.get('reviewed_plan'):
+            instructions=(instructions+'\n' if instructions else '')+'Implement the user-reviewed plan:\n'+goal['reviewed_plan']
+        try:
+            result=self.jobs.start({**data,'text':request,'instructions':instructions,'project_id':goal.get('project_id'),
+                'chat_id':goal.get('chat_id'),'goal_id':goal['id'],'mode':'goal'})
+        except Exception:
+            self.store.save_goal(goal)
+            raise
+        with self.store._goal_lock:
+            fresh=self.store.goal(goal['id'])
+            if fresh.get('chat_id')!=result['chat_id']:
+                self.store.save_goal({**fresh,'chat_id':result['chat_id']})
+        return {**result,'goal_id':goal['id']}
     def goal_reconcile(self,data):
         goal=self.store.goal(data['id'])
         if data.get('mode')=='import':
@@ -441,6 +501,11 @@ class ForgeService:
             goal=self.goal_create(arguments); result=self.goal_resume({**data,'id':goal['id']})
             return {**result,'goal_id':goal['id']}
         if name=='goal':
+            # /goal after a reviewed /plan is the same explicit Build action.
+            plans=[plan for plan in self.store.entities('plans') if plan.get('chat_id')==data.get('chat_id') and plan.get('status')=='ready']
+            latest_plan=plans[-1] if plans else None
+            if latest_plan and (not argument or argument.strip()==latest_plan.get('request','').strip()):
+                return self.plan_build({**data,'run_id':latest_plan['run_id']})
             if not argument: return {'navigate':'goals'}
             goal=self.goal_create(arguments); return self.goal_resume({**data,'id':goal['id']})
         if name=='plan':

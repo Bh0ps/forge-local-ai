@@ -182,6 +182,7 @@ def test_goal_continues_across_compactions_and_restart_without_repeating_writes(
             {"done_reason": "length", "message": {"content": "Output limit; continue from saved checklist"}},
         ]
         run = service.goal_resume({"id": goal["id"]})
+        accepted_request = service.store.run(run["id"])["request"]
         assert wait_finished(service, run)["status"] == "paused"
         assert (folder / "first.txt").read_text() == "first"
         assert not (folder / "second.txt").exists()
@@ -214,7 +215,8 @@ def test_goal_continues_across_compactions_and_restart_without_repeating_writes(
         assert [json.loads(row[0])["path"] for row in writes] == ["first.txt", "second.txt"]
         assert (folder / "first.txt").read_text() == "first" and (folder / "second.txt").read_text() == "second"
         main_requests = [request for request in engine.requests if request["tools"]]
-        assert any(message["content"] == goal["request"] for message in main_requests[0]["messages"])
+        assert any(message["content"] == accepted_request for message in main_requests[0]["messages"])
+        assert accepted_request.endswith(goal["request"])
         assert any("1. [x] Create first.txt" in message["content"] for message in main_requests[0]["messages"])
     finally:
         if restored:

@@ -28,6 +28,7 @@ class Bridge:
         self._window = None
         self._mode = 'full'
         self._full_bounds = None
+        self._full_maximized = True
         self._pin = False
         self._closing = False
         self._capture_lock = threading.Lock()
@@ -165,6 +166,14 @@ class Bridge:
             def update(form):
                 from System.Drawing import Size
                 from System.Windows.Forms import Screen, FormWindowState
+                # Keep the workspace state before restoring the same form for HUD.
+                # Capturing bounds while maximized would otherwise make Expand
+                # restore a border-sized window rather than the maximized workspace.
+                if self._mode == 'full' and mode == 'hud':
+                    if form.WindowState != FormWindowState.Minimized:
+                        self._full_maximized = form.WindowState == FormWindowState.Maximized
+                elif self._mode == 'full' and mode == 'full' and form.WindowState != FormWindowState.Minimized:
+                    self._full_maximized = form.WindowState == FormWindowState.Maximized
                 if form.WindowState != FormWindowState.Normal:
                     form.WindowState = FormWindowState.Normal
                 area = Screen.FromControl(form).WorkingArea
@@ -183,6 +192,8 @@ class Bridge:
                 x = max(area.Left, min(x, area.Right - width))
                 y = max(area.Top, min(y, area.Bottom - height))
                 form.SetBounds(x, y, width, height)
+                if mode == 'full' and self._full_maximized:
+                    form.WindowState = FormWindowState.Maximized
                 form.TopMost = self._pin or mode == 'hud'
                 self._mode = mode
                 return {'mode': mode, 'expanded': bool(expanded)}
@@ -248,7 +259,10 @@ class Bridge:
             self._window.show()
             def focus(form):
                 from System.Windows.Forms import FormWindowState
-                form.WindowState = FormWindowState.Normal
+                if form.WindowState == FormWindowState.Minimized:
+                    form.WindowState = (FormWindowState.Maximized
+                                        if self._mode == 'full' and self._full_maximized
+                                        else FormWindowState.Normal)
                 form.Activate()
             self._native(focus)
         except Exception:
@@ -373,7 +387,11 @@ def main():
             hwnd = user.FindWindowW(None, 'Forge')
             if hwnd:
                 user.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
-                user.ShowWindow(hwnd, 9)
+                user.IsIconic.argtypes = [ctypes.c_void_p]
+                user.IsIconic.restype = ctypes.c_int
+                # Showing a hidden maximized workspace must not restore it to
+                # windowed bounds. A currently minimized window still needs Restore.
+                user.ShowWindow(hwnd, 9 if user.IsIconic(hwnd) else 5)
                 user.SetForegroundWindow.argtypes = [ctypes.c_void_p]
                 user.SetForegroundWindow(hwnd)
         singleton.close()
@@ -402,6 +420,7 @@ def main():
         webview.settings['OPEN_DEVTOOLS_IN_DEBUG'] = False
         api._window = webview.create_window('Forge', url=api._server_url, js_api=api,
                                            width=1180, height=820, min_size=(360, 150),
+                                           maximized=True,
                                            hidden='--background' in sys.argv,
                                            background_color='#171717', text_select=True)
         api._window.events.closing += api._on_closing
@@ -424,6 +443,9 @@ def main():
                         time.sleep(.2)
                     if not result.get('ui', {}).get('composer') or not result['ui']['textarea']:
                         raise ValueError('React workspace did not render its composer.')
+                    result['launch_maximized'] = api._native(lambda form: str(form.WindowState) == 'Maximized')
+                    if not result['launch_maximized']:
+                        raise ValueError('Forge did not launch with its workspace maximized.')
                     # Use the real first-run dismissal; modal browser guards
                     # must stay active in the production path and this fixture.
                     result['setup_dismissed'] = api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('dialog[open] button')].find(e=>e.textContent.trim()==='Skip for now');if(button){button.click();return true;}return false;})()")
@@ -438,6 +460,9 @@ def main():
                     result.update(hud=api.mode('hud'), peek=api.mode('hud', True), full=api.mode('full'),
                                   pin=api.pin(True), unpin=api.pin(False), host=api.call('host_status'),
                                   projects=api.call('projects'), size=api._native(lambda form: [form.Width, form.Height]))
+                    result['full_restores_maximized'] = api._native(lambda form: str(form.WindowState) == 'Maximized')
+                    if not result['full_restores_maximized']:
+                        raise ValueError('Expand did not restore the maximized workspace.')
                     result['close_hides'] = api._on_closing() is False and not api._closing
                     result['background_api'] = api.call('projects')
                     api.show()

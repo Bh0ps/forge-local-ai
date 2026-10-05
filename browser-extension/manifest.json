@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Forge — Connect this tab",
-  "version": "4.2.0",
+  "version": "4.2.1",
   "description": "Connect only the tabs you choose to your local Forge workspace.",
   "permissions": ["activeTab", "scripting", "nativeMessaging", "storage"],
   "icons": {"16":"icons/forge-16.png","32":"icons/forge-32.png","48":"icons/forge-48.png","128":"icons/forge-128.png"},

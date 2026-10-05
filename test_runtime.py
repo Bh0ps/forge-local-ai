@@ -253,7 +253,7 @@ def native_bridge(monkeypatch, bridge_class):
     area = SimpleNamespace(Left=0, Top=0, Right=1920, Bottom=1080, Width=1920, Height=1080)
     forms = ModuleType('System.Windows.Forms')
     forms.Screen = SimpleNamespace(FromControl=lambda _: SimpleNamespace(WorkingArea=area))
-    forms.FormWindowState = SimpleNamespace(Normal='normal')
+    forms.FormWindowState = SimpleNamespace(Normal='normal', Maximized='maximized', Minimized='minimized')
     monkeypatch.setitem(sys.modules, 'System', ModuleType('System'))
     monkeypatch.setitem(sys.modules, 'System.Windows', ModuleType('System.Windows'))
     monkeypatch.setitem(sys.modules, 'System.Windows.Forms', forms)
@@ -290,6 +290,50 @@ def test_hud_ignores_unpin_until_restored_and_retains_pin_preference(native_brid
     assert form.TopMost is True
     bridge.mode('full')
     assert form.TopMost is False
+
+
+def test_hud_restores_maximized_workspace_after_compact_and_expanded_modes(native_bridge):
+    bridge, form, _ = native_bridge
+    form.WindowState = 'maximized'
+    assert 'error' not in bridge.mode('hud')
+    assert form.WindowState == 'normal'
+    assert (form.Width, form.Height, form.TopMost) == (620, 188, True)
+    assert 'error' not in bridge.mode('hud', True)
+    assert 'error' not in bridge.mode('full')
+    assert form.WindowState == 'maximized'
+    assert form.TopMost is False
+    # Repeating the cycle does not replace workspace state with HUD bounds.
+    bridge.mode('hud')
+    bridge.mode('full')
+    assert form.WindowState == 'maximized'
+
+
+def test_show_preserves_maximized_workspace_and_restores_minimized_hud(native_bridge):
+    bridge, form, _ = native_bridge
+    shown, activated = [], []
+    bridge._window = SimpleNamespace(show=lambda: shown.append(True))
+    form.Activate = lambda: activated.append(True)
+    form.WindowState = 'maximized'
+    bridge.show()
+    assert form.WindowState == 'maximized'
+    form.WindowState = 'minimized'
+    bridge.show()
+    assert form.WindowState == 'maximized'
+    bridge.mode('hud')
+    form.WindowState = 'minimized'
+    bridge.show()
+    assert form.WindowState == 'normal' and form.TopMost
+    assert len(shown) == len(activated) == 3
+
+
+def test_repeated_full_mode_preserves_user_restored_window(native_bridge):
+    bridge, form, _ = native_bridge
+    original = (form.Left, form.Top, form.Width, form.Height)
+    bridge.mode('hud')
+    bridge.mode('full')
+    bridge.mode('full')
+    assert form.WindowState == 'normal'
+    assert (form.Left, form.Top, form.Width, form.Height) == original
 
 
 def test_hud_uses_dpi_and_clamps_to_current_monitor_work_area(native_bridge):

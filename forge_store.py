@@ -288,7 +288,7 @@ class ForgeStore(Store):
         stamp=_now(); data=dict(data)
         images=data.get('images',[])
         metadata=self._metadata({'images':images} if images else {})
-        with self._connection(transaction='write') as db:
+        with self._goal_lock, self._connection(transaction='write') as db:
             if source_key:
                 if not isinstance(source_key,str) or len(source_key)>500: raise ValueError('Invalid request identity.')
                 prior=db.execute('SELECT run_id FROM request_keys WHERE source_key=?',(source_key,)).fetchone()
@@ -307,6 +307,18 @@ class ForgeStore(Store):
                 chat=self._chat(db,chat_id)
             active=db.execute("SELECT id FROM runs WHERE chat_id=? AND status NOT IN ('completed','cancelled','failed','paused','interrupted')",(chat_id,)).fetchone()
             if active: raise ValueError('This chat already has an active run.')
+            if data.get('goal_id') and not data.get('parent_id'):
+                row=db.execute("SELECT data FROM entities WHERE kind='goals' AND id=?",(data['goal_id'],)).fetchone()
+                if not row: raise ValueError('Goal not found.')
+                goal=json.loads(row[0])
+                if goal.get('project_missing') or goal.get('project_id')!=data.get('project_id'):
+                    raise ValueError('The goal belongs to another or removed project.')
+                if goal.get('chat_id') and goal['chat_id']!=chat_id:
+                    raise ValueError('This goal already belongs to another conversation.')
+                # Bind the goal, chat, request and run in one admission commit.
+                # TODO.md contains no chat identity, so its checksum stays valid.
+                goal.update(chat_id=chat_id,updated_at=stamp)
+                db.execute("UPDATE entities SET data=? WHERE kind='goals' AND id=?",(encode(goal),goal['id']))
             cursor=db.execute('INSERT INTO messages(chat_id,role,content,metadata,created_at) VALUES(?,?,?,?,?)',
                 (chat_id,'user',data['request'],metadata,stamp))
             data.update(id=data.get('id') or uuid4().hex,chat_id=chat_id,request_message_id=cursor.lastrowid,
@@ -440,6 +452,22 @@ class ForgeStore(Store):
         path=self.home/'state/goals'/identifier/'TODO.md'
         text=path.read_text(encoding='utf-8') if path.exists() else ''
         result.update(path=str(path),markdown=text,external_edits=sha256(text.encode()).hexdigest()!=result.get('markdown_hash'))
+        return result
+
+    def active_goals(self):
+        """List live goal runs whose conversation still exists, retaining history elsewhere."""
+        with self._connection() as db:
+            rows=db.execute("SELECT e.data,r.id AS run_id,r.status,r.chat_id FROM entities e "
+                "JOIN runs r ON r.goal_id=e.id JOIN chats c ON c.id=r.chat_id "
+                "WHERE e.kind='goals' AND r.parent_id IS NULL AND c.archived=0 "
+                "AND r.status NOT IN ('completed','cancelled','failed','paused','interrupted') "
+                "ORDER BY r.created_at DESC").fetchall()
+        result=[]; seen=set()
+        for row in rows:
+            goal=json.loads(row['data'])
+            if goal.get('status')=='completed' or goal.get('project_missing') or goal.get('chat_id')!=row['chat_id'] or goal['id'] in seen: continue
+            seen.add(goal['id'])
+            result.append({**goal,'run_id':row['run_id'],'chat_id':row['chat_id'],'status':row['status']})
         return result
 
     def save_goal(self,data,*,reconcile=False):

@@ -17,7 +17,7 @@ from uuid import uuid4
 TASK_STATUSES = ('pending', 'in_progress', 'completed', 'cancelled')
 MESSAGE_STATUSES = ('complete', 'completed', 'partial', 'cancelled', 'error', 'interrupted', 'tool')
 MESSAGE_ROLES = ('user', 'assistant', 'tool', 'system')
-MESSAGE_FIELDS = frozenset(('thinking', 'sources', 'tool_calls', 'tool_name', 'images', 'status'))
+MESSAGE_FIELDS = frozenset(('thinking', 'sources', 'tool_calls', 'tool_name', 'images', 'status', 'steer_id', 'question_id', 'interaction_run_id'))
 MAX_MESSAGE_CHARACTERS = 1_000_000
 MAX_METADATA_BYTES = 24_000_000
 DEFAULT_CONTEXT = 32_768
