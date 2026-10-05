@@ -4,6 +4,8 @@
 
 # Sidekick
 
+**Open source · [MIT licensed](LICENSE)**
+
 A local coding assistant with a full conversation workspace and a compact, always-on-top desktop HUD. Sidekick connects to Ollama and gives compatible models project tools, saved conversations, task tracking and optional web research.
 
 The native app targets **Windows**. A local browser interface and Docker Compose configuration share the same agent backend.
@@ -138,3 +140,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for test setup and repository hygiene.
 | `storage.py`, `context_window.py` | Persistence and context budgeting |
 
 If models are missing, start Ollama and use **Settings → Models → Refresh models**. Initial model loading can delay the first token. If reasoning consumes the response allowance, disable **Show model reasoning** or increase **Response length**. Desktop startup and window errors are recorded in `sidekick.log`.
+
+## License
+
+Sidekick is available under the [MIT License](LICENSE). You can use, modify and redistribute it, including commercially, while retaining the copyright and license notices. Dependencies and downloaded models retain their own licenses.

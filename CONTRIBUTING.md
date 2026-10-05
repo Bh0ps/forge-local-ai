@@ -26,4 +26,6 @@ Build the Windows application with `./build.ps1`. Preserve the generated `dist/S
 - Review staged files and Git author metadata before publishing a commit. `.gitignore` does not remove data already tracked in Git history.
 - Describe the concrete change, why it is needed and how it was checked. Distinguish automated coverage from live model, desktop and Docker verification.
 
-Public source availability does not by itself grant a license. This repository currently does not include a license file.
+## License
+
+Sidekick is licensed under the [MIT License](LICENSE). By submitting a contribution, you agree to make it available under the same license. Preserve applicable copyright and license notices when incorporating third-party code or assets.
