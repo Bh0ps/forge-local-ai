@@ -1,146 +1,133 @@
-<p align="center">
-  <img src="assets/sidekick.svg" width="96" height="96" alt="Sidekick logo">
-</p>
+<p align="center"><img src="assets/forge.svg" width="96" alt="Forge"></p>
 
-# Sidekick
+# Forge 4.0
 
-**Open source · [MIT licensed](LICENSE)**
+**A local AI workspace for coding, research and computer tools. Open source under [MIT](LICENSE).**
 
-A local coding assistant with a full conversation workspace and a compact, always-on-top desktop HUD. Sidekick connects to Ollama and gives compatible models project tools, saved conversations, task tracking and optional web research.
+Forge is the next version of Sidekick. It combines a Windows desktop workspace,
+an always-on-top HUD and an authenticated local browser interface around one
+Python coordinator. Models run through your existing Ollama installation or a
+configured local inference engine. No cloud AI account is required.
 
-The native app targets **Windows**. A local browser interface and Docker Compose configuration share the same agent backend.
+[Download Windows packages](https://github.com/Bh0ps/sidekick-local-ai/releases)
+· [Quick start](QUICKSTART.md) · [Integrations and Docker](docs/INTEGRATIONS.md)
+· [Architecture](docs/ARCHITECTURE.md) · [Validation](docs/VALIDATION.md)
 
-## Features
+## Workspace
 
-- **Two views:** a full workspace for longer sessions and a minimal HUD for working alongside other applications.
-- **Project tools:** list, read, search, create, edit and move text files, with diffs, conflict checks and recoverable backups.
-- **Command approval:** inspect each proposed command and choose **Run once** or **Deny**.
-- **Saved work:** persistent chats, project task lists and a tool for searching earlier project conversations.
-- **Automatic compaction:** summarize older context while retaining the original saved messages.
-- **Adjustable context:** a persistent 2K–256K token slider, in 2K steps, with a 32K interface default.
-- **Research and vision:** optional web search with source links, plus manually attached screen captures for vision-capable models.
-- **Streaming:** responses, tool activity and model-provided reasoning when supported.
+- React/TypeScript interface with system light/dark appearance, projects and
+  chats, Spaces, Scheduled, Plugins, Agents, Usage and Settings.
+- Full workspace and compact HUD share the same chat, draft and attachments.
+  Reasoning cards show reasoning supplied by the model.
+- File previews, tool activity, command output, diffs and durable Markdown goal
+  checklists live in the right panel.
+- Searchable model chooser beside the composer; install/delete controls are in
+  Settings. Context is adjustable from 2K to 256K, initially 32K.
 
-## Run the Windows app from source
+## Agents and tools
 
-Prerequisites: Python 3.12, Ollama running locally, and Microsoft Edge WebView2 Runtime. Install a model appropriate for your available memory. Coding actions require a model that reports tool support; screen captures require vision support.
+- Project reads, writes, backups, conflict checks, bounded commands, public web
+  research, local Windows accessibility/screenshot tools and an isolated browser.
+- **Always Ask** initially permits connected-project reads and asks before edits,
+  commands, computer actions and unknown MCP operations. Full Access and Deny
+  Access, plus project/app/server/tool overrides, are configurable.
+- MCP stdio, Streamable HTTP and legacy SSE through the official SDK, with bearer
+  and OAuth authentication. Windows Credential Manager holds credentials.
+- Global/project skills, reviewed plugin imports and linked catalogs. Portable
+  Codex/Claude skills and MCP definitions are supported; host-specific components
+  display adapter requirements before installation.
+- Editable Researcher, Coder and Reviewer profiles. Writing agents use Git
+  worktrees; changes are reviewed before integration. Non-Git writers serialize.
+- Timezone-aware schedules with overlap prevention and one catch-up after downtime.
+  Closing the desktop window keeps the tray coordinator running. **Quit Forge**
+  stops it. Windows startup is disabled initially.
 
-From the repository directory in PowerShell:
+## Continuity and usage
+
+`/plan`, `/todo` and `/goal` share the command registry with `/pause`, `/resume`,
+`/status`, `/compact`, `/new`, `/project`, `/model`, `/agents`, `/worktree`, `/skill`,
+`/mcp`, `/schedule` and `/help`.
+
+Each run retains its exact request, settings, event cursor and tool outcomes.
+Compaction runs between completed rounds. Full tool results remain retrievable
+artifacts; summaries use bounded excerpts and a deterministic checkpoint if
+summary retries fail. Context, output and goal limits pause with Resume available.
+Interrupted side effects require outcome inspection before continuation.
+
+Goal checklists are saved at `~/.forge/state/goals/<id>/TODO.md`, with ordered tasks,
+evidence, checkpoint, blockers and next action. External edits require reconciliation.
+The default shared goal limits are 60 minutes, 100,000 generated tokens, 128 model
+rounds and 256 tool invocations.
+
+Usage records begin with this upgrade and include main/child requests, compaction
+and retries. Daily, calendar-month and all-time totals distinguish reported and
+estimated counts. Completed tokens/second uses backend decode time; streaming
+estimates are labeled. Raw timestamps remain UTC.
+
+## Local inference
+
+Existing Ollama installations remain usable. OpenAI-compatible local endpoints
+support llama.cpp, vLLM and SGLang. Optional verified managed runtimes can compare
+full-precision and q8 KV caches with coding, streamed-tool and image probes.
+Speculation, MTP/n-gram methods, CUDA graph tuning and native NVFP4 checkpoints are
+gated by the exact executable, hardware and model configuration, then require
+validation before activation. A listed engine feature is not a speed guarantee.
+
+Forge queues one inference request per GPU, prioritizes foreground work, retains
+warm models where supported, bounds active history and selects tools within the
+context budget. It never silently changes an explicit model or context selection.
+CPU INT8 faster-whisper dictation inserts an editable transcript; raw audio is
+kept in memory and discarded. Model and browser downloads are explicit setup steps.
+
+## Run from source
+
+Use Python 3.12, Node.js 22.12+ and Windows WebView2. Start Ollama separately.
 
 ```powershell
 python -m venv .venv
-& ./.venv/Scripts/python.exe -m pip install -r requirements-desktop.txt
+& ./.venv/Scripts/python.exe -m pip install -r requirements-dev.txt
+cd frontend
+npm ci
+npm run build
+cd ..
 & ./.venv/Scripts/python.exe desktop.py
 ```
 
-Ollama is a separate service. Use `ollama list` to check its installed models. You can download a model using `ollama pull <model-name>` (replace the placeholder), or use Sidekick's model controls.
+For the local browser coordinator, run `model_manager.py` instead. Open
+`http://localhost:8081` and enter the one-use pairing code printed in that terminal.
+Native clients use the authenticated bridge. HTTP APIs require a paired cookie or
+bearer session and enforce same-origin requests. Do not expose the coordinator on
+the public internet.
 
-Open **Projects → Add folder**, choose an existing project folder and select a model. Then ask for a concrete task, such as:
-
-> Inspect this project, create a short task list, then fix the first issue and run the relevant checks.
-
-See [QUICKSTART.md](QUICKSTART.md) for everyday controls.
-
-## Build a portable Windows app
-
-Run from a PowerShell session that permits local scripts:
+## Build and test
 
 ```powershell
-./build.ps1
+& ./.venv/Scripts/python.exe -m pytest -q
+cd frontend
+npm test
+cd ..
+./build.ps1 -Iscc 'C:/Program Files/Inno Setup 7/ISCC.exe'
 ```
 
-The script creates a virtual environment, installs the pinned desktop dependencies and builds `dist/Sidekick/Sidekick.exe` with PyInstaller. Distribute the **entire `dist/Sidekick` directory**; its `_internal` directory must remain beside the executable. This is a portable application folder, not an installer or a single self-contained executable.
+The build produces a portable ZIP, and an installer when Inno Setup 7 is available.
+The portable executable needs its `_internal` directory beside it. Packages include
+dependency license files; see [third-party notices](THIRD_PARTY_NOTICES.md).
+Build artifacts and personal state are excluded from Git.
 
-The portable build stores its data in the normal application-data directory described below. Its saved conversations do not automatically travel with the executable folder.
+## Data and rollback
 
-## Run in a local browser
+Forge separates configuration, SQLite state, attachments, backups, projects,
+worktrees, skills, plugins, runtimes and artifacts beneath `~/.forge`.
+`FORGE_DATA_DIR` can select a separate home. Existing project folders are registered
+in place; new managed projects and worktrees live beneath that home.
 
-With Ollama running, install `requirements.txt` in a Python virtual environment and start the server:
+First startup takes a consistent SQLite backup and imports existing Sidekick
+projects, chats, tasks and context settings without changing IDs or external
+project paths. Old installation/data remain intact. Backup manifests and attachments
+are copied. Keep the pre-upgrade backup before restoring or downgrading. Runtime
+models, plugin content and personal conversations are never bundled in releases.
 
-```powershell
-python -m venv .venv
-& ./.venv/Scripts/python.exe -m pip install -r requirements.txt
-& ./.venv/Scripts/python.exe model_manager.py
-```
-
-Open **http://localhost:8081**. The browser interface supports chat, project tools, tasks and saved memory. Native screen capture and operating-system always-on-top controls require the Windows app.
-
-The server is intended for local use. It binds to loopback by default and checks API host/origin headers. It does not provide user accounts or an authentication layer for public hosting.
-
-## Docker Compose
-
-The supplied Compose file runs the interface and a separate Ollama service. **Container execution and GPU acceleration have not been validated.** The configuration does not request GPU access.
-
-Select an existing host project directory and start the services. In PowerShell:
-
-```powershell
-$env:SIDEKICK_WORKSPACE = (Resolve-Path ./workspace).Path
-docker compose up --build -d
-```
-
-Replace `./workspace` with the folder you want to use; it must already exist for `Resolve-Path`. Without `SIDEKICK_WORKSPACE`, Compose defaults to a `workspace` directory beside the source.
-
-Container Ollama has its own model volume. Download a model into it using `docker compose exec ollama ollama pull <model-name>` (replace the placeholder), or use the interface's model controls. Models installed in a host Ollama service are not automatically shared with the container.
-
-Open **http://localhost:8081**, then add `/workspace` as a project. The selected host directory is mounted there, and browser project selection is restricted to that mount. File edits affect the mounted host files.
-
-Compose publishes ports 8081 and 11434 on loopback only. If a host Ollama already uses port 11434, stop that conflicting service or adjust the Compose port mapping before starting. Named volumes retain application data and container model downloads. Use `docker compose down` to stop the services without removing those volumes.
-
-## Context, memory and model support
-
-Set **Settings → General → Context window** to choose 2,048–262,144 tokens. This budget includes instructions, tools, conversation and reply. Sidekick reserves response space and passes the selected window to Ollama for agent steps. A choice above the model's reported context maximum is rejected. Small windows may be insufficient for project tools; large windows require more memory and can make inference slower. Selecting 256K does not guarantee that a model or machine can use it effectively.
-
-When the active conversation grows, older context is summarized by the local model. Summaries are stored separately, original messages remain available, and a failed compaction does not replace the previous summary. Summaries can omit details. Compaction inference uses a window no larger than 16K or the model's lower supported limit.
-
-The `search_memory` tool searches user and assistant text in up to the 100 most recently updated chats for the selected project, returning up to eight matching snippets. It does not automatically load every previous conversation. Task lists persist between sessions but do not schedule background work.
-
-Model output and tool use depend on the selected model. Reasoning display shows text supplied by that model; it is not a guarantee that an answer or action is correct.
-
-## Files, commands and recovery
-
-File tools are scoped to the selected project and reject traversal outside it, `.git` internals, symbolic links, junctions, hard-linked files, Windows device paths and alternate data streams. Text files are limited to 2 MiB, with bounded scans and output. Sensitive files inside the project, including `.env` files, are accessible to the model through these tools.
-
-**Allow edits in the selected project** is enabled by default and can be disabled in General settings. Existing-file changes save previous content outside the project and check for conflicting edits. Tool results include diffs and backup IDs. Ask Sidekick to restore a backup by its ID. Restoring a file creation removes the created file; restoring a move recreates the original path and leaves the moved copy at its destination. Directory creation does not have a content backup.
-
-Every command requires approval of its displayed arguments and working directory. **Approved commands have the host account's normal permissions; a working directory is not a process sandbox.** They can access other files or the network. Commands have a maximum 60-second runtime and bounded output. Deny or Stop cancels a pending approval. Agent runs also have a bounded number of steps; continue with a follow-up prompt when needed.
-
-## Data and network behavior
-
-With the default local Ollama endpoint, prompts, selected project content and screen attachments are processed by that local service. `OLLAMA_API_BASE` can point to a different Ollama endpoint, in which case that endpoint receives the requests.
-
-Web research is optional. When enabled, model-generated search queries go to public search services through `ddgs`, and results contain snippets and source URLs. Sidekick does not provide interactive browser automation or full-page extraction. Model downloads also require network access. Approved programs may use the network independently.
-
-Screen capture is user-triggered and attaches a preview of the primary display. Sidekick does not continuously monitor the screen or autonomously control arbitrary applications and browser tabs.
-
-By default, Windows state lives under `%LOCALAPPDATA%\Sidekick`:
-
-| Location | Contents |
-| --- | --- |
-| `sidekick.sqlite3` | Projects, tasks, conversations, attachments, settings and compaction summaries |
-| `backups/` | Saved file versions and backup manifests |
-| `sidekick.log` | Rotating desktop error log |
-| `webview/` | Native interface browser state |
-
-Set `SIDEKICK_DATA_DIR` before launch to choose another directory. On systems without `LOCALAPPDATA`, the storage backend defaults to `~/.local/share/sidekick`. In Compose, application data is stored in the `sidekick-data` volume mounted at `/data`.
-
-Data is not encrypted by Sidekick. Close the app before copying the entire state directory for a consistent backup. Completed messages and normally stopped partial responses are saved; a hard crash can lose text still streaming. Keep these data directories, logs and backups out of Git.
-
-## Development
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for test setup and repository hygiene.
-
-| File | Responsibility |
-| --- | --- |
-| `desktop.py` | Windows native host and UI bridge |
-| `frontend/index.html` | Shared interface |
-| `model_manager.py` | Local browser HTTP server |
-| `core.py`, `runtime.py` | Ollama requests and background jobs |
-| `agent_runtime.py`, `service.py` | Agent loop and shared application actions |
-| `project_tools.py`, `tool_calls.py`, `recovery.py` | Project tools, command handling and recovery |
-| `storage.py`, `context_window.py` | Persistence and context budgeting |
-
-If models are missing, start Ollama and use **Settings → Models → Refresh models**. Initial model loading can delay the first token. If reasoning consumes the response allowance, disable **Show model reasoning** or increase **Response length**. Desktop startup and window errors are recorded in `sidekick.log`.
-
-## License
-
-Sidekick is available under the [MIT License](LICENSE). You can use, modify and redistribute it, including commercially, while retaining the copyright and license notices. Dependencies and downloaded models retain their own licenses.
+Forge and its permission profiles are a local application boundary, not an OS
+sandbox. Commands execute with your user account's permissions. Model quality,
+context capacity and inference speed depend on the model and hardware. See the
+validation report for measured results and untested deployment configurations.

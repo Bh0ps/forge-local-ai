@@ -1,0 +1,4 @@
+mcp==2.3.0
+playwright==1.63.0
+PyYAML==6.0.3
+keyring==25.7.0; platform_system != "Windows"

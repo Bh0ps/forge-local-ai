@@ -1,4 +1,5 @@
 -r requirements.txt
+-r requirements-integrations.txt
 pywebview==6.2.1
 pillow==12.3.0
 pyinstaller==6.22.3

@@ -68,12 +68,14 @@ def _default_directory():
 
 
 class Store:
-    def __init__(self, data_dir=None):
+    def __init__(self, data_dir=None, *, db_name='sidekick.sqlite3'):
         try:
             self.data_dir = (Path(data_dir).expanduser() if data_dir is not None
                              else _default_directory()).resolve()
             self.data_dir.mkdir(parents=True, exist_ok=True)
-            self.db_path = self.data_dir / 'sidekick.sqlite3'
+            if Path(db_name).name != db_name:
+                raise ValueError('Database name must be a filename.')
+            self.db_path = self.data_dir / db_name
             with self._connection() as connection:
                 # journal_mode must be set before opening a transaction.
                 connection.execute('PRAGMA journal_mode=WAL')

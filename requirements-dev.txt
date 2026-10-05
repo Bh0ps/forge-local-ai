@@ -1,2 +1,2 @@
--r requirements-desktop.txt
+-r requirements-host.txt
 pytest==9.1.1

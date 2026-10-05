@@ -4,5 +4,5 @@ from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from model_manager import create_app
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(create_app(),host="127.0.0.1",port=8081)
+    import runpy
+    runpy.run_module('model_manager',run_name='__main__')

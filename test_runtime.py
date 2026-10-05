@@ -10,6 +10,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from runtime import Jobs
+from forge_host import PairingAuthority
 
 
 def request(**extra):
@@ -234,7 +235,8 @@ def bridge_class():
     tree = ast.parse(source.read_text(encoding='utf-8'), filename=str(source))
     definition = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Bridge')
     namespace = {'Core': FakeCore, 'Jobs': Jobs, 'threading': threading,
-                 'log': logging.getLogger('sidekick-test')}
+                 'PairingAuthority': PairingAuthority, 'Path': Path,
+                 'log': logging.getLogger('forge-test')}
     exec(compile(ast.Module(body=[definition], type_ignores=[]), str(source), 'exec'), namespace)
     return namespace['Bridge']
 
@@ -243,7 +245,7 @@ def bridge_class():
 def native_bridge(monkeypatch, bridge_class):
     class Form:
         Left, Top, Width, Height = 500, 300, 1000, 760
-        WindowState, TopMost, _scale = 'normal', False, 1
+        WindowState, TopMost, DeviceDpi = 'normal', False, 96
 
         def SetBounds(self, x, y, width, height):
             self.Left, self.Top, self.Width, self.Height = x, y, width, height
@@ -255,6 +257,9 @@ def native_bridge(monkeypatch, bridge_class):
     monkeypatch.setitem(sys.modules, 'System', ModuleType('System'))
     monkeypatch.setitem(sys.modules, 'System.Windows', ModuleType('System.Windows'))
     monkeypatch.setitem(sys.modules, 'System.Windows.Forms', forms)
+    drawing = ModuleType('System.Drawing')
+    drawing.Size = lambda width, height: (width, height)
+    monkeypatch.setitem(sys.modules, 'System.Drawing', drawing)
     bridge, form = bridge_class(), Form()
     bridge._native = lambda operation: operation(form)
     return bridge, form, area
@@ -264,17 +269,19 @@ def test_hud_always_on_top_expands_and_restores_full_bounds(native_bridge):
     bridge, form, _ = native_bridge
     original = (form.Left, form.Top, form.Width, form.Height)
     assert bridge.mode('hud') == {'mode': 'hud', 'expanded': False}
-    assert (form.Width, form.Height, form.TopMost) == (620, 210, True)
+    assert (form.Width, form.Height, form.TopMost) == (620, 188, True)
+    assert form.MinimumSize == (360, 150)
     assert bridge.mode('hud', True) == {'mode': 'hud', 'expanded': True}
-    assert (form.Width, form.Height) == (620, 430)
+    assert (form.Width, form.Height) == (620, 440)
     assert bridge.mode('full') == {'mode': 'full', 'expanded': False}
     assert (form.Left, form.Top, form.Width, form.Height) == original
+    assert form.MinimumSize == (760, 560)
     assert form.TopMost is False
 
 
 def test_hud_ignores_unpin_until_restored_and_retains_pin_preference(native_bridge):
     bridge, form, _ = native_bridge
-    assert bridge.pin(True) == {'ok': True}
+    assert bridge.pin(True) == {'ok': True, 'pinned': True}
     bridge.mode('hud')
     bridge.mode('full')
     assert form.TopMost is True
@@ -287,7 +294,7 @@ def test_hud_ignores_unpin_until_restored_and_retains_pin_preference(native_brid
 
 def test_hud_uses_dpi_and_clamps_to_current_monitor_work_area(native_bridge):
     bridge, form, area = native_bridge
-    form._scale = 1.5
+    form.DeviceDpi = 144
     form.Left, form.Top = -500, 1500
     area.Left, area.Top, area.Right, area.Bottom = 100, 200, 900, 700
     area.Width, area.Height = 800, 500
@@ -304,10 +311,14 @@ def test_invalid_mode_does_not_modify_window(native_bridge):
     assert (form.Width, form.Height, form.TopMost) == (1000, 760, False)
 
 
-def test_bridge_close_cancels_work_and_rejects_new_requests(bridge_class):
+def test_bridge_close_hides_and_quit_cancels_work_and_rejects_requests(bridge_class):
     bridge = bridge_class()
     calls = []
-    bridge._jobs = SimpleNamespace(cancel=lambda: calls.append('cancel'))
-    bridge._close()
-    assert calls == ['cancel']
-    assert bridge.call('start_chat', request()) == {'error': 'App is closing.'}
+    bridge._window = SimpleNamespace(hide=lambda: calls.append('hide'), destroy=lambda: calls.append('destroy'))
+    bridge._tray = SimpleNamespace(stop=lambda: calls.append('tray_stop'))
+    bridge._lifecycle = SimpleNamespace(quit=lambda: calls.append('cancel_and_shutdown'))
+    assert bridge._close() is False
+    assert calls == ['hide'] and bridge._closing is False
+    assert bridge.quit() == {'ok': True}
+    assert calls == ['hide', 'cancel_and_shutdown', 'tray_stop', 'destroy']
+    assert bridge.call('start_chat', request()) == {'error': 'Forge is shutting down.'}
