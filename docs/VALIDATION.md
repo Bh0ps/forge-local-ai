@@ -1,5 +1,23 @@
 # Forge validation
 
+## 4.2.3 helpers and goal review
+
+Coordinator regressions exercise local-to-OpenRouter delegation with returned
+evidence, scoped child results, idempotent setup/admission, permission ceilings,
+separate remote inference scheduling and shared limits. Goal review covers
+original requirement retention, read-only project inspection, strict verdicts,
+unknown/denied evidence, repair-and-review continuation, correction limits,
+quota failures, cancellation, live switches, late steering, persisted verdict
+replay and replay-safe feedback. Review failure never approves a goal.
+
+Provider tests validate exact completion reasons, bounded structured schemas,
+context accounting, free-only routing and refusal/error/truncation handling.
+Production UI checks use a disposable coordinator and synthetic state to check
+setup, saved controls, main engine preservation, review feedback/recovery,
+reconnect, light/dark layout and 125% DPI at three viewport widths.
+These tests validate orchestration and safeguards; model judgement and free
+provider availability remain variable.
+
 ## 4.2.2 library
 
 Library regressions cover fresh-profile starter preparation, saved switches and

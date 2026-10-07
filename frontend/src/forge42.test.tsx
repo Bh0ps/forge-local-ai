@@ -199,9 +199,9 @@ describe('free OpenRouter connection', () => {
   it('masks the key, requires reviewed remote controls, and tests metadata only on request', async () => {
     const provider = { enabled: false, remote_consent: false, data_collection: 'deny', connected: false };
     const { call } = bridge({ openrouter_status: { provider }, openrouter_save: (data: Record<string, unknown>) => ({ provider: { ...data, api_key: undefined } }),
-      openrouter_test: { provider: { enabled: true, remote_consent: true, connected: true, data_collection: 'deny', account: { free_model_daily_requests: { used: 7, limit: 50, remaining: 43 } } } }, agent_save: { id: 'cloud_fixture' } });
+      openrouter_test: { provider: { enabled: true, remote_consent: true, connected: true, data_collection: 'deny', account: { free_model_daily_requests: { used: 7, limit: 50, remaining: 43 } } } }, openrouter_setup_agents: { agents: [{ id: 'cloud_fixture' }], settings: { auto_delegate: true, goal_review_enabled: true } } });
     const notify = vi.fn();
-    render(<OpenRouterSettings notify={notify} />);
+    render(<OpenRouterSettings notify={notify} settings={DEFAULT_SETTINGS} onChange={vi.fn(async () => {})} />);
     const key = await screen.findByLabelText('OpenRouter API key') as HTMLInputElement;
     expect(key.type).toBe('password');
     expect(call.mock.calls.some(([action]) => action === 'openrouter_test')).toBe(false);
@@ -216,8 +216,8 @@ describe('free OpenRouter connection', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Connect / Test' }));
     expect(await screen.findByText(/7 \/ 50.*43 remaining/)).toBeTruthy();
     expect(call).toHaveBeenCalledWith('openrouter_test', {});
-    await userEvent.click(screen.getByRole('button', { name: 'Create research profile' }));
-    await waitFor(() => expect(call).toHaveBeenCalledWith('agent_save', expect.objectContaining({ role: 'researcher', provider_id: 'openrouter', model: 'openrouter/free', tools: ['web_search', 'web_fetch', 'read_file', 'search_files', 'artifact_read'] })));
+    await userEvent.click(screen.getByRole('button', { name: 'Set up helpers & reviewer' }));
+    await waitFor(() => expect(call).toHaveBeenCalledWith('openrouter_setup_agents', {}));
     expect(call.mock.calls.some(([action]) => ['agent_start', 'start', 'chat_start'].includes(action))).toBe(false);
   });
 

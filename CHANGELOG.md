@@ -1,5 +1,21 @@
 # Changelog
 
+## 4.2.3
+
+- Local agents discover enabled OpenRouter helper IDs, models and scopes,
+  delegate bounded tasks, and receive waited results without repeated polling.
+  Explicit setup preserves edited profiles and the selected local engine.
+- Independent read-only OpenRouter goal review checks original requirements,
+  actual evidence and task coverage. Validated verdicts approve completion,
+  return specific repair work, or pause an unverified goal with recovery.
+- Durable review admission, evidence scopes, replay-safe feedback, shared limits
+  and separate usage accounting preserve work across cancellation and restart.
+  No paid fallback or automatic quota retry is introduced.
+- OpenRouter settings separate helper and reviewer controls. Goals and Activity
+  display review verdicts and feedback, including paused unverified goals.
+- Small-context goals retain journal tools; interrupted child agents cannot
+  overwrite the main goal status. Structured output failures cannot become success.
+
 ## 4.2.2
 
 - Redesigned Library with Discover and Installed views, instant shared search,

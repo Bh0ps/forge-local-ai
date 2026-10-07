@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/forge.svg" width="96" alt="Forge"></p>
 
-# Forge 4.2.2
+# Forge 4.2.3
 
 **A local AI workspace for coding, research and computer tools. Open source under [MIT](LICENSE).**
 
@@ -23,6 +23,12 @@ The 4.2.2 library adds ten ready-to-use, toggleable skills and a searchable
 Discover collection of portable skills and plugins. Source, license and setup
 details stay visible during review; the starter collection works offline.
 
+The 4.2.3 upgrade lets the local agent discover and spawn OpenRouter helpers,
+wait for their findings, and continue its own work. An independent read-only
+OpenRouter reviewer checks goal evidence before completion and sends concrete
+fixes back to the local agent. Setup and review controls are in OpenRouter
+settings; review status and recovery appear beside the goal.
+
 Cloud integrations are optional and require explicit setup. OpenRouter agents
 use free-only routes with no paid fallback, subject to provider availability
 and quotas. GitHub draft PRs always need approval. Windows packages are currently
@@ -34,6 +40,7 @@ configured. Existing installations and local state are retained for rollback.
 · [Architecture](docs/ARCHITECTURE.md) · [Validation](docs/VALIDATION.md)
 · [Guided setup](docs/SETUP.md) · [Memory](docs/MEMORY.md)
 · [Telegram and webhooks](docs/CHANNELS.md) · [OpenRouter](docs/OPENROUTER.md)
+· [Helpers and goal review](docs/GOAL_REVIEW.md)
 · [GitHub](docs/GITHUB.md) · [Updates](docs/UPDATES.md)
 · [Plans, steering and questions](docs/WORKFLOW_INPUT.md)
 · [Skills and plugins library](docs/LIBRARY.md)

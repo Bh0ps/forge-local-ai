@@ -8,7 +8,7 @@ Forge can assign a research agent to OpenRouter while the main agent uses a loca
 2. Review **Allow assigned context to leave this computer**. Enabling a cloud agent sends its prompt, selected context, images, tool definitions and tool results to OpenRouter and the selected model provider.
 3. Choose whether to allow providers that collect data. The default is off. This restriction can leave no eligible free provider; it does not promise zero data retention. Review [OpenRouter's data collection policy](https://openrouter.ai/docs/guides/privacy/data-collection) and your account's privacy settings.
 4. Enable the connection and press **Connect / Test**. This fetches account quota and model metadata; it does not send an inference prompt. Saving a key or opening Settings performs no remote request.
-5. Press **Create research profile**, or select OpenRouter as an existing agent's engine. The generated profile is read-only, has a bounded context and uses Forge's research tools. Enable automatic delegation when you want the main agent to assign it work.
+5. Press **Set up helpers & reviewer** to create the Researcher and Assistant profiles and enable delegation plus independent goal review. Existing profile edits and the main engine/context are preserved. You can switch helpers and goal verification off independently. See [goal review](GOAL_REVIEW.md) for verdicts and recovery.
 
 The OS credential vault holds the key. Configuration stores only a vault reference. Forge uses the fixed `https://openrouter.ai/api/v1` endpoint, disables redirects and never accepts a custom OpenRouter authentication endpoint.
 

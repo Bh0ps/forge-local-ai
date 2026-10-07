@@ -5,6 +5,7 @@ import heapq
 import json
 import math
 import os
+import re
 import subprocess
 import threading
 import time
@@ -13,8 +14,56 @@ from uuid import uuid4
 
 import httpx
 from core import Core, AGENT_SYSTEM_PROMPT, MAX_STREAM_CHARACTERS, _tool_calls
-from context_window import estimated_prompt_tokens
+from context_window import estimated_prompt_tokens, prompt_budget
 from inference_stream import cancellable_inference, bounded_lines
+
+
+def validated_response_format(value):
+    """Copy a bounded strict schema; provider extras never enter this envelope."""
+    invalid = 'Invalid structured response schema.'
+    if (not isinstance(value, dict) or set(value) != {'type', 'json_schema'}
+            or value.get('type') != 'json_schema'):
+        raise ValueError(invalid)
+    specification = value.get('json_schema')
+    if (not isinstance(specification, dict)
+            or not {'name', 'strict', 'schema'} <= set(specification)
+            or set(specification) - {'name', 'strict', 'schema', 'description'}
+            or not isinstance(specification.get('name'), str)
+            or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', specification['name'])
+            or specification.get('strict') is not True):
+        raise ValueError(invalid)
+    if 'description' in specification and (not isinstance(specification['description'], str)
+            or len(specification['description']) > 1024):
+        raise ValueError(invalid)
+    schema = specification.get('schema')
+    if (not isinstance(schema, dict) or schema.get('type') != 'object'
+            or not isinstance(schema.get('properties'), dict)
+            or schema.get('additionalProperties') is not False
+            or not isinstance(schema.get('required'), list)
+            or any(not isinstance(key, str) or key not in schema['properties'] for key in schema['required'])
+            or len(set(schema['required'])) != len(schema['required'])):
+        raise ValueError(invalid)
+    # Detached JSON values prevent mutation after validation. Keep parsing and
+    # provider serialization bounded independently of the model's context.
+    def bounded(item, depth=0):
+        if depth > 24:
+            raise ValueError(invalid)
+        if isinstance(item, dict):
+            if len(item) > 256 or any(not isinstance(key, str) for key in item):
+                raise ValueError(invalid)
+            for child in item.values(): bounded(child, depth + 1)
+        elif isinstance(item, list):
+            if len(item) > 256: raise ValueError(invalid)
+            for child in item: bounded(child, depth + 1)
+        elif item is not None and type(item) not in (str, int, float, bool):
+            raise ValueError(invalid)
+    try:
+        bounded(value)
+        serialized = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+        if len(serialized.encode('utf-8')) > 24000: raise ValueError(invalid)
+        return json.loads(serialized)
+    except (TypeError, ValueError, RecursionError):
+        raise ValueError(invalid) from None
 
 class InferenceProvider(Protocol):
     def models(self): ...
@@ -96,6 +145,11 @@ class CompatibleProvider:
         body=dict(model=data['model'],messages=messages,stream=True,stream_options={'include_usage':True},
                   max_tokens=payload['options']['num_predict'],temperature=data.get('temperature',.3))
         if payload.get('tools'): body['tools']=payload['tools']
+        if 'response_format' in data:
+            body['response_format']=validated_response_format(data['response_format'])
+            schema_tokens=math.ceil(len(json.dumps(body['response_format'],ensure_ascii=False,separators=(',', ':')).encode('utf-8'))/3)
+            if estimated_prompt_tokens(data['messages'],data.get('tools',[]),AGENT_SYSTEM_PROMPT)+schema_tokens > prompt_budget(data.get('context',8192),payload['options']['num_predict']):
+                raise ValueError('The structured response schema exceeds the selected context budget. Increase Context or reduce the review evidence.')
         body=self.prepare_body(data,body)
         cancel = cancel if cancel is not None else threading.Event()
         started=time.monotonic()
@@ -106,7 +160,7 @@ class CompatibleProvider:
                 if cancel.is_set(): return
                 if not line.startswith('data:'): continue
                 raw=line[5:].strip()
-                if raw=='[DONE]': completed=True; break
+                if raw=='[DONE]': break
                 if not raw: continue
                 try: packet=json.loads(raw)
                 except ValueError: raise ValueError('Provider returned an invalid response stream.') from None
@@ -149,6 +203,8 @@ class CompatibleProvider:
                     if not isinstance(delta,dict) or any(delta.get(key) is not None and not isinstance(delta[key],str)
                         for key in ('content','reasoning_content','reasoning')):
                         raise ValueError('Provider returned an invalid message.')
+                    if delta.get('refusal'):
+                        raise ValueError('Provider refused the response. Partial content is saved; tool calls were not executed.')
                     calls=delta.get('tool_calls')
                     if calls is None: calls=[]
                     # SSE may first emit only an index/ID, followed by function
@@ -163,9 +219,14 @@ class CompatibleProvider:
                     characters+=len(message['content'])+len(message['thinking'])+call_characters
                     if characters>MAX_STREAM_CHARACTERS: raise ValueError('Response is too large. Ask for a shorter answer.')
                     await publish({'message':message})
-                    if choice.get('finish_reason'):
-                        if not isinstance(choice['finish_reason'],str): raise ValueError('Provider returned an invalid completion reason.')
-                        final['done_reason']='length' if choice['finish_reason']=='length' else 'stop'; completed=True
+                    if choice.get('finish_reason') is not None:
+                        reason=choice['finish_reason']
+                        if not isinstance(reason,str): raise ValueError('Provider returned an invalid completion reason.')
+                        if reason not in ('stop','tool_calls','function_call','length','max_tokens'):
+                            raise ValueError('Provider did not complete the response successfully. Partial content is saved; tool calls were not executed.')
+                        final['provider_finish_reason']=reason
+                        final['done_reason']=reason
+                        completed=True
             if cancel.is_set(): return
             if not completed: raise ValueError('Provider stream ended before completion. Partial content is saved; tool calls were not executed.')
             await publish({**final,'done':True,'message':{},'total_duration':int((time.monotonic()-started)*1e9)})

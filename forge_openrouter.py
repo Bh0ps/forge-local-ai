@@ -11,7 +11,7 @@ import time
 import httpx
 
 from forge_credentials import CredentialVault
-from forge_inference import CompatibleProvider
+from forge_inference import CompatibleProvider, validated_response_format
 
 
 OPENROUTER_URL = 'https://openrouter.ai/api/v1'
@@ -75,6 +75,8 @@ def free_catalog(raw):
             capabilities.append('tools')
         if 'image' in modalities or name == FREE_ROUTER:
             capabilities.append('vision')
+        if 'response_format' in parameters or 'structured_outputs' in parameters or name == FREE_ROUTER:
+            capabilities.append('structured_outputs')
         title = item.get('name')
         title = title[:200] if isinstance(title, str) else name
         result.append({'name': name, 'model': name, 'title': title, 'provider': 'openrouter',
@@ -167,6 +169,10 @@ class OpenRouterProvider(CompatibleProvider):
         if policy not in ('allow', 'deny'):
             raise OpenRouterFailure('Free-only OpenRouter has an invalid data collection policy.')
         safe = {k: v for k, v in body.items() if k in ('model', 'messages', 'stream', 'stream_options', 'max_tokens', 'temperature', 'tools')}
+        if 'response_format' in body:
+            if 'structured_outputs' not in info['capabilities']:
+                raise OpenRouterFailure('Free-only OpenRouter model does not advertise structured output support.')
+            safe['response_format'] = validated_response_format(body['response_format'])
         safe['provider'] = {'max_price': {k: 0 for k in PRICE_FIELDS}, 'require_parameters': True,
                             'data_collection': policy, 'allow_fallbacks': False}
         return safe

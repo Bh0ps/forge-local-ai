@@ -19,6 +19,7 @@ DEFAULTS = dict(context=32768, model='', provider_id='ollama', permission_profil
                 auto_compact=True, auto_delegate=False, startup=False, dictation_model='base',allow_edits=True,
                 computer_tools=False,browser_tools=True,num_thread=4,
                 memory_enabled=True,memory_suggestions=True,memory_semantic=False,memory_model_path='',
+                goal_review_enabled=False,goal_review_model='openrouter/free',goal_review_context=32768,goal_review_max_revisions=3,
                 goal_limits={'minutes':60, 'tokens':100000, 'rounds':128, 'tools':256})
 TERMINAL = {'completed', 'cancelled', 'failed', 'paused', 'interrupted'}
 
@@ -240,6 +241,12 @@ class ForgeStore(Store):
             if key in settings and type(settings[key]) is not bool: raise ValueError('Memory preferences must be true or false.')
         if 'memory_model_path' in settings and (not isinstance(settings['memory_model_path'],str) or len(settings['memory_model_path'])>1000): raise ValueError('Invalid local embedding directory.')
         if 'goal_limits' in settings: settings={**settings,'goal_limits':validate_goal_limits(settings['goal_limits'])}
+        if 'goal_review_enabled' in settings and type(settings['goal_review_enabled']) is not bool: raise ValueError('Goal review must be true or false.')
+        if 'goal_review_context' in settings: _context_setting(settings['goal_review_context'])
+        if 'goal_review_max_revisions' in settings and (type(settings['goal_review_max_revisions']) is not int or not 1<=settings['goal_review_max_revisions']<=5): raise ValueError('Goal review revisions must be between 1 and 5.')
+        if 'goal_review_model' in settings:
+            model=settings['goal_review_model']
+            if not isinstance(model,str) or len(model)>300 or (model!='openrouter/free' and not model.endswith(':free')): raise ValueError('Choose a free OpenRouter model for goal review.')
         if 'permission_overrides' in settings:
             overrides=settings['permission_overrides']
             if not isinstance(overrides,dict) or any(not isinstance(k,str) or not k.startswith(('tool:','server:','app:','project:')) or v not in ('always_ask','full_access','deny_access') for k,v in overrides.items()):
@@ -318,6 +325,7 @@ class ForgeStore(Store):
                 # Bind the goal, chat, request and run in one admission commit.
                 # TODO.md contains no chat identity, so its checksum stays valid.
                 goal.update(chat_id=chat_id,updated_at=stamp)
+                data['goal_initial']={key:goal.get(key) for key in ('request','tasks','reviewed_plan')}
                 db.execute("UPDATE entities SET data=? WHERE kind='goals' AND id=?",(encode(goal),goal['id']))
             cursor=db.execute('INSERT INTO messages(chat_id,role,content,metadata,created_at) VALUES(?,?,?,?,?)',
                 (chat_id,'user',data['request'],metadata,stamp))
@@ -460,11 +468,12 @@ class ForgeStore(Store):
             rows=db.execute("SELECT e.data,r.id AS run_id,r.status,r.chat_id FROM entities e "
                 "JOIN runs r ON r.goal_id=e.id JOIN chats c ON c.id=r.chat_id "
                 "WHERE e.kind='goals' AND r.parent_id IS NULL AND c.archived=0 "
-                "AND r.status NOT IN ('completed','cancelled','failed','paused','interrupted') "
+                "AND r.status NOT IN ('completed','cancelled','failed') "
                 "ORDER BY r.created_at DESC").fetchall()
         result=[]; seen=set()
         for row in rows:
             goal=json.loads(row['data'])
+            if row['status'] in ('paused','interrupted') and goal.get('review',{}).get('status') not in ('error','needs_changes','insufficient_evidence','reviewing'): continue
             if goal.get('status')=='completed' or goal.get('project_missing') or goal.get('chat_id')!=row['chat_id'] or goal['id'] in seen: continue
             seen.add(goal['id'])
             result.append({**goal,'run_id':row['run_id'],'chat_id':row['chat_id'],'status':row['status']})

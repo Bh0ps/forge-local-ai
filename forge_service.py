@@ -8,6 +8,7 @@ import re
 import socket
 import subprocess
 import threading
+import time
 from urllib.parse import urlparse
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -37,6 +38,10 @@ READ_ACTIONS=frozenset(('bootstrap','commands','projects','chats','get_chat','at
     'dictation_status','runtime_status','hf_status','performance_status','pending_questions',
     'skills','skill_read','skill_preview','plugins','catalogs','catalog_discover','integrations','tools'))
 
+class AgentLaunchRejected(ValueError):
+    """Preflight failed before any worktree, child or remote request was created."""
+    not_executed=True
+
 class ForgeService:
     def __init__(self,core=None,store=None,data_dir=None):
         self.core=core or Core(); self.store=store or ForgeStore(data_dir); self.computer_broker=None; self.host_dictation=None
@@ -50,6 +55,7 @@ class ForgeService:
         self.jobs=RunManager(self); self.stop_event=threading.Event(); self.background=None; self.runtime=None
         self.performance_manager=None; self.model_manager=None; self.plan_lock=threading.RLock(); self.manager_lock=threading.RLock()
         self.worktree_lock=threading.RLock()
+        self.agent_lock=threading.RLock()
         self.schedule_lock=threading.RLock()
         self.admission_lock=threading.RLock()
         self.memory_manager=None; self.channel_manager=None; self.setup_manager=None; self.update_manager=None; self.openrouter_manager=None; self.github_manager=None
@@ -116,7 +122,7 @@ class ForgeService:
         return {'ok':True}
 
     def bootstrap(self):
-        return dict(version='4.2.2',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
+        return dict(version='4.2.3',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
                     chats=self.store.list_chats(),runs=self.store.runs(limit=200),goals=self.store.active_goals(),
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -150,6 +156,7 @@ class ForgeService:
                     from forge_setup import SetupManager
                     self.setup_manager=SetupManager(self)
             return self.setup_manager.dispatch(action,data)
+        if action=='openrouter_setup_agents': return self.openrouter_setup_agents()
         if action.startswith('openrouter_'):
             with self.manager_lock:
                 if self.openrouter_manager is None:
@@ -162,7 +169,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='4.2.2')
+                    self.update_manager=UpdateManager(self,current_version='4.2.3')
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)
@@ -538,32 +545,175 @@ class ForgeService:
             if key in profile and (type(profile[key]) is not int or not 1<=profile[key]<=1_000_000_000): raise ValueError('Agent '+key+' limit must be a positive integer.')
         return self.store.save_entity('agents',profile)
     def agent_start(self,data):
-        profile=self.store.entity('agents',data['agent_id'])
-        if not profile.get('enabled',True): raise ValueError('Enable this agent profile first.')
-        parent=self.store.run(data['parent_id']) if data.get('parent_id') else None
+        with self.admission_lock,self.agent_lock:
+            if self.update_manager and self.update_manager.applying:
+                raise AgentLaunchRejected('Forge is preparing an update. Resume delegation after restart.')
+            return self._agent_start(data)
+    def _agent_start(self,data):
+        source_key=data.get('source_key')
+        if source_key:
+            if not isinstance(source_key,str) or len(source_key)>500: raise AgentLaunchRejected('Invalid delegation request identity.')
+            with self.store._connection() as db:
+                prior=db.execute('SELECT run_id FROM request_keys WHERE source_key=?',(source_key,)).fetchone()
+            if prior:
+                run=self.store.run(prior[0])
+                if run.get('parent_id')!=data.get('parent_id') or run.get('agent_id')!=data.get('agent_id'):
+                    raise AgentLaunchRejected('This delegation request already belongs to another helper.')
+                return {**{key:run.get(key) for key in ('id','chat_id','status','mode','request','settings','request_message_id','goal_id','project_id','parent_id')},
+                    'worktree':None,'reused':True}
+        try:
+            profile=self.store.entity('agents',data['agent_id'])
+            parent=self.store.run(data['parent_id']) if data.get('parent_id') else None
+        except (ValueError,KeyError): raise AgentLaunchRejected('The agent profile or parent run is unavailable.') from None
+        if not profile.get('enabled',True): raise AgentLaunchRejected('Enable this agent profile first.')
+        if parent and parent.get('parent_id'): raise AgentLaunchRejected('Helper agents cannot recursively delegate. Return findings to the main agent.')
+        if parent and parent['status'] in TERMINAL: raise AgentLaunchRejected('The parent run is no longer active.')
+        if parent:
+            with self.jobs.lock: parent_job=self.jobs.jobs.get(parent['id'])
+            if parent_job and parent_job['cancel'].is_set(): raise AgentLaunchRejected('The parent run is stopping; no helper was started.')
+        if parent and data.get('project_id') and data['project_id']!=parent.get('project_id'):
+            raise AgentLaunchRejected('A helper must use its parent project.')
         settings=parent['settings'] if parent else self.store.get_settings()
         if not parent and profile.get('goal_limits'): settings={**settings,'goal_limits':profile['goal_limits']}
-        project_id=data.get('project_id') or (parent or {}).get('project_id')
+        project_id=parent.get('project_id') if parent else data.get('project_id')
+        provider_id=profile.get('provider_id') or settings['provider_id']
+        model=profile.get('model') or settings['model']
+        if provider_id=='openrouter':
+            try: config=self.store.entity('providers','openrouter')
+            except ValueError: raise AgentLaunchRejected('Connect OpenRouter before launching a cloud helper.') from None
+            if not config.get('enabled') or not config.get('remote_consent') or not config.get('credential_ref'):
+                raise AgentLaunchRejected('Enable OpenRouter with cloud consent and a saved key before launching a cloud helper.')
+            model=profile.get('model') or config.get('model') or 'openrouter/free'
+            if model!='openrouter/free' and not re.fullmatch(r'[A-Za-z0-9_./-]+:free',model):
+                raise AgentLaunchRejected('OpenRouter helpers require the free router or a :free model.')
         readonly=profile.get('role') in ('researcher','reviewer')
+        if parent and (parent.get('readonly') or parent.get('mode')=='plan') and not readonly:
+            raise AgentLaunchRejected('Read-only runs can only launch read-only helpers.')
+        text=data.get('text') or data.get('prompt') or 'Inspect the project.'
+        if not isinstance(text,str) or not text.strip() or len(text)>1_000_000:
+            raise AgentLaunchRejected('Enter a helper task of 1–1,000,000 characters.')
+        if not model: raise AgentLaunchRejected('Select a model for this agent profile.')
+        from context_window import validate_context
+        try: validate_context(profile.get('context',settings['context']))
+        except ValueError as exc: raise AgentLaunchRejected(str(exc)) from None
+        from forge_channels import permission_ceiling
+        ceiling=permission_ceiling((parent or {}).get('permission_ceiling') or settings['permission_profile'],
+            data.get('permission_ceiling') or settings['permission_profile'])
+        ceiling=permission_ceiling(ceiling,settings['permission_profile'])
+        tools=profile.get('tools',[])
+        if parent and parent.get('agent_tools'):
+            allowed=set(parent['agent_tools'])
+            tools=[name for name in (tools or parent['agent_tools']) if name in allowed]
+            # An empty list conventionally means unrestricted; retain a harmless
+            # explicit scope when the two profiles have no tool intersection.
+            if not tools: tools=['artifact_read']
         worktree=None
         if project_id and not readonly:
             project=self.store.get_project(project_id)
             if self._git(Path(project['path']),['rev-parse','--is-inside-work-tree'],check=False).returncode==0:
                 worktree=self.worktree_create({'project_id':project_id})
             elif parent and parent.get('project_id')==project_id:
-                raise ValueError('Writing delegation requires a Git worktree. Initialize and commit this project, or run the agent after the main writer pauses.')
+                raise AgentLaunchRejected('Writing delegation requires a Git worktree. Initialize and commit this project, or run the agent after the main writer pauses.')
         result=self.jobs.start({**settings,'context':profile.get('context',settings['context']),
-            'provider_id':profile.get('provider_id') or settings['provider_id'],
-            'model':profile.get('model') or settings['model'],'text':data.get('text') or data.get('prompt') or 'Inspect the project.',
+            'provider_id':provider_id,'auto_delegate':False,
+            'model':model,'text':text,
             'project_id':project_id,'parent_id':data.get('parent_id'),'readonly':readonly,
-            'instructions':profile.get('instructions',''),'agent_id':profile['id'],'agent_tools':profile.get('tools',[]),'skills':profile.get('skills',[]),
+            'instructions':profile.get('instructions',''),'agent_id':profile['id'],'agent_tools':tools,'skills':profile.get('skills',[]),
             'worktree_id':worktree['worktree']['id'] if worktree else None,
-            'workspace_project_id':worktree['project']['id'] if worktree else None,
-            'permission_ceiling':(parent or {}).get('permission_ceiling') or data.get('permission_ceiling'),
-            'goal_id':parent.get('goal_id') if parent else None})
-        self.store.update_run(result['id'],instructions=profile.get('instructions',''),agent_id=profile['id'],
-            agent_tools=profile.get('tools',[]),skills=profile.get('skills',[]),worktree_id=worktree['worktree']['id'] if worktree else None)
+            'workspace_project_id':worktree['project']['id'] if worktree else (parent or {}).get('workspace_project_id'),
+            'permission_ceiling':ceiling,
+            'goal_id':parent.get('goal_id') if parent else None,'source_key':source_key})
         return {**result,'worktree':worktree}
+
+    def delegation_profiles(self,run):
+        """Bounded local discovery; no provider requests or unrelated chat reads."""
+        if run.get('parent_id') or not run['settings'].get('auto_delegate'): return []
+        settings=self.store.get_settings()
+        if (not settings.get('auto_delegate') and run.get('initial_preferences',{}).get('auto_delegate')) or settings.get('permission_profile')=='deny_access': return []
+        providers={p['id']:p for p in self.store.entities('providers')}
+        available=[]
+        for profile in self.store.entities('agents'):
+            if not profile.get('enabled',True): continue
+            provider_id=profile.get('provider_id') or run['settings']['provider_id']
+            if provider_id!='ollama':
+                config=providers.get(provider_id)
+                if not config or config.get('enabled',True) is False: continue
+                if config.get('kind')=='openrouter' and not (config.get('remote_consent') and config.get('credential_ref')): continue
+            else: config={}
+            readonly=profile.get('role') in ('researcher','reviewer')
+            if (run.get('readonly') or run.get('mode')=='plan') and not readonly: continue
+            tools=profile.get('tools',[])
+            if run.get('agent_tools'):
+                tools=[name for name in (tools or run['agent_tools']) if name in run['agent_tools']]
+            available.append(dict(id=profile['id'],name=str(profile.get('name','Agent'))[:100],
+                role=profile.get('role','researcher'),provider_id=provider_id,
+                model=profile.get('model') or (config.get('model') or 'openrouter/free' if config.get('kind')=='openrouter' else run['settings']['model']),readonly=readonly,
+                cloud=config.get('kind')=='openrouter',free_only=config.get('kind')=='openrouter',
+                context=profile.get('context',run['settings']['context']),tools=tools[:40],
+                tool_scope='read-only enabled project tools' if not tools and readonly else ('enabled project tools' if not tools else 'listed tools only')))
+            if len(available)>=20: break
+        return available
+
+    def agent_result(self,parent,args,cancel):
+        """Wait for one direct child using journal notifications, without model polling."""
+        identifier=args['run_id']; child=self.store.run(identifier)
+        if child.get('parent_id')!=parent['id']: raise ValueError('This is not a child of the current run.')
+        seconds=args.get('wait_seconds',120)
+        if type(seconds) not in (int,float) or not 0<=seconds<=300: raise ValueError('Wait must be between 0 and 300 seconds.')
+        wake=threading.Event()
+        def changed(event):
+            if event.get('run_id')==identifier and event.get('type') in ('done','approval','question','error','status'):
+                wake.set()
+        self.store.subscribe_events(changed)
+        try:
+            deadline=time.monotonic()+seconds
+            child=self.store.run(identifier)
+            with self.jobs.lock: live=identifier in self.jobs.jobs
+            while live and child['status'] not in TERMINAL and child['status'] not in ('awaiting_approval','waiting_question'):
+                if cancel.is_set() or time.monotonic()>=deadline: break
+                # Cancellation stays responsive; only journal changes trigger a
+                # database read, rather than every token or elapsed interval.
+                if wake.wait(min(.25,max(0,deadline-time.monotonic()))):
+                    wake.clear(); child=self.store.run(identifier)
+            child=self.store.run(identifier)
+        finally: self.store.unsubscribe_events(changed)
+        with self.store._connection() as db:
+            later=db.execute("SELECT MIN(CAST(json_extract(data,'$.request_message_id') AS INTEGER)) FROM runs WHERE chat_id=? AND id<>? AND CAST(json_extract(data,'$.request_message_id') AS INTEGER)>?",
+                (child['chat_id'],child['id'],child['request_message_id'])).fetchone()[0]
+            rows=db.execute("SELECT * FROM messages WHERE chat_id=? AND id>=? AND (? IS NULL OR id<?) AND role IN ('user','assistant') ORDER BY id DESC LIMIT 12",
+                (child['chat_id'],child['request_message_id'],later,later)).fetchall()
+            messages=[dict(id=row['id'],role=row['role'],content=row['content']) for row in reversed(rows)]
+        assistant=next((message['content'] for message in reversed(messages) if message['role']=='assistant'),'')
+        public={key:child.get(key) for key in ('id','chat_id','parent_id','agent_id','project_id','workspace_project_id','worktree_id',
+            'status','readonly','checkpoint','recovery','rounds','tools','output_tokens')}
+        public['settings']={key:child['settings'].get(key) for key in ('provider_id','model','context')}
+        return {'run':public,'messages':messages,'response':assistant,'finished':child['status'] in TERMINAL,
+            'needs_attention':child['status'] in ('paused','interrupted','awaiting_approval','waiting_question'),
+            'waiting':child['status'] not in TERMINAL,'cancelled_wait':cancel.is_set(),
+            'next_action':'Use the helper evidence to continue the task.' if child['status']=='completed' else
+                'Inspect the helper activity or pending approval/question; call agent_result to wait again. Do not treat unfinished work as complete.'}
+
+    def openrouter_setup_agents(self):
+        """Explicit one-click setup preserves all previously edited profiles."""
+        config=self.store.entity('providers','openrouter')
+        if not config.get('enabled') or not config.get('remote_consent') or not config.get('credential_ref'):
+            raise ValueError('Connect and enable OpenRouter with cloud consent before setting up cloud helpers.')
+        tools=['web_search','web_fetch','list_files','read_file','search_files','skills_read','artifact_read']
+        definitions=[dict(id='openrouter-researcher',name='OpenRouter Researcher',role='researcher',
+            instructions='Research the assigned bounded question using primary sources. Cite evidence and explain uncertainty. Read only the connected project when needed. Return concise findings to the local orchestrator. Do not edit files or delegate.'),
+            dict(id='openrouter-assistant',name='OpenRouter Assistant',role='reviewer',
+            instructions='Help the local orchestrator with the assigned bounded analysis, debugging or review question. Inspect relevant connected-project evidence, state actionable findings and concrete next steps, then return them to the local agent. Do not edit files, claim the overall goal complete or delegate.')]
+        created=[]; preserved=[]
+        with self.store._connection(transaction='write') as db:
+            for profile in definitions:
+                if db.execute("SELECT 1 FROM entities WHERE kind='agents' AND id=?",(profile['id'],)).fetchone():
+                    preserved.append(profile['id']); continue
+                profile.update(provider_id='openrouter',model='openrouter/free',context=32768,tools=tools,
+                    skills=[],enabled=True,tokens=25000,rounds=32,updated_at=_now())
+                db.execute('INSERT INTO entities VALUES(?,?,?)',('agents',profile['id'],encode(profile))); created.append(profile['id'])
+            for key in ('auto_delegate','goal_review_enabled'):
+                db.execute('INSERT INTO forge_settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,encode(True)))
+        return {'agents':self.store.entities('agents'),'settings':self.store.get_settings(),'created':created,'preserved':preserved}
 
     def provider_save(self,data):
         if data.get('kind')=='openrouter': return self.dispatch('openrouter_save',data)
