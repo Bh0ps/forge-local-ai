@@ -161,7 +161,7 @@ coding, image and tool probes. Model/context recommendations require acceptance.
 
 ## Run from source
 
-Use Python 3.12, Node.js 22.12+ and Windows WebView2. Start Ollama separately.
+Use Python 3.12, Node.js 24.18.0 and Windows WebView2. Start Ollama separately.
 
 ```powershell
 python -m venv .venv

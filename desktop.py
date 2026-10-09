@@ -585,7 +585,13 @@ def main():
                         <p id="result">Before</p><script>console.error('FORGE_PREVIEW_DIAGNOSTIC');fetch('/missing-diagnostic').catch(()=>{});</script>''', 'missing')
                         preview = manager.dispatch('preview_start', {'builder_id': brief['id'], 'mode': 'static'})
                         try:
-                            opened = api._window.evaluate_js("(()=>{document.querySelector('button[aria-label=\"Close workspace panel\"]')?.click();const b=[...document.querySelectorAll('nav[aria-label=\"Workspace navigation\"] button')].find(e=>e.textContent.trim()==='Builder');if(b){b.click();return true;}return false;})()")
+                            # HUD resizing may have collapsed the sidebar. Restore it
+                            # before looking for Builder, then wait for React to render.
+                            api._window.evaluate_js("document.querySelector('button[aria-label=\"Close workspace panel\"]')?.click();document.querySelector('button[aria-label=\"Open sidebar\"]')?.click();true")
+                            opened = False; deadline = time.monotonic()+10
+                            while not opened and time.monotonic()<deadline:
+                                opened = api._window.evaluate_js("(()=>{const b=[...document.querySelectorAll('nav[aria-label=\"Workspace navigation\"] button')].find(e=>e.textContent.trim()==='Builder');if(b){b.click();return true;}return false;})()")
+                                if not opened: time.sleep(.05)
                             if not opened: raise ValueError('Builder navigation is missing.')
                             deadline = time.monotonic()+10
                             while not api._window.evaluate_js("!!document.querySelector('nav[aria-label=\"Builder sections\"]')") and time.monotonic()<deadline:
