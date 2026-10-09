@@ -1,6 +1,6 @@
 <p align="center"><img src="assets/forge.svg" width="88" alt="Forge"></p>
 
-# Forge 5.0.3
+# Forge 5.0.4
 
 Your models. Your projects. Your workspace.
 
@@ -8,14 +8,14 @@ Forge is a local AI workspace for building apps, exploring ideas and working wit
 files on your computer. It brings chat, Builder, previews and project tools into
 one Windows app. Optional OpenRouter guidance helps with planning and review.
 
-**[Download the Windows installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.0.3/Forge-5.0.3-Setup.exe)**
-· [Release notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.0.3)
-· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.0.3/SHA256SUMS.txt)
+**[Download the Windows installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.0.4/Forge-5.0.4-Setup.exe)**
+· [Release notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.0.4)
+· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.0.4/SHA256SUMS.txt)
 
 ## Install
 
 1. Install [Ollama](https://ollama.com/download/windows) and choose a local model.
-2. Download **Forge-5.0.3-Setup.exe** and run it.
+2. Download **Forge-5.0.4-Setup.exe** and run it.
 3. Open Forge and follow the setup wizard to connect your model.
 
 Windows 10/11, 64-bit, with WebView2 is required. Python, Node.js and the source
@@ -65,6 +65,12 @@ browser and local Builder preview are also available without the extension.
 For Telegram, open **Settings → Connected workflows**, add your bot, connect and
 pair your account. Enable **Include response content** to receive the answer and
 continue the conversation. Keep Forge and your computer running.
+
+Use `/model` to see your selection, `/model list` to see available models, and
+`/model <name or number>` to switch. `/reasoning` shows the current setting;
+`/reasoning on` or `/reasoning off` changes it where the model supports that control.
+Use `default` with either command to return to the configured defaults. Settings
+are saved for that Telegram chat and apply to its next request or safe resume.
 
 Start with **Always Ask** and approve actions you understand. Credentials stay in
 the OS vault. Optional OpenRouter helpers use free routes with no paid fallback.

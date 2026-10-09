@@ -45,6 +45,7 @@ MAX_TEXT = 16000
 TELEGRAM_COMMANDS = [{'command': name, 'description': description} for name, description in (
     ('builder', 'Explore ideas and shape a project together'), ('build', 'Accept your Builder brief and build in the connected project'),
     ('plan', 'Research and prepare a plan'), ('goal', 'Start a tracked task in this chat'),
+    ('model', 'Show or change this chat\'s model'), ('reasoning', 'Show or change reasoning for this chat'),
     ('answer', 'Answer a pending question; separate answers with |'), ('status', 'Show current progress'),
     ('pause', 'Pause work'), ('resume', 'Resume safe paused work'), ('cancel', 'Cancel work'), ('help', 'Show commands'))]
 
@@ -348,14 +349,57 @@ class ChannelManager:
             self._validate_url(config.get('url'), required=config.get('allow_outbound', True))
             config.update(connected=True, last_error=None)
         if config['kind']=='telegram':
-            try:
-                self.transport.telegram(self._secret(config),'setMyCommands',{'commands':TELEGRAM_COMMANDS},self.stop_event)
-                config.update(commands_ready=True,commands_error=None)
-            except Exception:
-                config.update(commands_ready=False,commands_error='Bot connected, but its command menu could not be updated. Connect / test again.')
+            config = self._refresh_command_menu(config, explicit=True)
         self.store.save_entity('channels', config)
         self.wake.set()
         return self._public(config)
+
+    def _refresh_command_menu(self, config, *, explicit=False):
+        """Publish a changed menu, with durable and bounded automatic retries.
+
+        setMyCommands replaces metadata idempotently. It never sends a message
+        or starts a task. Explicit Connect / Test can retry a disabled channel
+        and resets the automatic allowance; startup refresh requires an already
+        connected and enabled bot.
+        """
+        if (config.get('kind') != 'telegram' or not config.get('connected') or
+                not explicit and not config.get('enabled') or self.stop_event.is_set()):
+            return config
+        commands = [dict(command) for command in TELEGRAM_COMMANDS]
+        signature = sha256(encode({'commands': commands,
+                                   'credential_ref': config.get('credential_ref')}).encode()).hexdigest()
+        if not explicit and config.get('commands_ready') is True and config.get('commands_hash') == signature:
+            return config
+        retry = self._checkpoint(config['id'], 'telegram_command_menu', {})
+        if not isinstance(retry, dict) or retry.get('hash') != signature or explicit:
+            retry = {'hash': signature, 'attempts': 0, 'retry_at': 0}
+        attempts = retry.get('attempts', 0)
+        if type(attempts) is not int or attempts < 0:
+            attempts = 0
+        retry_at = retry.get('retry_at', 0)
+        if type(retry_at) not in (int, float) or retry_at < 0:
+            retry_at = 0
+        if not explicit and (attempts >= 6 or self.clock() < retry_at):
+            return config
+        # Record the attempt before I/O so a restart cannot reset the retry cap.
+        retry = {'hash': signature, 'attempts': attempts + (0 if explicit else 1),
+                 'retry_at': self.clock() + 600}
+        with self.store._connection(transaction='write') as db:
+            self._set_checkpoint(db, config['id'], 'telegram_command_menu', retry)
+        try:
+            result = self.transport.telegram(self._secret(config), 'setMyCommands',
+                                              {'commands': commands}, self.stop_event)
+            if result is not True:
+                raise DeliveryFailure('Telegram did not confirm the command menu.')
+            config.update(commands_ready=True, commands_hash=signature, commands_error=None)
+            retry.update(attempts=0, retry_at=0)
+        except Exception:
+            config.update(commands_ready=False,
+                          commands_error='Bot connected, but its command menu could not be updated. Connect / test again.')
+        self.store.save_entity('channels', config)
+        with self.store._connection(transaction='write') as db:
+            self._set_checkpoint(db, config['id'], 'telegram_command_menu', retry)
+        return config
 
     @_channel_admitted
     def pair_begin(self, identifier):
@@ -568,9 +612,201 @@ class ChannelManager:
         self.service.jobs.approve(binding['run_id'], binding['approval_id'], bool(binding['allowed']))
         return binding['run_id']
 
+    def _chat_settings(self, config, recipient, chat_id):
+        saved = self._checkpoint(config['id'], 'chat_settings:' + recipient, {})
+        # A deleted/reconnected route is a new conversation, even when Telegram
+        # reuses the same recipient. Neither choices nor list numbers transfer.
+        return dict(saved) if isinstance(saved, dict) and saved.get('chat_id') == chat_id else {'chat_id': chat_id}
+
+    def _save_chat_settings(self, config, recipient, saved):
+        with self.store._connection(transaction='write') as db:
+            self._set_checkpoint(db, config['id'], 'chat_settings:' + recipient, saved)
+
+    def _configured_settings(self, config):
+        current = self.store.get_settings()
+        profile = {}
+        if config.get('agent_profile_id'):
+            profile = self.store.entity('agents', config['agent_profile_id'])
+            if not profile.get('enabled'):
+                raise ValueError('Enable this channel’s configured agent in Forge first.')
+        return {'provider_id': profile.get('provider_id') or config.get('provider_id') or current['provider_id'],
+                'model': profile.get('model') or config.get('model') or current['model'],
+                'context': profile.get('context', current['context']), 'thinking': current['thinking']}
+
+    def _provider_details(self, identifier, *, admit=True):
+        if identifier == 'ollama':
+            return {'name': 'Ollama', 'kind': 'ollama'}
+        try:
+            provider = self.store.entity('providers', identifier)
+        except ValueError:
+            raise ValueError('This chat’s configured provider is unavailable. Configure it in Forge first.') from None
+        if admit and (provider.get('enabled', True) is not True or provider.get('kind') == 'openrouter' and
+                      not (provider.get('remote_consent') is True and provider.get('credential_ref'))):
+            raise ValueError('This chat’s provider is disabled or needs cloud consent/credentials. Configure it in Forge first.')
+        return provider
+
+    def _model_catalog(self, provider_id):
+        self._provider_details(provider_id)
+        try:
+            entries = self.service.providers.models(provider_id, refresh=True)
+            names = set()
+            for entry in entries:
+                name = (entry.get('name') or entry.get('model') or entry.get('id')) if isinstance(entry, dict) else None
+                if isinstance(name, str) and name == name.strip() and 0 < len(name) <= 300 and not any(ord(c) < 32 for c in name):
+                    names.add(name)
+            return sorted(names, key=lambda name: (name.casefold(), name))
+        except Exception:
+            raise ValueError('The model catalog is unavailable. Check this chat’s engine in Forge; your saved choice is unchanged.') from None
+
+    def _model_info(self, provider_id, model):
+        self._provider_details(provider_id)
+        try:
+            info = self.service.providers.capabilities(provider_id, model)
+            if not isinstance(info, dict):
+                raise ValueError('Invalid model metadata.')
+            return info
+        except Exception:
+            raise ValueError('This model’s capabilities are unavailable. Check the engine in Forge; your saved choice is unchanged.') from None
+
+    def _validate_reasoning(self, provider_id, model, thinking, info):
+        from core import apply_thinking_control, supports_thinking, thinking_values
+        if self._provider_details(provider_id).get('kind') != 'ollama':
+            raise ValueError('This provider uses its own reasoning default; Forge cannot control it with on/off. Use /reasoning default.')
+        values = thinking_values(model, info)
+        if not values or thinking is True and not supports_thinking(model, info):
+            raise ValueError('This model has no supported on/off reasoning control. Use /reasoning default or select another model.')
+        # Compile the same cached metadata as inference, without model execution.
+        apply_thinking_control({}, {'model': model, 'thinking': thinking, 'model_metadata': info})
+
+    def _validate_choice(self, defaults, saved, *, context=None):
+        from context_window import require_model_context
+        if any(key in saved for key in ('model', 'thinking')) and saved.get('provider_id') != defaults['provider_id']:
+            raise ValueError('This chat’s configured provider changed. Use /model default and /reasoning default, then choose again.')
+        model = saved.get('model', defaults['model'])
+        if not model:
+            raise ValueError('Choose a model with /model list first.')
+        info = self._model_info(defaults['provider_id'], model)
+        require_model_context(defaults['context'] if context is None else context, info)
+        if 'thinking' in saved:
+            try:
+                self._validate_reasoning(defaults['provider_id'], model, saved['thinking'], info)
+            except ValueError as exc:
+                raise ValueError(str(exc) + ' Clear the saved reasoning choice with /reasoning default before changing models.') from None
+        elif self._provider_details(defaults['provider_id']).get('kind') == 'ollama':
+            from core import apply_thinking_control, supports_thinking
+            try:
+                apply_thinking_control({}, {'model': model, 'model_metadata': info,
+                                            'thinking': defaults['thinking'] and supports_thinking(model, info)})
+            except ValueError:
+                raise ValueError('This model does not support your configured reasoning default. Use /reasoning on when supported, or select another model; your saved choice is unchanged.') from None
+        return model, info
+
+    def _model_command(self, config, recipient, chat_id, argument):
+        defaults = self._configured_settings(config)
+        saved = self._chat_settings(config, recipient, chat_id)
+        provider_id = defaults['provider_id']
+        if argument.lower() == 'default':
+            saved.pop('model', None)
+            if 'thinking' not in saved:
+                saved['provider_id'] = provider_id
+            self._save_chat_settings(config, recipient, saved)
+            return ('Model reset to this chat’s configured default: ' + defaults['model'] + '\nProvider: ' + provider_id +
+                    '\nApplies to your next message or safe /resume.')
+        provider = self._provider_details(provider_id)
+        label = str(provider.get('name') or provider_id)[:100] + ' (' + provider_id + ')'
+        catalog = self._model_catalog(provider_id)
+        if not catalog:
+            raise ValueError('No models are available from ' + label + '. Configure a model in Forge; your saved choice is unchanged.')
+        if not argument or argument.lower() in ('list', 'show'):
+            choices = catalog[:100]
+            with self.store._connection(transaction='write') as db:
+                self._set_checkpoint(db, config['id'], 'model_catalog:' + recipient,
+                                     {'chat_id': chat_id, 'provider_id': provider_id, 'models': choices})
+            active = saved.get('model', defaults['model']) if saved.get('provider_id', provider_id) == provider_id else defaults['model']
+            visible = choices if argument.lower() == 'list' else choices[:8]
+            lines = ['Model: ' + active + (' (chat choice)' if 'model' in saved and saved.get('provider_id') == provider_id else ' (configured default)'),
+                     'Provider: ' + label, '', *[str(index) + '. ' + name for index, name in enumerate(visible, 1)]]
+            if len(visible) < len(catalog):
+                lines.append('Showing ' + str(len(visible)) + ' of ' + str(len(catalog)) + ' models. ' +
+                             ('Use an exact model name for choices beyond 100.' if argument.lower() == 'list' else 'Use /model list for more choices.'))
+            lines.extend(('', 'Choose /model 1 or /model <exact name>. /model default resets only the model.',
+                          'Choices apply to this chat’s next message or safe /resume; current work keeps its settings.'))
+            if any(key in saved for key in ('model', 'thinking')) and saved.get('provider_id') != provider_id:
+                lines.append('Saved choices belong to the previous provider. Reset them before sending a new message.')
+            return '\n'.join(lines)
+        if argument.isdecimal():
+            snapshot = self._checkpoint(config['id'], 'model_catalog:' + recipient, {})
+            number = int(argument) if len(argument) <= 3 else 0
+            snapshot = snapshot if isinstance(snapshot, dict) else {}
+            choices = snapshot.get('models', [])
+            if snapshot.get('chat_id') != chat_id or snapshot.get('provider_id') != provider_id or not 1 <= number <= len(choices):
+                raise ValueError('That model number is unavailable in this chat. Use /model list, then choose a number from its latest list.')
+            model = choices[number - 1]
+        else:
+            model = argument
+        if model not in catalog:
+            raise ValueError('That exact model is unavailable from this chat’s provider. Use /model list; your saved choice is unchanged.')
+        if 'thinking' in saved and saved.get('provider_id') != provider_id:
+            raise ValueError('The saved reasoning choice belongs to the previous provider. Use /reasoning default before selecting this model.')
+        candidate = {**saved, 'model': model, 'provider_id': provider_id}
+        self._validate_choice(defaults, candidate)
+        self._save_chat_settings(config, recipient, candidate)
+        return 'Model selected: ' + model + '\nProvider: ' + label + '\nApplies to this chat’s next message or safe /resume. Context is unchanged.'
+
+    def _reasoning_command(self, config, recipient, chat_id, argument):
+        from core import thinking_values
+        defaults = self._configured_settings(config)
+        saved = self._chat_settings(config, recipient, chat_id)
+        argument = argument.lower()
+        if argument == 'default':
+            saved.pop('thinking', None)
+            if 'model' not in saved:
+                saved['provider_id'] = defaults['provider_id']
+            self._save_chat_settings(config, recipient, saved)
+            return 'Reasoning reset to this chat’s configured default. Applies to your next message or safe /resume. Your model choice is unchanged.'
+        if argument not in ('', 'show', 'on', 'off'):
+            raise ValueError('Use /reasoning to see the current setting, or /reasoning on, /reasoning off, /reasoning default. Named intensity levels are not selectable.')
+        provider = self._provider_details(defaults['provider_id'])
+        model = saved.get('model', defaults['model'])
+        if any(key in saved for key in ('model', 'thinking')) and saved.get('provider_id') != defaults['provider_id']:
+            if 'model' in saved or argument not in ('on', 'off'):
+                raise ValueError('Saved choices belong to the previous provider. Use /model default and /reasoning default before choosing again.')
+        if provider.get('kind') != 'ollama':
+            if argument in ('on', 'off'):
+                self._validate_reasoning(defaults['provider_id'], model, argument == 'on', {})
+            return ('Reasoning: model/provider default\nModel: ' + model + '\nProvider: ' + str(provider.get('name') or defaults['provider_id'])[:100] +
+                    '\nThis provider’s reasoning control is fixed in Forge. /reasoning default clears a saved preference.')
+        if argument in ('on', 'off'):
+            thinking = argument == 'on'
+            # Validate the requested replacement, so changed metadata cannot trap
+            # the user behind an older, now invalid saved reasoning value.
+            saved = {**saved, 'provider_id': defaults['provider_id'], 'thinking': thinking}
+            model, info = self._validate_choice(defaults, saved)
+            self._save_chat_settings(config, recipient, saved)
+        else:
+            info = self._model_info(defaults['provider_id'], model)
+        values = thinking_values(model, info)
+        requested = saved.get('thinking', defaults['thinking'])
+        if 'thinking' not in saved and values and not any(v is True or isinstance(v, str) for v in values):
+            requested = False
+        status = ('on' if requested else 'off') if values else 'model default (no on/off control)'
+        if values and requested is False and not any(v is False for v in values):
+            status = 'configured off is unsupported; use /reasoning on before continuing'
+        elif values and requested is True and not any(v is True or isinstance(v, str) for v in values):
+            status = 'off (model does not support reasoning)'
+        levels = [value for value in (values or []) if isinstance(value, str)]
+        if requested and levels:
+            declared = (info.get('thinking') or {}).get('default')
+            status += ' (model default: ' + str(declared if declared in levels else levels[0]) + ')'
+        source = 'chat choice' if 'thinking' in saved else 'configured default'
+        available = ', '.join(value for value, permitted in (('on', bool(values and any(v is True or isinstance(v, str) for v in values))),
+                                                             ('off', bool(values and any(v is False for v in values)))) if permitted) or 'default only'
+        return ('Reasoning: ' + status + ' (' + source + ')\nModel: ' + model + '\nProvider: ' + defaults['provider_id'] + '\nAvailable: ' + available +
+                '\nUse /reasoning on, /reasoning off, or /reasoning default. Applies to the next message or safe /resume.')
+
     def _command(self, config, sender, recipient, text, chat_id):
         command = text.split()[0].split('@', 1)[0].lower()
-        if command not in ('/status', '/pause', '/resume', '/cancel', '/help', '/builder', '/answer'):
+        if command not in ('/status', '/pause', '/resume', '/cancel', '/help', '/builder', '/answer', '/model', '/reasoning'):
             raise ValueError('Unknown command. Use /help to see the supported commands.')
         if not self._authorized(config, sender, recipient, owner=True):
             raise ValueError('Only this channel’s approved owner may control runs.')
@@ -580,7 +816,14 @@ class ChannelManager:
                     '/builder off ends brainstorming. /build accepts your current brief in the connected project. '
                     '/plan <request> prepares a plan; /goal <request> starts tracked work. '
                     '/answer <reply> answers a question (use | between multiple answers). '
+                    '/model shows this chat’s model choices; /model list shows its numbered catalog. '
+                    '/model <number or exact name> selects; /model default resets. '
+                    '/reasoning shows the setting; use on, off, or default for supported models. '
                     '/status, /pause, /resume and /cancel control this chat only.')
+        if command in ('/model', '/reasoning'):
+            argument = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else ''
+            handler = self._model_command if command == '/model' else self._reasoning_command
+            return handler(config, recipient, chat_id, argument)
         if command=='/builder':
             if text.split(maxsplit=1)[-1].lower()!='off': raise ValueError('Use /builder [idea] to start brainstorming.')
             from forge_builder_guide import disable
@@ -609,6 +852,19 @@ class ChannelManager:
             return 'Cancellation requested for ' + run['id'][:8] + '.'
         if command == '/resume':
             settings = {'permission_profile': permission_ceiling(config['permission_profile'], self.store.get_settings()['permission_profile'])}
+            saved = self._chat_settings(config, recipient, chat_id)
+            defaults = self._configured_settings(config)
+            if defaults['provider_id'] != run['settings'].get('provider_id', 'ollama'):
+                raise ValueError('This paused run uses a different provider. Send a new message to use this chat’s current provider; its saved work is unchanged.')
+            # Pin the admitted provider even if desktop preferences changed while
+            # the run was paused. RunManager performs its original cloud guards.
+            settings['provider_id'] = defaults['provider_id']
+            if len(saved) > 1:
+                model, _ = self._validate_choice(defaults, saved, context=run['settings']['context'])
+                if defaults['provider_id'] == 'openrouter' and model != run['settings']['model']:
+                    raise ValueError('This cloud run keeps its admitted model on Resume. Send a new message to use your selected model; its saved work is unchanged.')
+                settings.update(provider_id=defaults['provider_id'], model=model, thinking=saved.get('thinking', defaults['thinking']),
+                                adaptive_model_locked=True, adaptive_enabled=False)
             self.service.jobs.resume(run['id'], settings)
             return 'Resume requested for ' + run['id'][:8] + '.'
         return 'Run ' + run['id'][:8] + ': ' + run['status'] + '. ' + str(run.get('checkpoint', ''))[:500]
@@ -651,7 +907,13 @@ class ChannelManager:
             if config['kind'] == 'telegram' and text.startswith('/') and not conversation_command:
                 self._inbound_status(identifier, external_id, 'dispatching')
                 response = self._command(config, sender, recipient, text, chat_id)
-                self._enqueue(identifier, recipient, 'command', {'chat_id': recipient, 'text': redact(response)}, 'reply:' + identifier + ':' + external_id)
+                previous = None
+                for index, chunk in enumerate(telegram_chunks(redact(response))):
+                    part = {'chat_id': recipient, 'text': chunk}
+                    if previous:
+                        part['_forge_previous'] = previous
+                    previous = self._enqueue(identifier, recipient, 'command', part,
+                                             'reply:' + identifier + ':' + external_id + (':part:' + str(index) if index else ''))
                 self._inbound_status(identifier, external_id, 'dispatched')
                 return
             if not config.get('inbound_tasks'):
@@ -675,6 +937,18 @@ class ChannelManager:
                     'source_key': 'channel:' + identifier + ':' + external_id,
                     'channel_id': identifier, 'channel_external_id': external_id,
                     'agent_profile_id': config.get('agent_profile_id')}
+            if config['kind'] == 'telegram':
+                saved = self._chat_settings(config, recipient, chat_id)
+                if any(key in saved for key in ('model', 'thinking')):
+                    defaults = self._configured_settings(config)
+                    self._validate_choice(defaults, saved)
+                    data['channel_settings'] = {key: saved[key] for key in ('provider_id', 'model', 'thinking') if key in saved}
+                    if not hasattr(self.service, 'channel_start'):
+                        data.update({key: saved[key] for key in ('model', 'thinking') if key in saved})
+                        if 'thinking' in saved:
+                            data['adaptive_enabled'] = False
+                        if 'model' in saved:
+                            data['adaptive_model_locked'] = True
             if conversation_command:
                 data.update(text=argument or 'Help me come up with a project idea. Suggest three ideas and help me choose.',channel_command=command[1:])
             if hasattr(self.service, 'channel_start'):
@@ -978,6 +1252,7 @@ class ChannelManager:
                     if self.stop_event.is_set():
                         break
                     if config['kind'] == 'telegram' and config.get('enabled'):
+                        config = self._refresh_command_menu(config)
                         self._poll_telegram(config)
             with self.store._connection() as db:
                 inbound = db.execute("SELECT * FROM channel_inbound WHERE status='pending' ORDER BY created_at LIMIT 50").fetchall()

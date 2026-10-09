@@ -44,7 +44,7 @@ def test_round_snapshot_recalls_memory_once_and_reaches_provider(tmp_path,monkey
         assert finished(svc,run)['status']=='completed'
         assert len(recalls)==2 and len(engine.requests)==2
         assert 'Use the established names.' in '\n'.join(m['content'] for m in engine.requests[0]['messages'])
-        assert engine.requests[0]['token_breakdown']['version']=='forge-5.0.3'
+        assert engine.requests[0]['token_breakdown']['version']=='forge-5.0.4'
         assert svc.store.run(run['id'])['context_snapshot']['round']==2
     finally: svc.shutdown()
 

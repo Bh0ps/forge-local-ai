@@ -270,7 +270,7 @@ def test_owner_controls_only_own_stable_chat_and_permissions_cannot_escalate(env
     env.service.jobs.resume = Mock(return_value={'ok': True})
     env.manager.receive_telegram(config['id'], update(4, text='/resume'))
     env.manager.tick(poll=False)
-    env.service.jobs.resume.assert_called_once_with(run['id'], {'permission_profile': 'deny_access'})
+    env.service.jobs.resume.assert_called_once_with(run['id'], {'permission_profile': 'deny_access', 'provider_id': 'ollama'})
 
 
 def test_outbound_unknown_outcome_is_not_automatically_resent(env):

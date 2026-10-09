@@ -321,7 +321,7 @@ class ForgeService:
 
     def bootstrap(self):
         runs=self.store.runs(limit=200)
-        return dict(version='5.0.3',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
+        return dict(version='5.0.4',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
                     chats=self.store.list_chats(),runs=runs,goals=[self.goal_view(goal,runs) for goal in self.store.active_goals()],
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -407,7 +407,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='5.0.3')
+                    self.update_manager=UpdateManager(self,current_version='5.0.4')
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)
@@ -576,6 +576,23 @@ class ForgeService:
             if row:
                 run=self.store.run(row[0]); return {'id':run['id'],'chat_id':run['chat_id'],'status':run['status']}
             current=self.store.get_settings()
+            profile=None
+            if data.get('agent_profile_id'):
+                profile=self.store.entity('agents',data['agent_profile_id'])
+                if not profile.get('enabled'): raise ValueError('Enable the configured agent first.')
+            channel_settings=data.get('channel_settings')
+            if channel_settings is not None:
+                if not isinstance(channel_settings,dict) or set(channel_settings)-{'provider_id','model','thinking'}:
+                    raise ValueError('Invalid channel model or reasoning settings.')
+                provider_id=(profile or {}).get('provider_id') or data.get('provider_id') or current['provider_id']
+                if channel_settings.get('provider_id')!=provider_id:
+                    raise ValueError('The configured provider changed. Select /model or /reasoning again before sending a new message.')
+                if 'model' in channel_settings and (not isinstance(channel_settings['model'],str) or
+                    not 1<=len(channel_settings['model'])<=300 or channel_settings['model']!=channel_settings['model'].strip() or
+                    any(ord(char)<32 for char in channel_settings['model'])):
+                    raise ValueError('Select a valid model for this channel.')
+                if 'thinking' in channel_settings and type(channel_settings['thinking']) is not bool:
+                    raise ValueError('Channel reasoning must be on or off.')
             from forge_channels import permission_ceiling
             data={**data,'source_key':source_key,
                 'permission_profile':permission_ceiling(data.get('permission_profile','always_ask'),current['permission_profile']),
@@ -591,9 +608,7 @@ class ForgeService:
                 goal=self.goal_create({**data,'title':'Build the agreed project' if command=='build' else data['text'][:120],
                     'tasks':[{'text':data['text'][:64000],'status':'pending','evidence':[]}]})
                 data.update(goal_id=goal['id'],mode='goal')
-            if data.get('agent_profile_id'):
-                profile=self.store.entity('agents',data['agent_profile_id'])
-                if not profile.get('enabled'): raise ValueError('Enable the configured agent first.')
+            if profile:
                 data.update(agent_id=profile['id'],instructions=profile.get('instructions',''),
                     agent_tools=profile.get('tools',[]),skills=profile.get('skills',[]),
                     context=profile.get('context',current['context']),model=profile.get('model') or data.get('model') or current['model'],
@@ -616,6 +631,15 @@ class ForgeService:
                                     chat_id=data['chat_id'],workspace_project_id=worktree['project']['id'],worktree_id=worktree['worktree']['id']))
                                 data.update(workspace_project_id=workspace['workspace_project_id'],worktree_id=workspace['worktree_id'])
                             # Non-Git projects retain the coordinator's writer lock.
+            if channel_settings:
+                # Paired per-chat choices override profile defaults within the
+                # configured provider; profile permissions and workspaces remain.
+                if 'model' in channel_settings:
+                    data.update(model=channel_settings['model'],adaptive_model_locked=True)
+                if 'thinking' in channel_settings:
+                    # A calibration may otherwise replace even an explicit value
+                    # when it happens to equal the inherited desktop preference.
+                    data.update(thinking=channel_settings['thinking'],adaptive_enabled=False)
             return self.jobs.start(data,channel=(channel_id,external_id))
 
     def create_project(self,data):
