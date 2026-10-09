@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "review",
+  "phases": [
+    "discover",
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "debug"
+  ],
+  "triggers": [
+    "debug",
+    "bug",
+    "error",
+    "crash",
+    "failure",
+    "broken",
+    "not working",
+    "doesn't work",
+    "does not work",
+    "fix"
+  ],
+  "recommended_tools": [
+    "search_files",
+    "read_file",
+    "run_command"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

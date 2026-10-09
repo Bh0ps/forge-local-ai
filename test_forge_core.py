@@ -94,7 +94,7 @@ def test_unicode_large_batch_compacts_and_retains_exact_request(tmp_path):
     result=finished(svc,run); assert result['status']=='completed',result
     assert any(e['type']=='compacted' for e in result['events'])
     assert any(m['content']==request for m in engine.requests[-1]['messages'])
-    usage=svc.store.usage(); assert usage['totals']['requests']==5 # two main + three failed summary requests
+    usage=svc.store.usage(); assert usage['totals']['requests']==3 # two main + one failed summary request
     assert len(list((svc.store.home/'artifacts').glob('*.json')))==4
     for file in (svc.store.home/'artifacts').glob('*.json'): assert len(file.read_text(encoding='utf-8'))>20000
     svc.shutdown()

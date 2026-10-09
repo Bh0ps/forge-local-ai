@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "design",
+  "phases": [
+    "research",
+    "verify"
+  ],
+  "intents": [
+    "browser"
+  ],
+  "triggers": [
+    "browser",
+    "webpage",
+    "web page",
+    "connected tab",
+    "navigate",
+    "screenshot"
+  ],
+  "recommended_tools": [
+    "browser_inspect",
+    "browser_click",
+    "browser_type",
+    "browser_screenshot"
+  ],
+  "exclude_triggers": [
+    "without browser",
+    "no browser",
+    "do not use browser",
+    "don't use browser"
+  ],
+  "resources": [
+    "references/examples.md"
+  ]
+}

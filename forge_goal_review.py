@@ -1,9 +1,12 @@
 """Independent, read-only OpenRouter goal verification with durable feedback."""
 import hashlib
 import json
+from pathlib import PurePosixPath
 import time
 
 from forge_store import TERMINAL, encode
+from forge_cloud_policy import (CloudPolicyRejected, cloud_policy, safe_relative, scrub,
+                               cloud_artifact_allowed, cloud_invocation_records)
 
 REVIEW_TOOLS=('goal_read','artifact_read','list_files','read_file','search_files','web_search','web_fetch')
 VERDICTS=('complete','needs_changes','insufficient_evidence')
@@ -76,8 +79,119 @@ def invocation_artifacts(store,run_ids,*,successful_only=False):
 def permitted_artifacts(store,run):
     """A reviewer cannot retrieve artifacts from unrelated chats."""
     ids=set(run.get('review_artifacts',[]))
-    ids.update(r['artifact'] for r in invocation_artifacts(store,{run['id']},successful_only=True) if r['artifact'])
-    return ids
+    ids.update(r['artifact'] for r in cloud_invocation_records(store,{run['id']},successful_only=True) if r['artifact'])
+    return {identifier for identifier in ids if cloud_artifact_allowed(store, identifier, run)}
+
+def local_relative(value):
+    """Project-relative identity validation without cloud resource exclusions."""
+    if not isinstance(value,str) or not value or len(value)>4096 or '\x00' in value:return None
+    normalized=value.replace('\\','/')
+    path=PurePosixPath(normalized)
+    if path.is_absolute() or ':' in normalized or '..' in path.parts:return None
+    return path.as_posix()
+
+def local_assignment_files(store,run_ids):
+    """Successful owned sources for local freshness, including protected files."""
+    if not run_ids:return []
+    files=[]
+    with store._connection() as db:
+        rows=db.execute("SELECT name,arguments,result FROM invocations WHERE status='completed' AND run_id IN ("+','.join('?' for _ in run_ids)+') ORDER BY created_at',tuple(run_ids)).fetchall()
+    for row in rows:
+        if row['name'] not in ('read_file','read_files','write_file','edit_file','apply_patch','patch_files',
+                              'delete_file','move_file','restore_file','search_files'):continue
+        try:
+            args=json.loads(row['arguments']);wrapped=json.loads(row['result'] or '{}');result=wrapped.get('result') or {}
+        except (ValueError,TypeError):continue
+        if not isinstance(result,dict) or any(result.get(k) for k in ('error','not_executed','outcome_unknown','cancelled','timed_out')) or result.get('ok') is False:continue
+        if row['name']=='read_files':
+            candidates=[item.get('path') for item in result.get('files',[]) if isinstance(item,dict) and item.get('ok') is True and not item.get('error')]
+        elif row['name']=='search_files':
+            candidates=[item.get('path') for item in result.get('matches',[]) if isinstance(item,dict)]
+        elif row['name']=='move_file':
+            candidates=[result.get('source'),result.get('destination'),args.get('source'),args.get('destination')]
+        else:
+            candidates=[result.get('path'),args.get('path')]
+            candidates += [item.get('path') for item in result.get('changes',[]) if isinstance(item,dict)
+                           and item.get('ok') is not False and not item.get('error')]
+            for key in ('files','patches','changes'):
+                candidates += [item.get('path') for item in args.get(key,[]) if isinstance(item,dict)]
+        for candidate in candidates:
+            path=local_relative(candidate)
+            if path and path!='.' and path not in files:files.append(path)
+    # Silently dropping an owned changed source would make a receipt incomplete.
+    if len(files)>256:raise ValueError('Review source scope exceeds its file bound. Split the goal before review.')
+    return files
+
+def assignment_files(store,run_ids):
+    """The independently filtered allowlist that may be sent to cloud helpers."""
+    return [path for path in local_assignment_files(store,run_ids) if safe_relative(path)==path]
+
+def review_run_ids(store,run):
+    runs=store.runs();ids={run['id']}
+    while True:
+        expanded=ids|{r['id'] for r in runs if r.get('parent_id') in ids and r.get('mode')!='goal_review'}
+        if ids==expanded:return ids
+        ids=expanded
+
+def _review_sources(store,run,permission=None):
+    ids=review_run_ids(store,run)
+    local=invocation_artifacts(store,ids)
+    records=cloud_invocation_records(store,ids,recipient=run,permission=permission)
+    excluded=len(local)-len(records)+sum(bool(record.get('result',{}).get('raw_output_excluded')) for record in records)
+    private_memory_used=any(store.run(identifier).get('private_memory_supplied') is True for identifier in ids)
+    return ids,local,records,excluded,private_memory_used
+
+def packet_evidence_ids(packet,artifacts):
+    """Only supplied usable evidence is citable; exclusion notices are not proof."""
+    ids=list(artifacts)
+    candidate=packet.get('candidate_answer') or {}
+    if (candidate.get('available',True) and not packet.get('evidence_exclusions') and
+            isinstance(candidate.get('id'),str) and str(candidate.get('text','')).strip()):
+        ids.append(candidate['id'])
+    # Opaque command output stays local. Its bounded, typed outcome is an
+    # explicit supplied record, and does not itself map an exit code to a task.
+    for record in packet.get('evidence',[]):
+        result=record.get('result') or {}
+        if (record.get('status')=='completed' and result.get('producer')=='local_command' and
+                (record.get('tool')=='run_command' or result.get('status')=='completed') and type(result.get('exit_code')) is int):
+            ids.append(record['id'])
+    return list(dict.fromkeys(ids))
+
+def current_review_evidence_ids(store,child,permission=None):
+    """Revalidate saved review IDs at generation, parsing and receipt acceptance."""
+    parent=store.run(child['parent_id']);pending=parent.get('review_candidate') or {}
+    packet={}
+    identifier=pending.get('evidence_artifact')
+    if isinstance(identifier,str) and len(identifier)==32 and all(c in '0123456789abcdef' for c in identifier):
+        try:
+            path=store.home/'artifacts'/(identifier+'.json')
+            if not path.is_symlink() and path.stat().st_size<=6_000_000:
+                packet=json.loads(path.read_text(encoding='utf-8'))
+        except (ValueError,OSError):pass
+    _,_,records,excluded,private_memory_used=_review_sources(store,parent,permission)
+    safe=[r['artifact'] for r in cloud_invocation_records(store,review_run_ids(store,parent),successful_only=True,
+        recipient=parent,permission=permission) if r.get('artifact')]
+    assigned=set(child.get('review_artifacts') or [])
+    safe=[value for value in safe if value in assigned]
+    if not isinstance(packet,dict):packet={}
+    candidate=packet.get('candidate_answer') or {}
+    expected='answer:'+parent['id']+':'+str(parent['rounds'])
+    if excluded or private_memory_used or candidate.get('id')!=expected:
+        packet={**packet,'candidate_answer':{**candidate,'available':False}}
+    # Current typed records replace stale packet records before deriving IDs.
+    identifiers=packet_evidence_ids({**packet,'evidence':records},safe)
+    supplied=child.get('review_evidence_ids')
+    if supplied is not None:identifiers=[value for value in identifiers if value in supplied]
+    identifiers += [r['artifact'] for r in cloud_invocation_records(store,{child['id']},successful_only=True,
+        recipient=child,permission=permission) if r.get('artifact')]
+    return list(dict.fromkeys(identifiers))
+
+def actual_models(store,run_id):
+    try:run=store.run(run_id)
+    except ValueError:return []
+    # The free-router alias is a request selection, not its actual routed model.
+    # Runs retain provider-returned identities separately from usage fallbacks.
+    return list(dict.fromkeys(run.get('returned_model_ids') or []))
 
 def review_response_format(store,run):
     """Constrain identifiers to real task/evidence values for this review round."""
@@ -86,16 +200,8 @@ def review_response_format(store,run):
     if (not task_ids or len(task_ids)>256 or any(not isinstance(v,str) or not v.strip() for v in task_ids)
             or len(task_ids)!=len(set(task_ids))):
         raise ValueError('Independent review needs 1–256 tasks with unique identities. Repair or split the checklist before Resume.')
-    evidence=run.get('review_evidence_ids')
-    if evidence is None:
-        # Recover previously accepted review runs without expanding artifact scope.
-        parent=store.run(run['parent_id'])
-        candidate=parent.get('review_candidate',{})
-        evidence=[v for v in run.get('review_artifacts',[]) if v!=candidate.get('evidence_artifact')]
-        evidence+=['answer:'+parent['id']+':'+str(parent['rounds'])]
-    own=[r['artifact'] for r in invocation_artifacts(store,{run['id']},successful_only=True) if r['artifact']]
-    identifiers=list(dict.fromkeys(evidence[-121:]+own[-120:]))
-    if not identifiers: raise ValueError('No scoped goal evidence is available for review.')
+    identifiers=current_review_evidence_ids(store,run)
+    if not identifiers: raise ValueError('Independent review is unavailable: no safe scoped evidence is available. Gather safe evidence or use explicit local human acceptance.')
     schema=json.loads(encode(RESPONSE_FORMAT))
     properties=schema['json_schema']['schema']['properties']['verified_tasks']['items']['properties']
     properties['task_id']['enum']=task_ids
@@ -105,8 +211,14 @@ def review_response_format(store,run):
 class GoalReview:
     def __init__(self,manager): self.manager=manager; self.service=manager.service; self.store=manager.store
 
+    def required(self,run):
+        if not run.get('goal_id') or run.get('parent_id'): return False
+        if not (run['settings'].get('cloud_required_review') or self.store.get_settings().get('cloud_required_review')): return False
+        return True
+
     def enabled(self,run):
-        return bool(run.get('goal_id') and not run.get('parent_id') and run['settings'].get('goal_review_enabled') and self.store.get_settings().get('goal_review_enabled'))
+        if self.required(run): return True
+        return bool(run.get('goal_id') and not run.get('parent_id') and not self.store.run(run['id']).get('review_unavailable') and run['settings'].get('goal_review_enabled') and self.store.get_settings().get('goal_review_enabled'))
 
     def _disabled(self,run):
         self.store.update_run(run['id'],review_pending=False,status='running')
@@ -117,24 +229,40 @@ class GoalReview:
         goal=self.store.goal(run['goal_id'])
         if goal['external_edits']: raise ValueError('Reconcile the externally edited goal checklist before review.')
         if not goal.get('tasks') or any(t.get('status')!='completed' for t in goal['tasks']): raise ValueError('Complete the ordered checklist before independent review.')
-        runs=self.store.runs(); ids={run['id']}
-        while True:
-            expanded=ids|{r['id'] for r in runs if r.get('parent_id') in ids and r.get('mode')!='goal_review'}
-            if ids==expanded: break
-            ids=expanded
+        runs=self.store.runs(); ids=review_run_ids(self.store,run)
         children=[r for r in runs if r['id'] in ids and r['id']!=run['id']]
         if any(r['status'] not in TERMINAL for r in children): raise ValueError('Wait for delegated agents before independent goal review.')
         records=invocation_artifacts(self.store,ids)
         if any(r['status'] in ('running','outcome_unknown','prepared') for r in records): raise ValueError('Inspect unresolved tool outcomes before independent goal review.')
+        # The local journal is authoritative for interruption checks. Cloud
+        # evidence excludes protected operations before building even excerpts.
+        _,_,records,excluded,private_memory_used=_review_sources(self.store,run,self.manager.registry.permission)
+        narrative_private=bool(excluded or private_memory_used)
+        allowed_evidence={record['artifact'] for record in records if record.get('artifact')}
+        tasks=[{**task,'evidence':[value for value in task.get('evidence',[]) if value in allowed_evidence]}
+               if narrative_private else task for task in goal['tasks']]
+        initial=run.get('goal_initial',{})
+        if narrative_private:
+            initial={key:value for key,value in initial.items() if key not in ('markdown','checkpoint','next_action','blockers','review')}
+            if initial.get('tasks'):
+                initial={**initial,'tasks':[{**task,'evidence':[value for value in task.get('evidence',[]) if value in allowed_evidence]} for task in initial['tasks']]}
+        candidate_text=('The local candidate answer is retained locally because protected tool context was excluded. '
+                        'Verify the assigned safe project and check evidence; do not infer verification of excluded resources.') if narrative_private else answer
         # Include exact immutable objective/checklist outside all model summaries.
         with self.store._connection() as db:
             steers=[row[0] for row in db.execute("SELECT content FROM messages WHERE chat_id=? AND role='user' AND id>? ORDER BY id",(run['chat_id'],run['request_message_id']))]
         packet={'goal_id':goal['id'],'objective':goal.get('request') or run['request'],
-                'initial':run.get('goal_initial',{}),'reviewed_plan':goal.get('reviewed_plan',''),
-                'tasks':goal['tasks'],'candidate_answer':{'id':'answer:'+run['id']+':'+str(run['rounds']),'text':answer},
+                'initial':initial,'reviewed_plan':goal.get('reviewed_plan',''),
+                'tasks':tasks,'candidate_answer':{'id':'answer:'+run['id']+':'+str(run['rounds']),'text':candidate_text},
                 'user_updates':steers,'evidence':records}
+        if narrative_private:
+            packet['candidate_answer']={'available':False,'text':candidate_text}
+            packet['evidence_exclusions']={'count':excluded,'private_memory_contributed':private_memory_used,
+                'reason':'Protected, private-memory-derived or currently unpermitted generated context remains local. Its contents and generated narrative are not cloud evidence.'}
+        packet=scrub(packet)
         fingerprint=hashlib.sha256(encode(packet).encode()).hexdigest()
-        artifacts=[r['artifact'] for r in invocation_artifacts(self.store,ids,successful_only=True) if r['artifact']]
+        artifacts=[r['artifact'] for r in cloud_invocation_records(self.store,ids,successful_only=True,
+            recipient=run,permission=self.manager.registry.permission) if r['artifact']]
         return goal,packet,fingerprint,artifacts
 
     def _publish(self,run,review):
@@ -144,16 +272,40 @@ class GoalReview:
         self.store.event(run['id'],'goal_review',review=review)
 
     def check(self,run,answer,job,started,*,resume=False):
+        try:
+            return self._check(run,answer,job,started,resume=resume)
+        except ValueError as exc:
+            associated=getattr(self.service,'associated_builder',None)
+            builder=associated(run) if associated else next((b for b in self.store.entities('builders') if b.get('chat_id')==run.get('chat_id')),None)
+            unavailable=any(word in str(exc).casefold() for word in ('quota','capacity','offline','connection','unavailable','api key','consented openrouter'))
+            if not builder or self.required(run) or not unavailable or job['cancel'].is_set(): raise
+            issues=self.service.validate_run_completion(run,answer)
+            workflow=getattr(self.manager,'workflow',None)
+            if workflow is not None:issues+=workflow.completion_issues(self.store.run(run['id']))
+            if issues: raise ValueError('Local checks are incomplete: '+', '.join(issues)) from None
+            self.store.update_run(run['id'],review_unavailable=True,review_pending=False,status='running',phase='ready')
+            self._publish(run,{'status':'unavailable','summary':'Free cloud review is unavailable. Local requirement and verification gates passed; independent review was not performed.','feedback':[]})
+            return 'complete'
+
+    def _check(self,run,answer,job,started,*,resume=False):
         """Return complete/continue; inconclusive results pause without approving."""
         if not self.enabled(run): return self._disabled(run)
         pending=run.get('review_candidate') if run.get('review_pending') else None
         if pending and pending.get('verdict',{}).get('verdict')=='needs_changes':
             return self._apply_feedback(run,pending)
         goal,packet,fingerprint,artifacts=self.snapshot(run,answer)
+        evidence_ids=packet_evidence_ids(packet,artifacts)
+        if not evidence_ids:
+            summary='Independent review is unavailable: no safe scoped evidence is available. Gather safe project/check evidence or use explicit local human acceptance. Required independent review remains unverified.'
+            self.store.update_run(run['id'],review_pending=False)
+            self._publish(run,{'status':'unavailable','summary':summary,'feedback':['Excluded local narrative is not review evidence.']})
+            raise ValueError(summary)
         if pending and pending['fingerprint']!=fingerprint:
             self.store.update_run(run['id'],review_pending=False)
             return 'continue'
-        config=self.store.entity('providers','openrouter')
+        try: config=self.store.entity('providers','openrouter')
+        except ValueError:
+            raise ValueError('Enable the consented OpenRouter connection before reviewing this goal. The goal remains unverified.') from None
         if config.get('kind')!='openrouter' or not config.get('enabled') or not config.get('remote_consent') or not config.get('credential_ref'):
             raise ValueError('Enable the consented OpenRouter connection before reviewing this goal. The goal remains unverified.')
         self.service.providers.provider('openrouter').capabilities(run['settings']['goal_review_model'])
@@ -163,6 +315,14 @@ class GoalReview:
             attempt=run.get('review_attempt',0)+1
             pending={'fingerprint':fingerprint,'answer':answer,'attempt':attempt,
                      'evidence_artifact':self.store.artifact(packet)}
+            workflow=getattr(self.manager,'workflow',None)
+            if workflow is not None and workflow.enabled(run):
+                pending['workflow_snapshot']=workflow.review_snapshot(run,local_assignment_files(self.store,review_run_ids(self.store,run)))
+                issues=workflow.private_review_coverage_issues(run,pending['workflow_snapshot'])
+                if issues:
+                    self._publish(run,{'status':'unavailable','summary':issues[0],
+                        'feedback':['Verify protected work locally before requesting independent review.']})
+                    raise ValueError(issues[0])
             # Journal the intent BEFORE a child can send a cloud request. The
             # stable admission key recovers a launched child after a crash here.
             run=self.store.update_run(run['id'],review_candidate=pending,review_pending=True,review_attempt=attempt)
@@ -171,7 +331,7 @@ class GoalReview:
             attempt=pending['attempt']
             context=run['settings'].get('goal_review_context',32768)
             # Full evidence stays local with artifact retrieval; bound Unicode excerpts.
-            compact={**packet,'available_evidence_ids':artifacts,'candidate_answer':{**packet['candidate_answer'],'text':answer[:6000]},
+            compact={**packet,'available_evidence_ids':evidence_ids,'candidate_answer':{**packet['candidate_answer'],'text':packet['candidate_answer']['text'][:6000]},
                 'evidence':[{**r,'result':encode(r['result']).encode()[:1000].decode('utf-8',errors='ignore')} for r in packet['evidence'][-40:]]}
             request='Review this implementation evidence. Use tools to verify missing details.\n'+encode(compact)
             from context_window import estimated_prompt_tokens,prompt_budget
@@ -181,12 +341,16 @@ class GoalReview:
             settings={**run['settings'],'provider_id':'openrouter','model':run['settings']['goal_review_model'],
                       'context':context,'tokens':4096,'temperature':0,'thinking':False,'auto_delegate':False,
                       'memory_enabled':False,'memory_suggestions':False,'computer_tools':False,'browser_tools':False}
+            ids={run['id']}
+            for record in packet['evidence']:ids.add(record['run_id'])
             result=self.manager.start({**settings,'text':request,'project_id':run.get('project_id'),'parent_id':run['id'],
                 'goal_id':run['goal_id'],'workspace_project_id':run.get('workspace_project_id'),
                 'mode':'goal_review','readonly':True,'agent_tools':list(REVIEW_TOOLS),'skills':[],
                 'permission_ceiling':run.get('permission_ceiling'),'instructions':INSTRUCTIONS,
                 'review_artifacts':artifacts+[evidence_artifact],
-                'review_evidence_ids':artifacts[-120:]+[packet['candidate_answer']['id']],
+                'cloud_scope':{'files':assignment_files(self.store,ids),'artifacts':artifacts+[evidence_artifact],
+                               'attachments':[],'goal_id':goal['id'],'web':False},
+                'review_evidence_ids':evidence_ids[-256:],
                 'source_key':'goal-review:'+run['id']+':'+fingerprint+':'+str(attempt)})
             pending={**pending,'review_run_id':result['id']}
             run=self.store.update_run(run['id'],review_candidate=pending,review_pending=True,review_attempt=attempt)
@@ -214,6 +378,7 @@ class GoalReview:
         if job['cancel'].is_set(): return 'continue'
         try:
             if child['status']!='completed': raise ValueError('OpenRouter reviewer paused: '+(child.get('recovery') or child['status']))
+            cloud_policy(self.service).consent()
             current=self.store.run(run['id'])
             _,_,fresh,_=self.snapshot(current,answer)
             if fresh!=fingerprint or self.service.get_interaction().has_steers(run['id']):
@@ -221,21 +386,34 @@ class GoalReview:
                 return 'continue'
             with self.store._connection() as db:
                 row=db.execute("SELECT content FROM messages WHERE chat_id=? AND role='assistant' AND id>? ORDER BY id DESC LIMIT 1",(child['chat_id'],child['request_message_id'])).fetchone()
-            ids=set(artifacts)|{packet['candidate_answer']['id']}
-            ids.update(r['artifact'] for r in invocation_artifacts(self.store,{child['id']},successful_only=True) if r['artifact'])
-            verdict=pending.get('verdict') or parse_verdict(row[0] if row else '',goal['tasks'],ids)
+            ids=set(current_review_evidence_ids(self.store,child,self.manager.registry.permission))
+            verdict=parse_verdict(row[0] if row else '',goal['tasks'],ids)
+            if pending.get('verdict') and verdict!=pending['verdict']:
+                raise ValueError('Saved reviewer verdict differs from its actual structured response. Review again.')
             pending={**pending,'verdict':verdict,'revision':run.get('review_revisions',0)+1,'review':review}
             self.store.update_run(run['id'],review_candidate=pending)
         except ValueError as exc:
-            pending={**pending,'invalid':child['status']=='completed'}
+            pending={**pending,'invalid':child['status']=='completed' and not isinstance(exc,CloudPolicyRejected)}
             self.store.update_run(run['id'],review_candidate=pending)
             self._publish(run,{**review,'status':'error','summary':str(exc)[:2000],'feedback':['Resume to retry independent review. The goal has not been verified.']})
             raise ValueError('Independent goal review could not verify completion. '+str(exc)[:1000]+' Resume to retry; completed actions will not be repeated.') from None
         review={**review,**verdict,'status':verdict['verdict']}
+        review['actual_models']=actual_models(self.store,child['id'])
+        self.store.update_run(child['id'],result_consumed=True,result_consumed_by=run['id'])
         limit=self.manager._limits(self.store.run(run['id']),started)
         if limit:
             self._publish(run,{**review,'status':'reviewing','summary':limit+' Review evidence is saved; Resume to extend the allowance.'})
             raise ValueError(limit+' Independent review is saved. Resume to continue without repeating completed actions.')
+        if verdict['verdict']=='complete':
+            workflow=getattr(self.manager,'workflow',None)
+            try:
+                cloud_policy(self.service).consent()
+                if workflow is not None and workflow.enabled(self.store.run(run['id'])):
+                    workflow.accept_review(self.store.run(run['id']),child['id'],pending,verdict)
+            except ValueError as exc:
+                self._publish(run,{**review,'status':'error','summary':str(exc)[:1000],
+                    'feedback':['Current independent review acceptance could not be established. Prior work and the returned verdict are retained.']})
+                raise ValueError('Goal remains unverified: '+str(exc)[:1000]) from None
         self._publish(run,review)
         if verdict['verdict']=='complete':
             # Retain the completed verdict until the authoritative parent finish
@@ -256,7 +434,7 @@ class GoalReview:
         # records the missing work while retaining completed tasks and their evidence.
         feedback_text='\n'.join(verdict['feedback'])
         task={'id':hashlib.sha256((run['id']+':review-fix:'+str(pending['attempt'])).encode()).hexdigest()[:32],'text':'Address independent review feedback: '+verdict['summary'],
-              'status':'pending','evidence':[]}
+              'status':'pending','evidence':[],'origin':'review'}
         tasks=goal['tasks'] if any(t['id']==task['id'] for t in goal['tasks']) else goal['tasks']+[task]
         goal=self.store.save_goal({**goal,'tasks':tasks,'checkpoint':'Independent review requested fixes.',
                                   'next_action':feedback_text,'review':review})

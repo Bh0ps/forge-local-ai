@@ -27,9 +27,9 @@ def hub(tmp_path, monkeypatch):
         value.catalog_refresh_thread.join(timeout=2)
 
 
-def test_new_profile_has_ten_real_reviewed_toggleable_skills(hub):
+def test_new_profile_has_24_real_reviewed_toggleable_skills(hub):
     skills = hub.discover_skills()
-    assert len(skills) == 10
+    assert len(skills) == 24
     assert {item["library_id"] for item in skills} == {item["id"] for item in STARTER_SKILLS}
     assert all(item["enabled"] and item["automatic"] and item["builtin"] and item["license"] == "MIT" for item in skills)
     for item in skills:
@@ -51,7 +51,7 @@ def test_restart_preserves_edits_disabled_and_automatic_choices(hub):
         changed = next(skill for skill in reopened.discover_skills() if skill["id"] == item["id"])
         assert not changed["enabled"] and not changed["automatic"] and changed["modified"]
         assert path.read_text(encoding="utf-8").endswith("My local debugging rule.\n")
-        assert len(reopened.discover_skills()) == 10
+        assert len(reopened.discover_skills()) == 24
     finally:
         reopened.shutdown()
 
@@ -63,7 +63,7 @@ def test_deleted_starter_is_not_resurrected_on_restart(hub):
     reopened = IntegrationHub(hub.root)
     try:
         assert not Path(skill["path"]).exists()
-        assert len(reopened.discover_skills()) == 9
+        assert len(reopened.discover_skills()) == 23
     finally:
         reopened.shutdown()
 
@@ -144,9 +144,9 @@ def test_discover_offline_is_populated_searchable_and_has_no_installs(hub, monke
     monkeypatch.setattr(hub, "_refresh_presets", lambda: None)
     result = hub.dispatch("catalog_discover")
     assert result["ok"]
-    assert len(result["entries"]) == 21
+    assert len(result["entries"]) == 39
     assert len(result["sources"]) == 3
-    assert len([item for item in result["entries"] if item["installed"]]) == 10
+    assert len([item for item in result["entries"] if item["installed"]]) == 24
     assert not hub.config["plugins"] and not hub.config["servers"]
     builtin = hub.dispatch("catalog_discover", {"query": "debug", "kind": "skill", "category": "Coding"})["entries"]
     assert any(item["source"] == "builtin:skill/debug-errors" for item in builtin)
@@ -189,7 +189,7 @@ def test_official_refresh_only_uses_selected_paths_and_pinned_commit(hub, monkey
 def test_starter_bundle_is_idempotent_and_preserves_edits_and_toggles(hub):
     first = hub.dispatch("plugin_install", {"source": "builtin:review"})["plugin"]
     assert (Path(first["path"]) / "LICENSE").is_file()
-    assert len(list(Path(first["path"]).rglob("SKILL.md"))) == 3
+    assert len(list(Path(first["path"]).rglob("SKILL.md"))) == 4
     skill = next(Path(first["path"]).rglob("SKILL.md"))
     skill.write_text("Local plugin edit", encoding="utf-8")
     hub.dispatch("plugin_toggle", {"id": first["id"], "enabled": False})
@@ -262,7 +262,7 @@ def test_selected_github_folder_rejects_incomplete_or_unsafe_content(hub, monkey
     result = hub.dispatch("skill_install", {"source": "https://github.com/example/repo/tree/" + commit + "/skills/example"})
     assert not result["ok"]
     assert not hub.config.get("skill_packages")
-    assert len(hub.discover_skills()) == 10
+    assert len(hub.discover_skills()) == 24
 
 
 def test_current_plugin_format_mcp_and_host_components_are_reviewed(hub, tmp_path):

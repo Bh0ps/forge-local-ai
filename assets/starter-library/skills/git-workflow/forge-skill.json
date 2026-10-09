@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "delivery",
+  "phases": [
+    "discover",
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "git",
+    "delivery"
+  ],
+  "triggers": [
+    "git",
+    "commit",
+    "branch",
+    "worktree",
+    "pull request",
+    "merge",
+    "github"
+  ],
+  "recommended_tools": [
+    "run_command",
+    "read_file"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

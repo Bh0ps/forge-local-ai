@@ -2,6 +2,8 @@
 from copy import deepcopy
 from types import SimpleNamespace
 import asyncio
+import hashlib
+import json
 import threading
 import time
 
@@ -251,7 +253,7 @@ def test_residency_cancel_interrupts_stalling_http_and_releases_gpu(manager, mon
     assert len(rows) == 1 and rows[0]['cancelled'] == 1 and rows[0]['purpose'] == 'warm'
 
 
-def test_goal_executes_twelve_file_calls_in_one_round_and_journals_completion(tmp_path):
+def _exercise_twelve_file_goal_batch(tmp_path,execution_mode):
     from forge_service import ForgeService
     service = ForgeService(data_dir=tmp_path / 'state')
     try:
@@ -264,30 +266,85 @@ def test_goal_executes_twelve_file_calls_in_one_round_and_journals_completion(tm
             'tasks': [{'text': 'Create all fixture files and verify contents', 'status': 'pending', 'evidence': []}]})
         completed = [{**task, 'status': 'completed', 'evidence': ['Twelve unique fixture files created.']}
                      for task in goal['tasks']]
-        calls = [{'function': {'name': 'write_file', 'arguments': {
-            'path': 'fixture-' + str(index) + '.txt', 'content': 'value-' + str(index)}}} for index in range(12)]
+        changes=[{'path':'fixture-'+str(index)+'.txt','expected_sha256':'missing','content':'value-'+str(index)} for index in range(12)]
+        calls = ([{'function': {'name': 'write_file', 'arguments': {
+            'path': change['path'], 'content': change['content']}}} for change in changes]
+            if execution_mode=='legacy' else [{'function':{'name':'apply_patch','arguments':{'changes':changes}}}])
         calls.append({'function': {'name': 'goal_update', 'arguments': {
             'tasks': completed, 'checkpoint': 'All twelve files written.', 'next_action': 'Review fixture contents.'}}})
+        calls.append({'function': {'name': 'fixture_check', 'arguments': {}}})
+        from agent_runtime import tool_schema
+        check=tool_schema('fixture_check','Verify all twelve fixture files against the accepted exact content.',{})
+        check['capability']='read'
+        check['verification_contract']={'id':'fixture-batch-v1','expected_checks':['Fixture '+str(i) for i in range(12)],
+            'task_ids':[task['id'] for task in goal['tasks']],
+            'required_sources':['fixture-'+str(i)+'.txt' for i in range(12)]}
+        original_schemas=service.extra_tool_schemas;original_execute=service.jobs.registry.execute
+        def schemas(run):
+            return original_schemas(run)+[check]
+        cadence_before_check=[]
+        def execute(run,name,args,cancel,**options):
+            if name!='fixture_check':return original_execute(run,name,args,cancel,**options)
+            cadence=service.jobs.cadence.refresh(run,service.jobs.registry.schemas(run,['tools'],all_tools=True))
+            if cadence:cadence_before_check.append(cadence['mutations_since_check'])
+            results=[{'requirement':'Fixture '+str(i),'passed':(folder/('fixture-'+str(i)+'.txt')).read_text()=='value-'+str(i)} for i in range(12)]
+            return {'passed':all(item['passed'] for item in results),'checks':results}
+        service.extra_tool_schemas=schemas;service.jobs.registry.execute=execute
         class BatchCore(CoreFixture):
+            def __init__(self):super().__init__();self.payloads=[]
             def _stream_payload(self, payload, cancel):
                 self.streams += 1
+                self.payloads.append(deepcopy(payload))
                 if self.streams == 1:
                     yield {'done': True, 'message': {'tool_calls': calls}, 'eval_count': 100}
                 else:
                     yield {'done': True, 'message': {'content': 'Fixture files complete.'}, 'eval_count': 4}
         core = BatchCore()
         service.providers = ProviderPool(core, service.store)
-        run = service.goal_resume({'id': goal['id']})
+        mutation='write_file' if execution_mode=='legacy' else 'apply_patch'
+        run = service.goal_resume({'id': goal['id'],'agent_tools':[mutation,'goal_update','goal_read','fixture_check']})
+        # This pins the compatibility contract of already saved legacy runs;
+        # their execution mode is retained rather than changing new-goal defaults.
+        service.store.update_run(run['id'],execution_mode=execution_mode)
         service.jobs._run(run['id'], {'cancel': threading.Event(), 'pause': False, 'approval': None})
         saved = service.store.run(run['id'])
-        assert saved['status'] == 'completed' and saved['tools'] == 13 and saved['rounds'] == 2
+        expected_tools=14 if execution_mode=='legacy' else 3
+        assert saved['execution_mode']==execution_mode
+        assert saved['status'] == 'completed' and saved['tools'] == expected_tools and saved['rounds'] == 2
+        assert service.jobs.workflow.progress(saved)['verified']==1
         assert [(folder / ('fixture-' + str(i) + '.txt')).read_text() for i in range(12)] == ['value-' + str(i) for i in range(12)]
         with service.store._connection() as db:
-            statuses = [row[0] for row in db.execute('SELECT status FROM invocations WHERE run_id=?', (run['id'],))]
-        assert statuses == ['completed'] * 13 and not service.store.unknown_actions(run['id'])
+            journals = [dict(row) for row in db.execute('SELECT name,arguments,status,result,message_id FROM invocations WHERE run_id=? ORDER BY rowid', (run['id'],))]
+        assert [row['name'] for row in journals]==([mutation]*(12 if execution_mode=='legacy' else 1))+['goal_update','fixture_check']
+        assert all(row['status']=='completed' and row['message_id'] is not None for row in journals)
+        assert not service.store.unknown_actions(run['id'])
+        receipt=next(value for value in saved['verification_feedback']['receipts'].values() if value['contract_id']=='fixture-batch-v1')
+        assert receipt['schema_version']==2 and receipt['passed'] and receipt['complete'] and receipt['available'] and receipt['current']
+        assert receipt['task_ids']==[goal['tasks'][0]['id']]
+        assert {item['path']:item['sha256'] for item in receipt['source_snapshot']['files']}=={
+            change['path']:hashlib.sha256(change['content'].encode()).hexdigest() for change in changes}
         final_goal = service.store.goal(goal['id'])
         assert final_goal['status'] == 'completed' and '[x]' in final_goal['markdown']
-        assert final_goal['tasks'][0]['evidence'] == ['Twelve unique fixture files created.']
+        assert final_goal['tasks'][0]['evidence'][0] == 'Twelve unique fixture files created.'
+        assert any(item.startswith('verification:') for item in final_goal['tasks'][0]['evidence'])==(execution_mode=='guided')
+        if execution_mode=='guided':
+            assert json.loads(journals[0]['arguments'])=={'changes':changes}
+            result=json.loads(journals[0]['result'])['result']
+            assert result['ok'] and len(result['changes'])==12
+            assert cadence_before_check==[1]
+            assert saved['verification_cadence']['mutations_since_check']==0
+            assert saved['context_snapshot']['report_only'] and core.payloads[1].get('tools',[])==[]
+            assert service.jobs.workflow.completion_issues(saved)==[]
+        else:
+            assert not saved['context_snapshot']['report_only'] and core.payloads[1].get('tools')
         assert service.store.usage()['totals']['requests'] == 2
     finally:
         service.shutdown()
+
+
+def test_legacy_saved_goal_executes_twelve_file_calls_in_one_round_and_journals_completion(tmp_path):
+    _exercise_twelve_file_goal_batch(tmp_path,'legacy')
+
+
+def test_guided_goal_patches_twelve_files_in_one_call_then_verifies_and_reports(tmp_path):
+    _exercise_twelve_file_goal_batch(tmp_path,'guided')

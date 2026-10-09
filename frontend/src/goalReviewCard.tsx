@@ -10,6 +10,7 @@ const labels: Record<GoalReview['status'], string> = {
   insufficient_evidence: 'More evidence needed',
   error: 'Review unavailable',
   disabled: 'Independent review off',
+  unavailable: 'Local checks only',
 };
 
 export function GoalReviewCard({ review, paused = false }: { review?: GoalReview; paused?: boolean }) {

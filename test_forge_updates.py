@@ -162,8 +162,6 @@ def test_installer_failure_restores_code_database_checklist_and_attachment(setup
     data = load_operation(manager.home, result['operation_id'])
     def install(args):
         (app / 'Forge.exe').write_bytes(b'Incomplete application')
-        (manager.home / 'attachments/example.txt').write_text('Changed', encoding='utf-8')
-        manager.store.save_entity('fixture', {'id':'after', 'value':'new state'})
         return SimpleNamespace(returncode=1)
     outcome = helper_main(manager.home, result['operation_id'], data['parent_pid'], install_dir=app,
                           publishers=(PUBLISHER,), verifier=signature, runner=install)
@@ -171,9 +169,8 @@ def test_installer_failure_restores_code_database_checklist_and_attachment(setup
     assert (app / 'Forge.exe').read_bytes() == b'Old application 4.1.1'
     assert (manager.home / 'attachments/example.txt').read_text() == 'Original attachment'
     assert '[x]' in (manager.home / 'state/goals/example/TODO.md').read_text()
-    with pytest.raises(ValueError): manager.store.entity('fixture', 'after')
     assert list(Path(data['backup']).glob('failed-installation-*'))
-    assert (Path(data['backup']) / 'post-update-data/attachments/example.txt').read_text() == 'Changed'
+    assert (Path(data['backup']) / 'post-update-data/attachments/example.txt').read_text() == 'Original attachment'
 
 
 def test_helper_tamper_and_wrong_target_never_invoke_installer(setup, monkeypatch):
@@ -345,7 +342,7 @@ def test_non_chat_work_and_unknown_channel_delivery_block_update(setup, worker):
     if worker=='setup': manager.service.setup_manager=SimpleNamespace(jobs={'fixture':{}})
     if worker=='runtime': manager.service.runtime=SimpleNamespace(_validation={'state':'running'})
     if worker=='memory': manager.service.jobs.jobs={'finished-run':{'thread':SimpleNamespace(is_alive=lambda:True)}}
-    if worker=='model': manager.service.model_manager=SimpleNamespace(jobs={'fixture':{}})
+    if worker=='model': manager.service.model_manager=SimpleNamespace(jobs={'fixture':{}},active={'fixture':{}})
     if worker=='performance': manager.service.performance_manager=SimpleNamespace(jobs={'fixture':{}})
     if worker=='channel_unknown':
         with manager.store._connection(transaction='write') as db:
@@ -375,3 +372,155 @@ def test_corrupt_update_journal_cannot_enable_another_install(setup, monkeypatch
     restored=UpdateManager(manager.service,'4.1.1',app,(PUBLISHER,),verifier=signature)
     assert restored.status()['inspection_required']
     with pytest.raises(ValueError,match='inspection'): restored.apply()
+
+
+def test_completed_model_history_does_not_block_update_or_rewind_unknown_import(setup, monkeypatch):
+    manager, app = setup
+    manager.service.model_manager = SimpleNamespace(jobs={
+        'completed': {'status': 'completed'}, 'unknown': {'status': 'import_unknown'}}, active={})
+    journal = manager.home / 'state/model-jobs.json'
+    journal.write_text(encode(manager.service.model_manager.jobs), encoding='utf-8')
+    original = journal.read_bytes()
+    result = prepare(manager, monkeypatch)
+    data = load_operation(manager.home, result['operation_id'])
+    outcome = helper_main(manager.home, data['id'], data['parent_pid'], install_dir=app,
+        publishers=(PUBLISHER,), verifier=signature, runner=lambda args: SimpleNamespace(returncode=1))
+    assert outcome['rolled_back'] and journal.read_bytes() == original
+
+
+@pytest.mark.parametrize('generation', ['Forge4', 'Forge5'])
+def test_production_helper_accepts_only_owned_per_user_generation_paths(setup, monkeypatch, generation):
+    manager, app = setup
+    monkeypatch.setenv('LOCALAPPDATA', str(app.parent.parent))
+    if app.name != generation:
+        renamed = app.with_name(generation); app.rename(renamed); app = renamed
+        manager.install_dir = app
+    result = prepare(manager, monkeypatch)
+    data = load_operation(manager.home, result['operation_id'])
+    def install(args):
+        for name in ('Forge.exe', 'ForgeBrowserHost.exe'): (app / name).write_bytes(b'New application 4.2.0')
+        return SimpleNamespace(returncode=0)
+    assert helper_main(manager.home, data['id'], data['parent_pid'], publishers=(PUBLISHER,),
+        verifier=signature, runner=install)['installed']
+
+
+def test_production_helper_rejects_arbitrary_prepared_target(setup, monkeypatch):
+    manager, app = setup
+    monkeypatch.setenv('LOCALAPPDATA', str(app.parent.parent))
+    target = app.with_name('Other'); app.rename(target); manager.install_dir = target
+    result = prepare(manager, monkeypatch)
+    data = load_operation(manager.home, result['operation_id'])
+    with pytest.raises(ValueError, match='target'):
+        helper_main(manager.home, data['id'], data['parent_pid'], publishers=(PUBLISHER,),
+            verifier=signature, runner=lambda args: pytest.fail('must not execute'))
+    assert (target / 'Forge.exe').read_bytes() == b'Old application 4.1.1'
+
+
+def test_helper_rechecks_retained_publisher_before_mutating_installation(setup, monkeypatch):
+    manager, app = setup; result = prepare(manager, monkeypatch)
+    data = load_operation(manager.home, result['operation_id'])
+    def invalid_previous(path):
+        value = signature(path)
+        if Path(path).parent.name == 'installation': value['publisher'] = 'CN=Unapproved'
+        return value
+    with pytest.raises(ValueError, match='signature'):
+        helper_main(manager.home, data['id'], data['parent_pid'], install_dir=app,
+            publishers=(PUBLISHER,), verifier=invalid_previous, runner=lambda args: pytest.fail('must not execute'))
+    assert load_operation(manager.home, data['id'])['state'] == 'prepared'
+
+
+def install_ready_fixture(manager, app, monkeypatch):
+    result = prepare(manager, monkeypatch)
+    data = load_operation(manager.home, result['operation_id'])
+    def install(args):
+        for name in ('Forge.exe', 'ForgeBrowserHost.exe'): (app / name).write_bytes(b'New application 4.2.0')
+        return SimpleNamespace(returncode=0)
+    helper_main(manager.home, data['id'], data['parent_pid'], install_dir=app,
+                publishers=(PUBLISHER,), verifier=signature, runner=install)
+    return data, UpdateManager(manager.service, '4.2.0', app, (PUBLISHER,), verifier=signature)
+
+
+def test_rollback_cannot_rewind_completed_effect_to_prepared_invocation(setup, monkeypatch, tmp_path):
+    from project_tools import ProjectTools
+    manager, app = setup
+    project = tmp_path / 'owned-project'; project.mkdir()
+    chat = manager.store.create_chat(); run = manager.store.create_run({'chat_id': chat['id']})
+    manager.store.update_run(run['id'], status='paused')
+    manager.store.invocation('effect', run['id'], 'write_file', {'path': 'once.txt', 'content': 'Done once'})
+    data, restarted = install_ready_fixture(manager, app, monkeypatch)
+    result = ProjectTools(project, manager.home / 'backups').execute('write_file', {'path':'once.txt', 'content':'Done once'})
+    assert result['ok']
+    manager.store.invocation_state('effect', 'completed', result)
+    with pytest.raises(ValueError, match='newer user work'): restarted.rollback()
+    blocked = load_operation(manager.home, data['id'])
+    assert blocked['state'] == 'rollback_blocked' and restarted.status()['inspection_required']
+    assert (app / 'Forge.exe').read_bytes() == b'New application 4.2.0'
+    assert (project / 'once.txt').read_text() == 'Done once'
+    for database in (manager.store.db_path, Path(blocked['current_snapshot']) / 'forge.sqlite3'):
+        with sqlite3.connect(database) as db:
+            assert db.execute("SELECT status FROM invocations WHERE id='effect'").fetchone()[0] == 'completed'
+    with sqlite3.connect(Path(data['backup']) / 'forge.sqlite3') as db:
+        assert db.execute("SELECT status FROM invocations WHERE id='effect'").fetchone()[0] == 'prepared'
+
+
+@pytest.mark.parametrize('folder', ['config', 'attachments', 'state/goals'])
+def test_rollback_preserves_newer_file_state_and_consistent_snapshot(setup, monkeypatch, folder):
+    manager, app = setup; data, restarted = install_ready_fixture(manager, app, monkeypatch)
+    target = manager.home / folder / 'new-user-edit.txt'
+    target.write_text('Keep current privacy or user content', encoding='utf-8')
+    with pytest.raises(ValueError, match='newer user work'): restarted.rollback()
+    blocked = load_operation(manager.home, data['id'])
+    snapshot = Path(blocked['current_snapshot'])
+    assert target.read_text() == (snapshot / 'data' / folder / target.name).read_text()
+    with sqlite3.connect(snapshot / 'forge.sqlite3') as db: assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+    assert (app / 'Forge.exe').read_bytes() == b'New application 4.2.0'
+    assert UpdateManager(manager.service, '4.2.0', app, (PUBLISHER,), verifier=signature).status()['inspection_required']
+
+
+def test_unknown_effect_arriving_after_rollback_admission_blocks_helper_rewind(setup, monkeypatch):
+    manager, app = setup
+    chat = manager.store.create_chat(); run = manager.store.create_run({'chat_id':chat['id']})
+    manager.store.update_run(run['id'], status='paused')
+    manager.store.invocation('uncertain', run['id'], 'run_command', {'argv':['python','owned.py']})
+    data, restarted = install_ready_fixture(manager, app, monkeypatch)
+    accepted = restarted.rollback(); data = load_operation(manager.home, accepted['operation_id'])
+    manager.store.invocation_state('uncertain', 'outcome_unknown', {'error':'Stopped after effect began'})
+    with pytest.raises(ValueError, match='newer user work'):
+        helper_main(manager.home, data['id'], data['parent_pid'], install_dir=app,
+            publishers=(PUBLISHER,), verifier=signature, runner=lambda args: pytest.fail('must not execute'))
+    with manager.store._connection() as db:
+        assert db.execute("SELECT status FROM invocations WHERE id='uncertain'").fetchone()[0] == 'outcome_unknown'
+    assert (app / 'Forge.exe').read_bytes() == b'New application 4.2.0'
+    assert load_operation(manager.home, data['id'])['state'] == 'rollback_blocked'
+
+
+def test_failed_installer_with_new_work_keeps_current_code_data_and_blocks_replay(setup, monkeypatch):
+    manager, app = setup; result = prepare(manager, monkeypatch)
+    data = load_operation(manager.home, result['operation_id'])
+    def install(args):
+        (app / 'Forge.exe').write_bytes(b'Partial new application requiring repair')
+        (manager.home / 'attachments/example.txt').write_text('New user content', encoding='utf-8')
+        manager.store.save_entity('fixture', {'id':'after', 'value':'new work'})
+        return SimpleNamespace(returncode=1)
+    with pytest.raises(ValueError, match='newer user work'):
+        helper_main(manager.home, data['id'], data['parent_pid'], install_dir=app,
+            publishers=(PUBLISHER,), verifier=signature, runner=install)
+    assert (app / 'Forge.exe').read_bytes() == b'Partial new application requiring repair'
+    assert manager.store.entity('fixture','after')['value'] == 'new work'
+    blocked = load_operation(manager.home, data['id'])
+    assert (Path(blocked['current_snapshot']) / 'data/attachments/example.txt').read_text() == 'New user content'
+    assert not list(Path(data['backup']).glob('failed-installation-*'))
+
+
+def test_schema_only_additions_do_not_falsely_count_as_new_user_work(setup, monkeypatch):
+    manager, app = setup; data, restarted = install_ready_fixture(manager, app, monkeypatch)
+    with manager.store._connection(transaction='write') as db:
+        db.execute("ALTER TABLE usage ADD COLUMN future_timing TEXT NOT NULL DEFAULT '{}'")
+        db.execute('CREATE TABLE future_empty_records(id TEXT PRIMARY KEY,data TEXT)')
+        db.execute("INSERT INTO forge_migrations VALUES(7,'2026-10-08')")
+    result = restarted.rollback(); data = load_operation(manager.home, result['operation_id'])
+    outcome = helper_main(manager.home, data['id'], data['parent_pid'], install_dir=app,
+        publishers=(PUBLISHER,), verifier=signature, runner=lambda args: pytest.fail('no installer on rollback'))
+    assert outcome['rolled_back'] and (app / 'Forge.exe').read_bytes() == b'Old application 4.1.1'
+    with sqlite3.connect(manager.store.db_path) as db:
+        assert db.execute('SELECT MAX(version) FROM forge_migrations').fetchone()[0] == 6

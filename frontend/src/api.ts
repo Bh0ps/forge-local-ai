@@ -11,6 +11,25 @@ export interface NativeBridge {
 declare global { interface Window { pywebview?: { api: NativeBridge }; } }
 export const isNative = () => Boolean(window.pywebview?.api?.call);
 let token = '';
+const PROOF_KEY = 'forge.browser-client-proof.v1';
+let memoryProof: {origin: string; value: string} | null = null;
+function clientProof(): string {
+  try {
+    const stored = window.localStorage.getItem(PROOF_KEY);
+    if (stored) {
+      const record = JSON.parse(stored) as {origin?: string; value?: string};
+      if (record.origin === window.location.origin && typeof record.value === 'string') return record.value;
+    }
+  } catch { /* Restricted browser storage: retain the current tab's proof. */ }
+  return memoryProof?.origin === window.location.origin ? memoryProof.value : '';
+}
+function saveClientProof(value: string) {
+  memoryProof = value ? {origin: window.location.origin, value} : null;
+  try {
+    if (memoryProof) window.localStorage.setItem(PROOF_KEY, JSON.stringify(memoryProof));
+    else window.localStorage.removeItem(PROOF_KEY);
+  } catch { /* Pairing still works in this tab when storage is disabled. */ }
+}
 export function setApiToken(value: string) { token = value; }
 export async function api<T = Record<string, unknown>>(action: string, data: Record<string, unknown> = {}): Promise<T> {
   let result: unknown;
@@ -18,13 +37,21 @@ export async function api<T = Record<string, unknown>>(action: string, data: Rec
   else {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (token) headers.Authorization = `Bearer ${token}`;
-    const response = await fetch(`/api/v1/${encodeURIComponent(action)}`, { method: 'POST', headers, body: JSON.stringify(data) });
+    const proof = clientProof();
+    if (proof) headers['X-Forge-Client-Proof'] = proof;
+    const response = await fetch(`/api/v1/${encodeURIComponent(action)}`, { method: 'POST', headers, body: JSON.stringify(data), credentials: 'same-origin', redirect: 'error' });
     if (!response.ok) {
       let message = `Request failed (${response.status})`;
       try { const error = await response.json(); message = error.error || error.detail || message; } catch { /* Keep HTTP status. */ }
       throw new Error(message);
     }
     result = await response.json();
+    if (action === 'pair' && result && typeof result === 'object' && 'ok' in result && result.ok === true && 'client_proof' in result
+      && typeof result.client_proof === 'string' && result.client_proof.length >= 32 && result.client_proof.length <= 256) saveClientProof(result.client_proof);
+    if (action === 'unpair' && result && typeof result === 'object' && 'ok' in result && result.ok) {
+      // A delayed unpair response cannot erase credentials from a newer pairing.
+      if (clientProof() === proof) { saveClientProof(''); token = ''; }
+    }
   }
   if (result && typeof result === 'object' && 'error' in result && (result as { error?: unknown }).error) throw new Error(String((result as { error: unknown }).error));
   return result as T;

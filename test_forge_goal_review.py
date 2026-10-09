@@ -149,6 +149,30 @@ def test_quota_failure_pauses_and_explicit_resume_continues_same_review(tmp_path
     finally: svc.shutdown()
 
 
+def test_returned_review_cannot_approve_after_consent_revocation_and_is_not_replayed(tmp_path):
+    holder={}
+    def handler(data,cancel):
+        svc=holder['service'];config=svc.store.entity('providers','openrouter')
+        svc.store.save_entity('providers',{**config,'remote_consent':False})
+        return verdict(data)
+    svc,remote=environment(tmp_path,handler);holder['service']=svc
+    try:
+        goal=svc.goal_create({'text':'Compose a greeting.'})
+        svc.core.rounds=[complete_tasks(svc,goal),{'content':'Hello.'}]
+        run=svc.jobs.start({'text':'Do the goal.','goal_id':goal['id']})
+        assert finished(svc,run)['status']=='paused'
+        saved=svc.store.run(run['id']);assert saved['review']['status']=='error'
+        assert not saved['review_candidate'].get('invalid') and len(remote.requests)==1
+        assert not any((r.get('producer_type')=='independent_review' and r.get('passed')) for r in
+                       saved.get('verification_feedback',{}).get('receipts',{}).values())
+        config=svc.store.entity('providers','openrouter')
+        svc.store.save_entity('providers',{**config,'remote_consent':True})
+        svc.jobs.resume(run['id'])
+        assert finished(svc,run)['status']=='completed'
+        assert len(remote.requests)==1,'A completed cloud response was replayed after consent was restored.'
+    finally:svc.shutdown()
+
+
 def test_parent_stop_cancels_independent_review_without_completing_goal(tmp_path):
     entered=threading.Event()
     def handler(data,cancel):

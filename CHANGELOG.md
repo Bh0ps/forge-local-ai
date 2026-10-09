@@ -1,5 +1,38 @@
 # Changelog
 
+## 5.0.2
+
+- Docked, searchable skills and reference notes behind a composer icon beside Context.
+- Icon-only Resume beside the status indicator, preserving interrupted-action inspection.
+- Persistent read-only `/builder` brainstorming and explicit `/build` acceptance.
+- Telegram conversation replies, ordered long answers, run-scoped exports, questions and native command menus.
+- Actionable Telegram command errors and separate conversation/menu readiness states.
+- New smiling-spark logo and screenshots captured with disposable demonstration data.
+- Unsigned preview for user testing; the full repeated performance comparison remains deferred.
+
+## 5.0.1
+
+- Stable task IDs and registered verification scopes with fresh complete evidence superseding earlier failures.
+- Persistent guided work packets, coordinator-owned progress, bounded continuity and preparation timings.
+- Verification cadence survives compaction; current registered checks retain complete evidence while deferring duplicated diagnostics to saved artifacts.
+- Ordinary-goal OpenRouter planning, shared scoped cloud policy, two-assignment limit and end-to-end workflow receipts.
+- Restart-safe text drafts, captured asynchronous submissions, attachment processing and journaled admission recovery.
+- Inline task recovery, visible goal guidance, Builder dirty-state protection, retained preview failures and keyboard navigation.
+- Existing model/context settings, edited profiles, credentials and unrelated integrations are retained.
+- Performance targets require fresh matched measurement; no gains are asserted by this changelog.
+
+## 5.0.0
+
+- Integrated Builder with revisioned requirements, guarded live previews, responsive checks, source changes and fresh evidence gates.
+- Versioned agent instructions, scoped project guidance, dynamic tool discovery, complete-call validation, parallel reads and managed command sessions.
+- Coverage-safe compaction, typed continuity, preserved requirement identities and required child-result consumption.
+- Twenty-four workflow skills, contextual routing, lazy references, cached catalogs and a skill workbench preserving local edits.
+- Free read-only planners/specialists, bounded concurrency and explicit local continuation when optional Builder review is unavailable.
+- Document attachments, Space references, seven export formats and hash-checked downloads.
+- Phase timing, token diagnostics, cached metadata, SQL usage filtering and opt-in approved adaptive calibrations.
+- Repeatable twenty-task evaluation harness; measured targets are not inferred from fixture tests.
+
+
 ## 4.2.3
 
 - Local agents discover enabled OpenRouter helper IDs, models and scopes,

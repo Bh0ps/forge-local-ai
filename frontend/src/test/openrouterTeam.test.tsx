@@ -31,7 +31,7 @@ describe('OpenRouter helpers and independent review setup', () => {
   it('sets up helpers and review only on an explicit click without changing the main model or saved consent', async () => {
     const { call } = bridge({ openrouter_setup_agents: { agents: [{ id: 'researcher', name: 'Researcher' }, { id: 'assistant', name: 'Assistant' }], settings: { auto_delegate: true, goal_review_enabled: true, goal_review_model: 'openrouter/free', goal_review_max_revisions: 3, goal_review_context: 32768 } } });
     const { change, notify } = settingsPage();
-    await screen.findByText('Connected'); expect(call.mock.calls.map(([action]) => action)).toEqual(['openrouter_status']);
+    await screen.findByText('Account authenticated'); expect(call.mock.calls.map(([action]) => action)).toEqual(['openrouter_status','ai_workflow_status']);
     expect(screen.getByText(/Helpers and reviews share this quota/)).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: 'Set up helpers & reviewer' }));
     await waitFor(() => expect(call).toHaveBeenCalledWith('openrouter_setup_agents', {}));
@@ -42,12 +42,12 @@ describe('OpenRouter helpers and independent review setup', () => {
   });
   it('requires saved consent and a tested connection before setup, and never echoes account metadata into a save', async () => {
     const { call } = bridge({ openrouter_status: { provider: { ...connection, enabled: false, remote_consent: false } }, openrouter_save: { provider: { ...connection, connected: false } }, openrouter_test: { provider: connection } });
-    settingsPage(); await screen.findByText('Connected');
+    settingsPage(); await screen.findByText('Account authenticated');
     const setup = screen.getByRole('button', { name: 'Set up helpers & reviewer' }) as HTMLButtonElement;
     expect(setup.disabled).toBe(true);
     await userEvent.click(screen.getByRole('switch', { name: 'Allow assigned context to leave this computer' }));
     await userEvent.click(screen.getByRole('switch', { name: 'Enable free OpenRouter agents' }));
-    expect(setup.disabled).toBe(true); expect(call).toHaveBeenCalledTimes(1);
+    expect(setup.disabled).toBe(true); expect(call).toHaveBeenCalledTimes(2);
     await userEvent.click(screen.getByRole('button', { name: 'Save connection' }));
     await waitFor(() => expect(call).toHaveBeenCalledWith('openrouter_save', { enabled: true, remote_consent: true, data_collection: 'deny' }));
     expect(setup.disabled).toBe(true);
@@ -56,7 +56,7 @@ describe('OpenRouter helpers and independent review setup', () => {
     expect(call.mock.calls.some(([action]) => action === 'openrouter_setup_agents')).toBe(false);
   });
   it('keeps the independent reviewer separate from delegation and persists only its selected control', async () => {
-    bridge(); const { change } = settingsPage(); await screen.findByText('Connected');
+    bridge(); const { change } = settingsPage(); await screen.findByText('Account authenticated');
     await userEvent.click(screen.getByRole('switch', { name: 'Verify goals before completion' }));
     expect(change).toHaveBeenLastCalledWith({ goal_review_enabled: true });
     expect(screen.getByRole('switch', { name: 'Automatic delegation' }).getAttribute('aria-checked')).toBe('false');
@@ -69,13 +69,13 @@ describe('OpenRouter helpers and independent review setup', () => {
   });
   it('surfaces setup errors and does not claim helpers or review are enabled', async () => {
     bridge({ openrouter_setup_agents: { error: 'Free model quota exhausted. Try again later.' } });
-    const { change, notify } = settingsPage(); await screen.findByText('Connected');
+    const { change, notify } = settingsPage(); await screen.findByText('Account authenticated');
     await userEvent.click(screen.getByRole('button', { name: 'Set up helpers & reviewer' }));
     expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'Free model quota exhausted. Try again later.');
     expect(change).not.toHaveBeenCalled(); expect(notify).not.toHaveBeenCalled();
   });
   it('retains saved reviewer context values between the quick presets', async () => {
-    bridge(); settingsPage({ goal_review_context: 98304 }); await screen.findByText('Connected');
+    bridge(); settingsPage({ goal_review_context: 98304 }); await screen.findByText('Account authenticated');
     expect((screen.getByLabelText('Review context') as HTMLSelectElement).value).toBe('98304');
     expect(screen.getByRole('option', { name: '96K' })).toBeTruthy();
   });

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "design",
+  "phases": [
+    "plan",
+    "implement"
+  ],
+  "intents": [
+    "ui",
+    "design",
+    "build"
+  ],
+  "triggers": [
+    "design",
+    "layout",
+    "visual",
+    "typography",
+    "palette",
+    "beautiful",
+    "polished",
+    "vibe",
+    "dark mode"
+  ],
+  "recommended_tools": [
+    "read_file",
+    "preview_inspect",
+    "preview_screenshot"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

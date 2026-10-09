@@ -108,9 +108,9 @@ def test_streamed_tool_probe_checks_arguments_and_real_timings(tmp_path, monkeyp
     manager = RuntimeManager(tmp_path / 'forge')
     packets = [{'message': {'tool_calls': [{'function': {'name': 'forge_validation_echo', 'arguments': {'marker': 'FORGE_TOOL_OK'}}}]}},
                {'done': True, 'eval_count': 10, 'eval_duration': 500000000, 'message': {}}]
-    real = httpx.Client
+    real = httpx.AsyncClient
     response = '\n'.join(json.dumps(packet) for packet in packets)
-    monkeypatch.setattr(httpx, 'Client', lambda **kwargs: real(transport=httpx.MockTransport(lambda req: httpx.Response(200, text=response)), **kwargs))
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda **kwargs: real(transport=httpx.MockTransport(lambda req: httpx.Response(200, text=response)), **kwargs))
     result = manager._probe('http://127.0.0.1:11435', 'ollama', 'test-model', 'tools')
     assert result['passed'] and result['tps'] == 20
 
@@ -127,8 +127,8 @@ def test_runtime_probe_does_not_promote_truncated_tool_stream(tmp_path,monkeypat
         packets=[{'choices':[{'delta':{'tool_calls':[tool]},'finish_reason':None}]}]
         if ending=='length':packets.append({'choices':[{'delta':{},'finish_reason':'length'}]})
         response=''.join('data: '+json.dumps(packet)+'\n\n' for packet in packets)
-    original=httpx.Client
-    monkeypatch.setattr(httpx,'Client',lambda **kwargs:original(transport=httpx.MockTransport(lambda req:httpx.Response(200,text=response)),**kwargs))
+    original=httpx.AsyncClient
+    monkeypatch.setattr(httpx,'AsyncClient',lambda **kwargs:original(transport=httpx.MockTransport(lambda req:httpx.Response(200,text=response)),**kwargs))
     assert manager._probe('http://127.0.0.1:8082',engine,'fixture','tools')['passed'] is False
 
 def test_managed_model_manifest_change_invalidates_binding(tmp_path,monkeypatch):

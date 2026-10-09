@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "build",
+  "phases": [
+    "discover",
+    "plan"
+  ],
+  "intents": [
+    "architecture",
+    "backend",
+    "build"
+  ],
+  "triggers": [
+    "architecture",
+    "framework",
+    "stack",
+    "scaffold",
+    "full stack",
+    "full-stack"
+  ],
+  "recommended_tools": [
+    "list_files",
+    "read_file",
+    "web_search",
+    "web_fetch"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md",
+    "references/frameworks.md"
+  ]
+}

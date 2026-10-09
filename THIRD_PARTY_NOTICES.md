@@ -7,6 +7,11 @@ imported plugins retain the licenses supplied by their respective publishers.
 Windows binary packages include a `third-party-licenses` directory generated from
 installed dependency distributions and frontend packages. Source builds can
 generate the same notice bundle with `python scripts/collect_licenses.py`.
+When a Python wheel omits its full license, collection uses reviewed, exact-version
+upstream texts in `assets/third-party-licenses`. Their manifest pins byte hashes
+and source provenance; collection is offline and fails if a full notice is
+missing, altered or available only for another version. Package license identifiers
+alone are not a substitute for the full texts.
 
 | Component | License | Source |
 | --- | --- | --- |
@@ -30,6 +35,15 @@ generate the same notice bundle with `python scripts/collect_licenses.py`.
 | pystray | LGPL-3.0 | https://github.com/moses-palmer/pystray |
 | sounddevice / faster-whisper | MIT | https://github.com/spatialaudio/python-sounddevice / https://github.com/SYSTRAN/faster-whisper |
 | DDGS | MIT | https://github.com/deedy5/ddgs |
+| jsonschema | MIT | https://github.com/python-jsonschema/jsonschema |
+| pypdf | BSD-3-Clause | https://github.com/py-pdf/pypdf |
+| openpyxl | MIT | https://foss.heptapod.net/openpyxl/openpyxl |
+| python-docx | MIT | https://github.com/python-openxml/python-docx |
+| ReportLab | BSD | https://www.reportlab.com/ |
+| CTranslate2 | MIT | https://github.com/OpenNMT/CTranslate2 |
+| FlatBuffers / Tokenizers | Apache-2.0 | https://github.com/google/flatbuffers / https://github.com/huggingface/tokenizers |
+| Primp and included upstream notices | MIT; bundled rustls is Apache-2.0 OR MIT OR ISC | https://github.com/deedy5/primp |
+| proxy_tools | BSD-style upstream text (two conditions); metadata says MIT | https://github.com/jtushman/proxy_tools |
 
 Forge uses the unmodified pystray library. Its source is available from its linked
 upstream repository. Forge's public source and build instructions permit rebuilding

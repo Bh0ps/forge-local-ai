@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "backend",
+  "phases": [
+    "plan",
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "data",
+    "backend"
+  ],
+  "triggers": [
+    "database",
+    "sqlite",
+    "schema",
+    "migration",
+    "persist",
+    "storage",
+    "sql"
+  ],
+  "recommended_tools": [
+    "read_file",
+    "edit_file",
+    "run_command"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

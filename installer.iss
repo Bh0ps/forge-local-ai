@@ -1,5 +1,5 @@
 #define AppName "Forge"
-#define AppVersion "4.2.3"
+#define AppVersion "5.0.2"
 #ifndef StageDir
 #define StageDir "dist\Forge"
 #endif
@@ -10,13 +10,13 @@ AppVersion={#AppVersion}
 AppPublisher=Forge contributors
 AppPublisherURL=https://github.com/Bh0ps/forge-local-ai
 AppSupportURL=https://github.com/Bh0ps/forge-local-ai/issues
-DefaultDirName={localappdata}\Programs\Forge4
+DefaultDirName={localappdata}\Programs\Forge5
 DefaultGroupName=Forge
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=release
-OutputBaseFilename=Forge-4.2.3-Setup
+OutputBaseFilename=Forge-5.0.2-Setup
 SetupIconFile=assets\forge.ico
 UninstallDisplayIcon={app}\Forge.exe
 LicenseFile=LICENSE

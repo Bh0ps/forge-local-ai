@@ -1,6 +1,6 @@
 {
   "name": "forge-workspace",
-  "version": "4.2.3",
+  "version": "5.0.2",
   "private": true,
   "type": "module",
   "scripts": {

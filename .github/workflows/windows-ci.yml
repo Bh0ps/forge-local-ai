@@ -30,12 +30,14 @@ jobs:
           python -m pip install --require-hashes -r requirements-build.lock
           python -m pip install --require-hashes --no-build-isolation -r requirements-ci.lock
           python -m pip check
-      - name: Test Python
+      - name: Install exact frontend and browser-oracle dependencies
+        working-directory: frontend
+        run: npm ci
+      - name: Test Python and evaluation contracts
         run: python -m pytest -q
       - name: Test and compile frontend
         working-directory: frontend
         run: |
-          npm ci
           npm test
           npm run build
       - name: Determine package version

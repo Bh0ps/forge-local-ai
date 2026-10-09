@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "review",
+  "phases": [
+    "discover",
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "performance"
+  ],
+  "triggers": [
+    "performance",
+    "latency",
+    "inference",
+    "slow",
+    "responsiveness",
+    "throughput",
+    "speed",
+    "benchmark",
+    "optimize"
+  ],
+  "recommended_tools": [
+    "read_file",
+    "run_command",
+    "artifact_read"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

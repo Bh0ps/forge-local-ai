@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "build",
+  "phases": [
+    "discover",
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "build",
+    "debug",
+    "performance"
+  ],
+  "triggers": [
+    "tool usage",
+    "tool calls",
+    "efficient",
+    "efficiency",
+    "execute tasks",
+    "context budget"
+  ],
+  "recommended_tools": [
+    "search_files",
+    "read_file",
+    "artifact_read"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

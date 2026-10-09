@@ -163,18 +163,22 @@ def test_worktree_integration_conflict_is_visible_and_recoverable(coordinator, t
 def test_goal_continues_across_compactions_and_restart_without_repeating_writes(tmp_path):
     folder = tmp_path / "project"
     folder.mkdir()
-    for number in range(4):
+    # Bounded tool-result excerpts now keep four reads within 16K. Eight large
+    # reads force actual history pressure before and after restart.
+    for number in range(8):
         (folder / f"large-{number}.txt").write_text("漢字🌍" * 14000, encoding="utf-8")
     service = ForgeService(core=ScriptedEngine(), data_dir=tmp_path / "forge")
     restored = None
     try:
-        service.store.update_settings({"model": "fixture", "context": 16384, "permission_profile": "full_access", "browser_tools": False})
+        # This regression resumes the legacy conversational execution protocol;
+        # new guided runs require typed acceptance rather than narrative evidence.
+        service.store.update_settings({"model": "fixture", "context": 16384, "permission_profile": "full_access", "browser_tools": False,"guided_execution":False})
         project = service.create_project({"name": "Long task", "path": str(folder)})
         goal = service.goal_create({"text": "Create first.txt then second.txt 🌍", "project_id": project["id"],
             "tasks": [{"text": "Create first.txt", "status": "pending", "evidence": []}, {"text": "Create second.txt", "status": "pending", "evidence": []}]})
         tasks = goal["tasks"]
         first_tasks = [{**tasks[0], "status": "completed", "evidence": ["first.txt contains first"]}, tasks[1]]
-        batch = [tool("read_file", {"path": f"large-{number}.txt"}) for number in range(4)]
+        batch = [tool("read_file", {"path": f"large-{number}.txt"}) for number in range(8)]
         service.core.responses = [
             {"message": {"tool_calls": [tool("write_file", {"path": "first.txt", "content": "first"}),
                 tool("goal_update", {"tasks": first_tasks, "checkpoint": "First file verified", "next_action": "Create second.txt"})]}},
@@ -217,7 +221,10 @@ def test_goal_continues_across_compactions_and_restart_without_repeating_writes(
         main_requests = [request for request in engine.requests if request["tools"]]
         assert any(message["content"] == accepted_request for message in main_requests[0]["messages"])
         assert accepted_request.endswith(goal["request"])
-        assert any("1. [x] Create first.txt" in message["content"] for message in main_requests[0]["messages"])
+        if restored.store.run(run['id']).get('execution_mode')=='guided':
+            assert any(tasks[0]['id'] in message['content'] and tasks[1]['id'] in message['content'] for message in main_requests[0]['messages'])
+        else:
+            assert any("1. [x] Create first.txt" in message["content"] for message in main_requests[0]["messages"])
     finally:
         if restored:
             restored.shutdown()

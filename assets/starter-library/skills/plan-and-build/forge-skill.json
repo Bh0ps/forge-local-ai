@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "build",
+  "phases": [
+    "plan",
+    "implement"
+  ],
+  "intents": [
+    "plan",
+    "build"
+  ],
+  "triggers": [
+    "plan",
+    "build",
+    "implement",
+    "feature",
+    "create",
+    "develop",
+    "requirements"
+  ],
+  "recommended_tools": [
+    "read_file",
+    "request_user_input",
+    "goal_read",
+    "goal_update"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "build",
+  "phases": [
+    "discover",
+    "plan"
+  ],
+  "intents": [
+    "build",
+    "debug",
+    "architecture"
+  ],
+  "triggers": [
+    "explore",
+    "architecture",
+    "codebase",
+    "entry point",
+    "project structure",
+    "understand this project"
+  ],
+  "recommended_tools": [
+    "list_files",
+    "search_files",
+    "read_file"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

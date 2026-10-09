@@ -110,6 +110,70 @@ def verify_tree(root, manifest):
     return actual
 
 
+ROLLBACK_DATA_FOLDERS = ('config', 'attachments', 'state/goals')
+
+
+def database_guard(path, baseline=None):
+    """Hash logical user state, tolerating additive schema-only migrations.
+
+    Updater bookkeeping is deliberately excluded; invocation/message/run rows,
+    settings and all other user state remain covered. No row content is retained
+    in the operation journal.
+    """
+    def quoted(value): return '"' + value.replace('"', '""') + '"'
+    tables = {}
+    with sqlite3.connect(path) as db:
+        names = sorted(row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='forge_migrations'"))
+        wanted = (baseline or {}).get('tables', {})
+        for name in sorted(set(names) | set(wanted)):
+            if name not in names:
+                tables[name] = {'missing': True}
+                continue
+            present = [row[1] for row in db.execute('PRAGMA table_info(' + quoted(name) + ')')]
+            columns = wanted[name]['columns'] if name in wanted else present
+            if any(column not in present for column in columns):
+                tables[name] = {'missing_columns': True}
+                continue
+            select = ','.join(quoted(column) for column in columns)
+            sql = 'SELECT ' + select + ' FROM ' + quoted(name)
+            if name == 'entities': sql += " WHERE kind!='updates'"
+            sql += ' ORDER BY ' + select
+            digest = sha256(); count = 0
+            for row in db.execute(sql):
+                values = [{'blob': value.hex()} if isinstance(value, bytes) else value for value in row]
+                digest.update(encode(values).encode('utf-8')); digest.update(b'\n'); count += 1
+            # A newly introduced empty table is an additive migration, not work.
+            if baseline is not None and name not in wanted and not count: continue
+            tables[name] = {'columns': columns, 'rows': count, 'sha256': digest.hexdigest()}
+    return {'version': 1, 'tables': tables}
+
+
+def retain_rollback_state(home, data):
+    """Take a current consistent snapshot before deciding whether rewind is safe."""
+    backup = plain_path(data['backup'])
+    current = backup / ('post-update-state-' + uuid4().hex)
+    current.mkdir()
+    with sqlite3.connect(home / 'state/forge.sqlite3') as source, sqlite3.connect(current / 'forge.sqlite3') as destination:
+        source.backup(destination)
+    for folder in ROLLBACK_DATA_FOLDERS:
+        source = home / folder
+        if source.exists():
+            regular_tree(source)
+            shutil.copytree(source, current / 'data' / folder)
+    before = data.get('rollback_guard') or database_guard(backup / 'forge.sqlite3')
+    database_changed = database_guard(current / 'forge.sqlite3', before) != before
+    files_changed = any(
+        (regular_tree(current / 'data' / folder) if (current / 'data' / folder).exists() else []) !=
+        (regular_tree(backup / 'data' / folder) if (backup / 'data' / folder).exists() else [])
+        for folder in ROLLBACK_DATA_FOLDERS)
+    if database_changed or files_changed:
+        data.update(state='rollback_blocked', current_snapshot=str(current),
+                    error='Rollback would rewind newer user work. Current code and state were preserved. Inspect the retained snapshot and repair manually; no prior actions were resumed.')
+        atomic_text(home / 'runtimes/updates/operations' / (data['id'] + '.json'), encode(data))
+        raise ValueError(data['error'] + ' Snapshot: ' + str(current))
+    return current
+
+
 def authenticode(path):
     if os.name != 'nt':
         raise ValueError('Windows Authenticode verification is required before installation.')
@@ -188,7 +252,7 @@ async def _get_bytes(client, url, limit, cancel=None, progress=None, consume=Non
 
 
 class UpdateManager:
-    def __init__(self, service, current_version='4.2.3', install_dir=None, trust_policy=None,
+    def __init__(self, service, current_version='5.0.2', install_dir=None, trust_policy=None,
                  client_factory=None, verifier=authenticode):
         self.service, self.store = service, service.store
         self.home = self.store.home
@@ -214,10 +278,10 @@ class UpdateManager:
                 operation = load_operation(self.home, self.state['operation_id'])
                 if operation['state'] in ('installed', 'rolled_back'):
                     self._save(state=operation['state'], verified=False)
-                elif operation['state'] == 'applying':
+                elif operation['state'] in ('applying', 'rollback_blocked'):
                     self.inspection_required = True
                     self._save(state='interrupted', verified=False,
-                        error='The previous installer outcome is unknown. Inspect the retained installer and backup, then repair Forge manually. Automatic retry is blocked.')
+                        error=operation.get('error') or 'The previous installer outcome is unknown. Inspect the retained installer and backup, then repair Forge manually. Automatic retry is blocked.')
             except (ValueError, OSError, KeyError):
                 self.inspection_required = True
                 self._save(state='error', error='Update journal could not be verified. Inspect the retained backups.')
@@ -318,8 +382,9 @@ class UpdateManager:
             if self.store.unknown_actions(run['id']): raise ValueError('Resolve unknown action outcomes before updating.')
         for name in ('performance_manager', 'model_manager', 'setup_manager'):
             manager = getattr(self.service, name, None)
-            if manager and getattr(manager, 'jobs', {}): raise ValueError('Finish active model operations before updating.')
-            if manager and getattr(manager, 'active', None): raise ValueError('Finish the active performance operation before updating.')
+            # ModelManager.jobs is durable history; active owns its workers.
+            active = getattr(manager, 'active', {}) if name == 'model_manager' else getattr(manager, 'jobs', {})
+            if active: raise ValueError('Finish active model operations before updating.')
         runtime = getattr(self.service, 'runtime', None)
         if runtime and getattr(runtime, '_validation', {}).get('state') == 'running':
             raise ValueError('Finish runtime profile validation before updating.')
@@ -385,7 +450,7 @@ class UpdateManager:
                 verify_tree(backup / 'installation', previous)
                 with sqlite3.connect(self.store.db_path) as source, sqlite3.connect(backup / 'forge.sqlite3') as destination:
                     source.backup(destination)
-                for folder in ('config', 'attachments', 'state/goals'):
+                for folder in ROLLBACK_DATA_FOLDERS:
                     original = self.home / folder
                     if original.exists():
                         regular_tree(original)
@@ -394,7 +459,9 @@ class UpdateManager:
                 data = {'id': identifier, 'home': str(self.home.resolve()), 'install_dir': str(self.install_dir),
                     'previous_version': self.current_version, 'version': release['version'], 'installer': str(package),
                     'sha256': release['sha256'], 'size': release['size'], 'backup': str(backup),
-                    'previous_files': previous, 'backup_files': backup_files, 'state': 'prepared', 'parent_pid': os.getpid(),
+                    'previous_files': previous, 'backup_files': backup_files,
+                    'rollback_guard': database_guard(backup / 'forge.sqlite3'),
+                    'state': 'prepared', 'parent_pid': os.getpid(),
                     'parent_created': psutil.Process().create_time()}
                 intent = self.root / 'operations' / (identifier + '.json')
                 atomic_text(intent, encode(data))
@@ -416,6 +483,12 @@ class UpdateManager:
             data = load_operation(self.home, identifier)
             if data['state'] != 'installed': raise ValueError('No completed update is available to roll back.')
             verify_tree(Path(data['backup']) / 'installation', data['previous_files'])
+            try: retain_rollback_state(self.home, data)
+            except ValueError:
+                if data.get('state') == 'rollback_blocked':
+                    self.inspection_required = True
+                    self._save(state='rollback_blocked', error=data['error'], current_snapshot=data['current_snapshot'])
+                raise
             data['state'] = 'rollback_prepared'; data['parent_pid'] = os.getpid()
             data['parent_created'] = psutil.Process().create_time()
             atomic_text(self.root / 'operations' / (identifier + '.json'), encode(data))
@@ -476,7 +549,13 @@ def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=
                 runner=None, wait_seconds=60):
     """Native early-entry helper. Does not create a coordinator or migrate state."""
     home = plain_path(home); data = load_operation(home, operation_id)
-    expected = plain_path(install_dir or Path(os.environ['LOCALAPPDATA']) / 'Programs/Forge4')
+    if install_dir is not None:
+        expected = plain_path(install_dir)  # explicit isolated helper/test host
+    else:
+        programs = plain_path(Path(os.environ['LOCALAPPDATA']) / 'Programs')
+        expected = plain_path(data['install_dir'])
+        if expected not in (programs / 'Forge4', programs / 'Forge5'):
+            raise ValueError('Update target differs from the per-user Forge installation.')
     if Path(data['install_dir']).resolve() != expected or expected == home or home.is_relative_to(expected):
         raise ValueError('Update target differs from the per-user Forge installation.')
     if type(parent_pid) is not int or parent_pid != data['parent_pid'] or parent_pid <= 0:
@@ -493,6 +572,9 @@ def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=
     backup = Path(data['backup'])
     previous = backup / 'installation'
     verify_tree(previous, data['previous_files'])
+    policy = TRUSTED_PUBLISHERS if publishers is None else publishers
+    for name in ('Forge.exe', 'ForgeBrowserHost.exe'):
+        require_trust(previous / name, data['previous_version'], policy, verifier)
     # A later failed-installation directory is retained outside the immutable
     # snapshot manifest; verify every original file without accepting changes.
     for entry in data['backup_files']:
@@ -501,12 +583,12 @@ def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=
             raise ValueError('Rollback data snapshot was modified.')
     rollback = data['state'] == 'rollback_prepared'
     if data['state'] not in ('prepared', 'rollback_prepared'): raise ValueError('This update intent has already been consumed.')
-    policy = TRUSTED_PUBLISHERS if publishers is None else publishers
     if not rollback:
         package = plain_path(data['installer'])
         if file_hash(package) != data['sha256'] or package.stat().st_size != data['size']: raise ValueError('Staged installer was modified.')
         require_trust(package, data['version'], policy, verifier)
     operation = home / 'runtimes/updates/operations' / (operation_id + '.json')
+    rollback_snapshot = retain_rollback_state(home, data) if rollback else None
     data['state'] = 'applying'; atomic_text(operation, encode(data))
     try:
         if not rollback:
@@ -521,6 +603,9 @@ def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=
         data['state'] = 'installed'; atomic_text(operation, encode(data))
         return {'installed': True, 'version': data['version'], 'restart_command': [str(expected / 'Forge.exe')]}
     except BaseException as exc:
+        # Preserve post-upgrade journals before any code/data move. Rewinding
+        # a completed or unknown effect to a pending invocation could replay it.
+        current = rollback_snapshot or retain_rollback_state(home, data)
         # Targets were resolved and compared to the exact installation BEFORE
         # these recursive moves. Keep failed bytes for inspection, never execute.
         if expected.exists():
@@ -529,15 +614,13 @@ def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=
             shutil.move(str(expected), str(failed))
         shutil.copytree(previous, expected)
         verify_tree(expected, data['previous_files'])
-        latest = backup / ('post-update-state-' + uuid4().hex + '.sqlite3')
-        with sqlite3.connect(home / 'state/forge.sqlite3') as source, sqlite3.connect(latest) as destination:
-            source.backup(destination)
+        latest = current / 'forge.sqlite3'
         with sqlite3.connect(backup / 'forge.sqlite3') as source, sqlite3.connect(home / 'state/forge.sqlite3') as destination:
             source.backup(destination)
         from forge_channels import quarantine_after_rollback
         with sqlite3.connect(home / 'state/forge.sqlite3') as restored, sqlite3.connect(latest) as current:
             data['channel_recovery'] = quarantine_after_rollback(restored, current)
-        for folder in ('config', 'attachments', 'state/goals'):
+        for folder in ROLLBACK_DATA_FOLDERS:
             saved = backup / 'data' / folder
             target = home / folder
             if saved.exists():

@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "research",
+  "phases": [
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "writing"
+  ],
+  "triggers": [
+    "documentation",
+    "document",
+    "readme",
+    "guide",
+    "release notes",
+    "changelog",
+    "explain"
+  ],
+  "recommended_tools": [
+    "read_file",
+    "edit_file",
+    "run_command"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

@@ -7,7 +7,7 @@ by type and category. Cached metadata and the shipped collection work offline.
 
 ## Ready to use
 
-Forge includes ten original MIT-licensed skills:
+Forge includes 24 original MIT-licensed skills in six bundles. See [the Forge 5 guide](FORGE_5.md#skills-references-and-outputs) for the expanded library and workbench. The original ten remain available:
 
 - Explore a project
 - Plan & build

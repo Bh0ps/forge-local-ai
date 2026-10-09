@@ -18,10 +18,13 @@ class BrowserGuard(ValueError):
 
 
 class NativeBrowser:
-    def __init__(self, home, ui_dispatch=None, view_factory=None, clock=time.monotonic, session_check=None):
+    def __init__(self, home, ui_dispatch=None, view_factory=None, clock=time.monotonic, session_check=None,
+                 panel_id='forge-browser-panel', profile_name='native-browser-profile', navigation_guard=None, diagnostics=False):
         self.home = Path(home)
         self.ui_dispatch = ui_dispatch
         self.view_factory = view_factory
+        self.panel_id, self.profile_name = panel_id, profile_name
+        self.navigation_guard, self.capture_diagnostics = navigation_guard, diagnostics
         self.clock = clock
         self.session_check = session_check or (lambda: bool(self.view_factory) or session_available())
         self.view = None
@@ -77,7 +80,9 @@ class NativeBrowser:
             view = self.view_factory(self._changed)
         else:
             from embedded_browser import EmbeddedWebView2Page
-            view = self.ui_dispatch(lambda owner: EmbeddedWebView2Page(owner, self.home, self.ui_dispatch, self._changed))
+            view = self.ui_dispatch(lambda owner: EmbeddedWebView2Page(owner, self.home, self.ui_dispatch, self._changed,
+                panel_id=self.panel_id, profile_name=self.profile_name, navigation_guard=self.navigation_guard,
+                diagnostics=self.capture_diagnostics))
         with self.lock:
             self.view = view
             self.state.update(running=True, error=None)
@@ -118,7 +123,10 @@ class NativeBrowser:
         elif action != 'open' or not getattr(self.view, 'embedded', False):
             self.view.show()
         if action in ('open', 'navigate') and (action == 'navigate' or data.get('url')):
-            self.view.navigate(browser_url(data.get('url', 'about:blank')))
+            url = browser_url(data.get('url', 'about:blank'))
+            if self.navigation_guard and not self.navigation_guard(url):
+                raise BrowserGuard('Preview navigation must stay on its owned loopback origin.')
+            self.view.navigate(url)
         elif action in ('back', 'forward', 'reload'):
             self.view.history(action)
         return {'ok': True, **self.status()}
@@ -165,6 +173,8 @@ class NativeBrowser:
                 url = browser_url(data.get('url', ''))
             except ValueError as exc:
                 raise BrowserGuard(str(exc)) from None
+            if self.navigation_guard and not self.navigation_guard(url):
+                raise BrowserGuard('Preview navigation must stay on its owned loopback origin.')
             self._start()
             try:
                 self._check(context)
@@ -174,13 +184,18 @@ class NativeBrowser:
             self.view.show()
             self.view.navigate(url)
             return {'ok': True, 'url': url, 'loading': True, 'next_action': 'Use browser_inspect after navigation finishes.'}
-        if name not in ('browser_inspect', 'browser_screenshot', 'browser_click', 'browser_type'):
+        if name not in ('browser_inspect', 'browser_screenshot', 'browser_click', 'browser_type',
+                        'browser_select', 'browser_key', 'browser_scroll', 'browser_wait'):
             raise BrowserGuard('Unsupported native browser tool.')
         if self.view is None:
             raise BrowserGuard('Open Forge Browser or use browser_navigate before inspecting this page.')
         if name == 'browser_inspect':
             return self._inspect(context)
         if name == 'browser_screenshot':
+            if self.panel_id == 'forge-preview-panel' and getattr(self.view, 'embedded', False) and not getattr(self.view, 'visible', False):
+                raise BrowserGuard('Open the Builder preview pane before capturing visual evidence.')
+            if hasattr(self.view, 'preflight'):
+                self.view.preflight()
             with self.lock:
                 generation = self.generation
             self._check(context)
@@ -188,7 +203,7 @@ class NativeBrowser:
             with self.lock:
                 if generation != self.generation:
                     raise BrowserGuard('Browser navigated while capturing. Inspect again.')
-            directory = self.home / 'artifacts/browser'
+            directory = self.home / ('artifacts/previews' if self.panel_id == 'forge-preview-panel' else 'artifacts/browser')
             directory.mkdir(parents=True, exist_ok=True)
             artifact = directory / (uuid4().hex + '.png')
             artifact.write_bytes(raw)
@@ -196,16 +211,46 @@ class NativeBrowser:
                 'content': [{'type': 'image', 'artifact': str(artifact), 'mimeType': 'image/png'}]}
         snapshot = self._snapshot(data, context, focus=False)
         if hasattr(self.view, 'preflight'): self.view.preflight()
+        if name == 'browser_wait':
+            text, timeout = data.get('text'), data.get('timeout_ms', 5000)
+            if not isinstance(text, str) or not 1 <= len(text) <= 2000 or type(timeout) is not int or not 100 <= timeout <= 15000:
+                raise BrowserGuard('Wait for text up to 2000 characters with a 100–15000 ms timeout.')
+            deadline = time.monotonic() + timeout / 1000
+            while time.monotonic() < deadline:
+                self._snapshot(data, context, focus=False)
+                payload = json.dumps({'url': snapshot['url'], 'text': text})
+                result = self.view.evaluate("(() => {const d=" + payload + ";return {same_url:location.href===d.url,matched:(document.body?.innerText||'').includes(d.text)};})()")
+                if not result.get('same_url'):
+                    raise BrowserGuard('Preview navigated while waiting. Inspect again.')
+                if result.get('matched'):
+                    return {'ok': True, 'matched': True, 'inspect_again': True}
+                time.sleep(.1)
+            return {'ok': True, 'matched': False, 'timed_out': True, 'inspect_again': True}
+        if name == 'browser_scroll':
+            x, y = data.get('x', 0), data.get('y', 0)
+            if type(x) is not int or type(y) is not int or max(abs(x), abs(y)) > 1500:
+                raise BrowserGuard('Scroll by integer offsets of at most 1500 CSS pixels.')
+            payload = json.dumps({'url': snapshot['url'], 'x': x, 'y': y})
+            self._check(context)
+            result = self.view.evaluate("(() => {const d=" + payload + ";if(location.href!==d.url)return {ok:false,not_executed:true,error:'Preview navigated.'};window.scrollBy(d.x,d.y);return {ok:true,inspect_again:true};})()")
+            with self.lock:
+                self.snapshot = None
+            return result
         selector = data.get('selector')
         if selector not in snapshot['signatures']:
             raise BrowserGuard('Choose a selector returned by browser_inspect.')
         text = data.get('text')
         if name == 'browser_type' and (not isinstance(text, str) or len(text) > 12000):
             raise BrowserGuard('Browser text must contain at most 12000 characters.')
+        if name == 'browser_select' and (not isinstance(data.get('value'), str) or len(data['value']) > 2000):
+            raise BrowserGuard('Select an option value of at most 2000 characters.')
+        if name == 'browser_key' and data.get('key') not in ('Enter', 'Tab', 'Escape', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'Backspace', 'Delete', 'Home', 'End'):
+            raise BrowserGuard('This preview key is unsupported.')
         expected = snapshot['signatures'][selector]
         self._check(context)
         # Validation and DOM action share one script: no host round-trip race.
         payload = json.dumps(dict(selector=selector, signature=expected, operation=name, text=text,
+                                  value=data.get('value'), key=data.get('key'),
                                   url=snapshot['url']), ensure_ascii=True)
         check = json.dumps(dict(selector=selector, signature=expected, operation='validate', text=None,
                                 url=snapshot['url']), ensure_ascii=True)
@@ -257,6 +302,33 @@ class NativeBrowser:
                                  url=result['url'], signatures=signatures)
         return dict(ok=True, snapshot_id=key, backend='native', **result)
 
+    def viewport(self, data):
+        def update():
+            self._check()
+            if not self.view or not hasattr(self.view, 'set_viewport'):
+                raise BrowserGuard('Open the embedded preview first.')
+            width, height = data.get('width'), data.get('height')
+            if width is not None and (type(width) is not int or type(height) is not int or
+                                      not 240 <= width <= 1920 or not 240 <= height <= 2160):
+                raise BrowserGuard('Viewport dimensions must be 240–1920 by 240–2160 CSS pixels.')
+            result = self.view.set_viewport(width, height)
+            with self.lock:
+                self.generation += 1
+                self.snapshot = None
+            return {'ok': True, **result}
+        return self.pool.submit(update).result(timeout=20)
+
+    def diagnostics(self):
+        def inspect():
+            self._check()
+            if not self.view or not self.capture_diagnostics:
+                raise BrowserGuard('Diagnostics are available only in the preview browser.')
+            result = self.view.evaluate("(() => ({url:location.href,entries:(Array.isArray(window.__forgePreviewDiagnostics)?window.__forgePreviewDiagnostics:[]).slice(-100).map(entry=>({kind:String(entry?.kind||'').slice(0,64),message:String(entry?.message||'').slice(0,1600),timestamp:String(entry?.timestamp||'').slice(0,64)})),untrusted:true}))()")
+            if self.navigation_guard and not self.navigation_guard(result.get('url', '')):
+                raise BrowserGuard('Preview diagnostics changed origin.')
+            return {'ok': True, **result}
+        return self.pool.submit(inspect).result(timeout=20)
+
     def stop(self):
         self.cancelled.set()
         with self.lock:
@@ -279,7 +351,7 @@ class NativeBrowser:
 
 INSPECT_SCRIPT = r'''(() => {
  const key=__FORGE_KEY__;
- const sig=el=>[el.tagName,el.getAttribute('type'),el.getAttribute('href'),el.getAttribute('aria-label'),el.textContent.slice(0,200),el.disabled===true,el.readOnly===true,el.type!=='password'&&['INPUT','TEXTAREA'].includes(el.tagName)?el.value:null];
+ const sig=el=>[el.tagName,el.getAttribute('type'),el.getAttribute('href'),el.getAttribute('aria-label'),el.textContent.slice(0,200),el.disabled===true,el.readOnly===true,el.tagName==='SELECT'?[el.value,[...el.options].slice(0,200).map(o=>[o.value.slice(0,300),o.text.slice(0,300),o.disabled])]:el.type!=='password'&&['INPUT','TEXTAREA'].includes(el.tagName)?el.value:null];
  const targets=[...document.querySelectorAll('a,button,input,textarea,select,[role=button]')]
  .filter(el=>{const r=el.getBoundingClientRect();return r.width>0&&r.height>0&&getComputedStyle(el).visibility!=='hidden';}).slice(0,200)
  .map((el,i)=>{const id=key+'-'+i;el.setAttribute('data-forge-native',id);return {
@@ -295,17 +367,39 @@ ACTION_SCRIPT = r'''(() => {
  if(location.href!==d.url)return fail('Browser navigated. Inspect again.');
  const matches=document.querySelectorAll(d.selector);if(matches.length!==1)return fail('Browser target changed. Inspect again.');
  const el=matches[0],r=el.getBoundingClientRect();
- const signature=[el.tagName,el.getAttribute('type'),el.getAttribute('href'),el.getAttribute('aria-label'),el.textContent.slice(0,200),el.disabled===true,el.readOnly===true,el.type!=='password'&&['INPUT','TEXTAREA'].includes(el.tagName)?el.value:null];
+ const signature=[el.tagName,el.getAttribute('type'),el.getAttribute('href'),el.getAttribute('aria-label'),el.textContent.slice(0,200),el.disabled===true,el.readOnly===true,el.tagName==='SELECT'?[el.value,[...el.options].slice(0,200).map(o=>[o.value.slice(0,300),o.text.slice(0,300),o.disabled])]:el.type!=='password'&&['INPUT','TEXTAREA'].includes(el.tagName)?el.value:null];
  if(JSON.stringify(signature)!==JSON.stringify(d.signature)||!el.isConnected||!r.width||!r.height||getComputedStyle(el).visibility==='hidden')return fail('Browser target changed. Inspect again.');
  if(el.type==='password'||el.type==='file')return fail('Password and file fields require direct user interaction.');
  if(el.disabled||el.readOnly)return fail('Target is disabled or read-only.');
  if(d.operation==='validate')return {ok:true};
+ if(d.operation==='browser_select'){
+  if(el.tagName!=='SELECT'||el.options.length>200)return fail('Select a dropdown with at most 200 options from the snapshot.');
+  const option=[...el.options].find(option=>option.value===d.value&&!option.disabled);if(!option)return fail('Option changed or is disabled. Inspect again.');
+  const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value')?.set;if(!setter)return fail('Dropdown cannot be edited.');
+  setter.call(el,d.value);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return {ok:true};
+ }
+ if(d.operation==='browser_key'){
+  el.focus();const proceed=el.dispatchEvent(new KeyboardEvent('keydown',{key:d.key,bubbles:true,cancelable:true}));
+  if(proceed&&d.key==='Enter'&&el.form&&['INPUT','BUTTON'].includes(el.tagName))el.form.requestSubmit();
+  el.dispatchEvent(new KeyboardEvent('keyup',{key:d.key,bubbles:true}));return {ok:true};
+ }
  if(d.operation==='browser_type'&&!['INPUT','TEXTAREA'].includes(el.tagName))return fail('Select an editable text field.');
  if(d.operation==='browser_type'&&!['text','search','email','url','tel','number',''].includes(el.type||''))return fail('Unsupported input type.');
  if(d.operation==='browser_click'){el.click();return {ok:true};}
  const prototype=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
  const setter=Object.getOwnPropertyDescriptor(prototype,'value')?.set;if(!setter)return fail('This field cannot be edited.');
  el.focus();setter.call(el,d.text);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return {ok:true};
+})()'''
+
+
+PREVIEW_DIAGNOSTICS_SCRIPT = r'''(() => {
+ const entries=[];Object.defineProperty(window,'__forgePreviewDiagnostics',{value:entries});
+ const push=(kind,message)=>{entries.push({kind,message:String(message).slice(0,1600),timestamp:new Date().toISOString()});if(entries.length>100)entries.shift();};
+ for(const kind of ['warn','error']){const original=console[kind].bind(console);console[kind]=(...args)=>{push('console_'+kind,args.map(a=>String(a)).join(' '));original(...args);};}
+ addEventListener('error',event=>push('page_error',event.message||'Resource could not load'),true);
+ addEventListener('unhandledrejection',event=>push('unhandled_rejection',event.reason));
+ const fetchOriginal=window.fetch.bind(window);window.fetch=async(...args)=>{try{const response=await fetchOriginal(...args);if(!response.ok)push('network',response.status+' '+response.url);return response;}catch(error){push('network',String(args[0])+' '+error);throw error;}};
+ const open=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(method,url,...args){this.addEventListener('loadend',()=>{if(this.status===0||this.status>=400)push('network',this.status+' '+String(url));});return open.call(this,method,url,...args);};
 })()'''
 
 
@@ -397,6 +491,18 @@ class WebView2Page:
             core.NewWindowRequested += self._popup
             core.DownloadStarting += lambda sender, args: setattr(args, 'Cancel', True)
             core.PermissionRequested += self._permission
+            if getattr(self, 'capture_diagnostics', False):
+                from System import Action, String
+                from System.Threading.Tasks import Task
+                self.diagnostics_ready = threading.Event()
+                def registered(task):
+                    try:
+                        str(task.Result)
+                    except Exception as exc:
+                        self.error = exc
+                    finally:
+                        self.diagnostics_ready.set()
+                core.AddScriptToExecuteOnDocumentCreatedAsync(PREVIEW_DIAGNOSTICS_SCRIPT).ContinueWith(Action[Task[String]](registered))
             core.Navigate('about:blank')
         except Exception as exc:
             self.error = exc
@@ -406,6 +512,9 @@ class WebView2Page:
     def _navigation(self, sender, args):
         try:
             url = browser_url(str(args.Uri))
+            guard = getattr(self, 'navigation_guard', None)
+            if guard and not guard(url):
+                raise ValueError('Preview navigation must stay on its owned loopback origin.')
             self.address.Text = url
             self.changed('navigation', url)
         except ValueError:
@@ -426,7 +535,10 @@ class WebView2Page:
     def _popup(self, sender, args):
         args.Handled = True
         try:
-            self.control.CoreWebView2.Navigate(browser_url(str(args.Uri)))
+            url = browser_url(str(args.Uri))
+            guard = getattr(self, 'navigation_guard', None)
+            if not guard or guard(url):
+                self.control.CoreWebView2.Navigate(url)
         except ValueError:
             pass
 
@@ -438,6 +550,9 @@ class WebView2Page:
     def ready(self):
         if not self.event.wait(20):
             raise TimeoutError('Windows WebView2 initialization timed out.')
+        diagnostics_ready = getattr(self, 'diagnostics_ready', None)
+        if diagnostics_ready and not diagnostics_ready.wait(20):
+            raise TimeoutError('Preview diagnostics initialization timed out.')
         if self.error:
             raise self.error
 

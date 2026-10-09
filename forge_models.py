@@ -390,6 +390,17 @@ class ModelManager:
             keys = ('general.architecture', 'general.name', 'general.type', 'split.count', 'clip.projector_type',
                     'clip.has_vision_encoder', 'clip.vision.projection_dim')
             result = {key: reader.fields[key].contents() for key in keys if key in reader.fields}
+            template = reader.fields.get('tokenizer.chat_template')
+            if template is not None:
+                template = template.contents()
+                if not isinstance(template, str) or not template.strip() or len(template.encode('utf-8')) > 262144:
+                    raise ValueError('GGUF chat template must be nonempty bounded text.')
+                result['chat_template_sha256'] = hashlib.sha256(template.encode('utf-8')).hexdigest()
+                result['chat_template_present'] = True
+            else:
+                result['chat_template_present'] = False
+            if 'tokenizer.ggml.model' in reader.fields:
+                result['tokenizer_model'] = reader.fields['tokenizer.ggml.model'].contents()
             architecture = result.get('general.architecture', '')
             for key in (architecture + '.embedding_length',):
                 if key in reader.fields: result[key] = reader.fields[key].contents()

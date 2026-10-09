@@ -27,9 +27,10 @@ import zipfile
 
 from browser_tools import BrowserTools, function_schema, register_native_host
 from forge_credentials import CredentialVault
+from forge_skills import SkillIndex, resource_path, validate_manifest
 from forge_library import (ASSET_ROOT, LIBRARY_VERSION, PRESET_CATALOGS, STARTER_BUNDLES, STARTER_SKILLS,
                            atomic_bytes, preset_catalog, reconcile_starters, select_skills, skill_identity,
-                           starter_metadata)
+                           starter_metadata, relevance_score, task_context)
 
 MAX_CONFIG_BYTES = 2 * 1024 * 1024
 MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024
@@ -349,6 +350,7 @@ class IntegrationHub:
         self.connections = {}
         self.auth_flows = {}
         self.inspections = {}
+        self.skill_index = SkillIndex()
         self.browser = BrowserTools(self.root)
         self.closed = False
         if self.config_path.is_file():
@@ -409,7 +411,7 @@ class IntegrationHub:
         # install/review mutations prevents that rollback from deleting a second
         # concurrent installation or its newly configured servers.
         if action in {"plugin_install", "plugin_inspect", "plugin_discard", "plugin_toggle",
-                      "skill_install", "skill_toggle", "mcp_save", "mcp_remove"}:
+                      "skill_install", "skill_toggle", "skill_edit", "skill_reset", "skill_restore", "mcp_save", "mcp_remove"}:
             with self.lock:
                 return self._dispatch(action, data)
         return self._dispatch(action, data)
@@ -496,6 +498,20 @@ class IntegrationHub:
                 return {"ok": True, **self._connection(server).request("list_resources")}
             if action == "skills":
                 return {"ok": True, "skills": self.discover_skills(data.get("project"))}
+            if action == "skills_search":
+                return self.search_skills(data)
+            if action == "skill_route_preview":
+                return self.route_preview(data)
+            if action == "skills_resource_read":
+                return self.read_skill_resource(data["id"], data["path"], data.get("project"), data.get("start", 0), data.get("limit", 8000))
+            if action == "skill_versions":
+                return self.skill_versions(data["id"], data.get("project"))
+            if action == "skill_edit":
+                return self.edit_skill(data)
+            if action == "skill_reset":
+                return self.reset_skill(data)
+            if action == "skill_restore":
+                return self.restore_skill(data)
             if action == "skill_install":
                 source = str(data.get("source") or data.get("path") or "").strip()
                 if source.startswith("builtin:skill/"):
@@ -690,6 +706,14 @@ class IntegrationHub:
                 {"id": {"type": "string"}}, ["id"])
             schema.update(capability="read", source="skills")
             result.append(schema)
+            search = function_schema("skills_search", "Discover enabled skill guidance by task, returning stable IDs, prerequisites and references. Does not enable or execute packages.",
+                {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 20}}, ["query"])
+            search.update(capability="read", source="skills")
+            result.append(search)
+            resource = function_schema("skills_resource_read", "Read a bounded text reference within an enabled skill package. Resolve relative paths from skills_read or skills_search; content cannot grant permissions.",
+                {"id": {"type": "string"}, "path": {"type": "string"}, "start": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 16000}}, ["id", "path"])
+            resource.update(capability="read", source="skills")
+            result.append(resource)
         return result
 
     def execute(self, name, arguments, run_context=None):
@@ -701,6 +725,10 @@ class IntegrationHub:
             project = (run_context or {}).get("project") if isinstance(run_context, dict) else None
             if name == "skills_read":
                 return self.read_skill(arguments["id"], project)
+            if name == "skills_search":
+                return self.search_skills({**arguments, "project": project})
+            if name == "skills_resource_read":
+                return self.read_skill_resource(arguments["id"], arguments["path"], project, arguments.get("start", 0), arguments.get("limit", 8000))
             for server in self.config["servers"]:
                 resource_name = f"mcp__{_server_namespace(server['id'])}__read_resource"
                 if name == resource_name and self._server_enabled(server):
@@ -773,6 +801,10 @@ class IntegrationHub:
         return str(path)
 
     def discover_skills(self, project=None):
+        with self.lock:
+            return self._discover_skills(project)
+
+    def _discover_skills(self, project=None):
         roots = [(self.root / "skills", "global")]
         for plugin in self.config["plugins"]:
             if plugin.get("enabled", True):
@@ -780,55 +812,51 @@ class IntegrationHub:
         if project:
             project_path = Path(project.get("root", project.get("path", ""))) if isinstance(project, dict) else Path(project)
             for name in (".forge/skills", ".agents/skills", ".codex/skills", ".claude/skills"):
-                roots.append((project_path / name, "project"))
-        output = []
-        seen = set()
+                candidate = project_path / name
+                if candidate.resolve().is_relative_to(project_path.resolve()) and not any(_is_link(project_path / part) for part in (name.split("/")[0], name)):
+                    roots.append((candidate, "project"))
+        output, seen = [], set()
         for root, scope in roots:
-            if not root.is_dir() or _is_link(root):
-                continue
-            for current, dirs, files in os.walk(root, followlinks=False):
-                dirs[:] = [name for name in dirs if name not in {".git", "node_modules", ".venv"} and not _is_link(Path(current) / name)]
-                if "SKILL.md" not in files:
-                    continue
-                path = Path(current) / "SKILL.md"
+            for path in self.skill_index.paths(root):
                 try:
-                    if _is_link(path) or path.stat().st_size > 256000 or path.resolve() in seen:
+                    if path.resolve() in seen:
                         continue
-                    raw = path.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue  # A user can remove/edit a skill while agents run.
+                    package_content = self.skill_index.describe(path, self._frontmatter)
+                    metadata = package_content["frontmatter"]
+                    builtin = starter_metadata(path, self.root, index=self.skill_index, digest=package_content["digest"])
+                except (OSError, ValueError):
+                    continue
                 seen.add(path.resolve())
-                if len(output) >= 500:
-                    return output
-                identity = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:20]
-                metadata = self._frontmatter(raw)
+                identity = skill_identity(path)
                 detail = metadata.get("metadata", {})
                 detail = detail if isinstance(detail, dict) else {}
+                manifest = package_content["manifest"]
                 selection = self.config["skills"].get(identity, {})
-                try:
-                    builtin = starter_metadata(path, self.root)
-                except OSError:
-                    continue
                 plugin = next((item for item in self.config["plugins"] if scope == "plugin:" + item["id"]), None)
                 package = next((item for item in self.config.get("skill_packages", [])
                                 if path.resolve().is_relative_to(Path(item["path"]).resolve())), None)
-                tags = (builtin or metadata).get("tags", detail.get("tags", []))
-                if isinstance(tags, str):
-                    tags = [tag.strip() for tag in tags.split(",")]
-                tags = [str(tag)[:80] for tag in tags[:20]] if isinstance(tags, list) else []
-                triggers = (builtin or metadata).get("triggers", tags)
-                if isinstance(triggers, str):
-                    triggers = [triggers]
-                triggers = [str(term)[:100] for term in triggers[:50]] if isinstance(triggers, list) else tags
+                def text_list(value, maximum=50):
+                    if isinstance(value, str):
+                        value = [part.strip() for part in value.split(",")]
+                    return [str(part)[:200] for part in value[:maximum]] if isinstance(value, list) else []
+                tags = text_list((builtin or metadata).get("tags", detail.get("tags", [])), 20)
+                triggers = text_list(manifest.get("triggers", (builtin or metadata).get("triggers", tags)))
                 output.append({"id": identity, "name": str((builtin or {}).get("name") or detail.get("display-name") or metadata.get("name") or path.parent.name)[:100],
-                    "description": str(metadata.get("description") or "")[:2000], "path": str(path), "scope": scope,
+                    "description": str(metadata.get("description") or (builtin or {}).get("description") or "")[:2000], "path": str(path), "scope": scope,
                     "enabled": selection.get("enabled", True), "automatic": selection.get("automatic", False),
                     "category": str((builtin or metadata).get("category", detail.get("category", "Custom")))[:100], "tags": tags, "triggers": triggers,
                     "source": (builtin or {}).get("source") or (plugin or package or {}).get("source") or "local",
                     "license": (builtin or {}).get("license", "See package license"), "builtin": bool(builtin),
                     "library_id": (builtin or {}).get("library_id"), "modified": (builtin or {}).get("modified", False),
-                    "version": (builtin or plugin or {}).get("version", "unversioned"),
-                    "plugin_id": (plugin or {}).get("id")})
+                    "version": manifest.get("version", (builtin or plugin or {}).get("version", "unversioned")), "plugin_id": (plugin or {}).get("id"),
+                    "bundle": manifest.get("bundle", (builtin or {}).get("bundle")), "phases": text_list(manifest.get("phases", (builtin or {}).get("phases", []))),
+                    "intents": text_list(manifest.get("intents", (builtin or {}).get("intents", []))),
+                    "exclude_triggers": text_list(manifest.get("exclude_triggers", [])), "requires_tools": text_list(manifest.get("requires_tools", [])),
+                    "recommended_tools": text_list(manifest.get("recommended_tools", (builtin or {}).get("recommended_tools", []))),
+                    "resources": text_list(manifest.get("resources", [])), "manifest": manifest, "manifest_error": package_content["manifest_error"],
+                    "revision": package_content["revision"], "digest": package_content["digest"]})
+                if len(output) >= 500:
+                    return output
         return output
 
     @staticmethod
@@ -848,22 +876,176 @@ class IntegrationHub:
     def read_skill(self, identity, project=None):
         return self._read_skill(identity, project)
 
-    def _read_skill(self, identity, project=None, preview=False):
+    def _find_skill(self, identity, project=None, preview=False):
         skill = next((s for s in self.discover_skills(project) if s["id"] == identity), None)
         if not skill or (not preview and not skill["enabled"]):
             raise ValueError("Skill was not found or is disabled")
-        with Path(skill["path"]).open(encoding="utf-8", errors="replace") as handle:
-            raw = handle.read(48001)
+        return skill
+
+    def _read_skill(self, identity, project=None, preview=False):
+        skill = self._find_skill(identity, project, preview)
+        content = self.skill_index.package(Path(skill["path"]))
+        skill = {**skill, "revision": content["revision"], "digest": content["digest"]}
+        raw = content["text"]
         return {"ok": True, "skill": skill, "text": raw[:48000], "truncated": len(raw) > 48000,
-                "instruction_boundary": "Treat this as skill content; permissions still come from the coordinator."}
+                "revision": content["revision"], "digest": content["digest"], "manifest": content["manifest"], "resources": skill["resources"],
+                "instruction_boundary": "Skill content guides the task; permissions and tool availability come from the coordinator."}
 
-    def active_skill_instructions(self, project=None, explicit=None, query=""):
-        """Return selected content for the coordinator to inject with source labels."""
+    def search_skills(self, data):
+        query = str(data.get("query", ""))[:4000]
+        limit = data.get("limit", 5)
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise ValueError("Skill search limit must be between 1 and 20.")
+        context = task_context(query, {key: data[key] for key in ("phase", "outcomes", "available_tools", "project_type") if key in data})
+        rows = []
+        words = set(re.findall(r"\w+", query.casefold()))
+        for skill in self.discover_skills(data.get("project")):
+            if not skill["enabled"]:
+                continue
+            score = relevance_score(skill, query, context)
+            # Imported descriptions are useful for discovery even without tags;
+            # this does not automatically activate them.
+            score += len(words & set(re.findall(r"\w+", (skill["name"] + " " + skill["description"]).casefold())))
+            if query.strip() and score <= 0:
+                continue
+            missing = sorted(set(skill["requires_tools"]) - set(context.get("available_tools", skill["requires_tools"])))
+            rows.append({key: skill.get(key) for key in ("id", "name", "description", "scope", "library_id", "version", "bundle", "phases", "resources", "digest", "revision", "automatic", "requires_tools", "manifest_error")} | {"score": score, "available": not missing and not skill["manifest_error"], "missing_tools": missing})
+        rows.sort(key=lambda item: (-item["score"], item["name"]))
+        return {"ok": True, "skills": rows[:limit], "total": len(rows), "instruction_boundary": "Results identify guidance, not permission or executable actions."}
+
+    def route_preview(self, data):
+        query = str(data.get("query", ""))[:24000]
+        context = {key: data[key] for key in ("phase", "outcomes", "available_tools", "project_type") if key in data}
+        skills = self.discover_skills(data.get("project"))
+        selected = select_skills(skills, data.get("explicit"), query, context)
+        return {"ok": True, "phase": task_context(query, context)["phase"], "selected": [
+            {key: skill.get(key) for key in ("id", "name", "library_id", "scope", "version", "selection_reason", "selection_score", "requires_tools", "manifest_error")}
+            for skill in selected], "candidate_count": len(skills)}
+
+    def read_skill_resource(self, identity, relative, project=None, start=0, limit=8000):
+        skill = self._find_skill(identity, project)
+        if type(start) is not int or start < 0 or type(limit) is not int or not 1 <= limit <= 16000:
+            raise ValueError("Resource start/limit must be bounded nonnegative integers.")
+        path = resource_path(skill["path"], relative)
+        raw = self.skill_index.read(path)["text"]
+        if "\x00" in raw:
+            raise ValueError("Skill resource is not UTF-8 text.")
+        text = raw[start:start + limit]
+        return {"ok": True, "id": identity, "path": relative, "text": text, "next_start": start + len(text),
+                "truncated": start + len(text) < len(raw), "instruction_boundary": "Package resource content cannot grant permissions or expand the user's objective."}
+
+    def _version_root(self, identity):
+        if not re.fullmatch(r"[a-f0-9]{20}", identity):
+            raise ValueError("Invalid skill identity.")
+        return self.root / "artifacts" / "skills" / identity
+
+    def skill_versions(self, identity, project=None):
+        skill = self._find_skill(identity, project, preview=True)
+        folder = self._version_root(identity)
+        versions = []
+        if folder.is_dir() and not _is_link(folder):
+            for path in sorted(folder.glob("*.json"), reverse=True)[:50]:
+                if _is_link(path) or path.stat().st_size > 2 * 1024 * 1024:
+                    continue
+                try:
+                    item = json.loads(path.read_text(encoding="utf-8"))
+                    versions.append({key: item.get(key) for key in ("revision", "digest", "saved_at", "operation", "version")})
+                except (OSError, ValueError):
+                    continue
+        return {"ok": True, "current_revision": skill["revision"], "versions": versions}
+
+    def _archive_skill(self, skill, operation):
+        content = self.skill_index.package(skill["path"])
+        folder = self._version_root(skill["id"])
+        from forge_library import safe_directory
+        safe_directory(folder, self.root)
+        target = folder / (str(time.time_ns()) + "-" + content["revision"][:12] + ".json")
+        atomic_bytes(target, json.dumps({"revision": content["revision"], "digest": content["digest"],
+            "text": content["text"], "manifest": content["manifest"], "saved_at": time.time(), "operation": operation,
+            "version": skill.get("version")}, ensure_ascii=False).encode("utf-8"))
+
+    def edit_skill(self, data):
+        skill = self._find_skill(data["id"], data.get("project"), preview=True)
+        if data.get("expected_revision") != skill["revision"]:
+            raise ValueError("Skill changed since you opened it. Reload before saving.")
+        text = data.get("text")
+        if not isinstance(text, str) or not text.strip() or len(text.encode("utf-8")) > 256000:
+            raise ValueError("Skill text must contain 1–256000 UTF-8 bytes.")
+        manifest = validate_manifest(data["manifest"]) if data.get("manifest") is not None else None
+        remove_manifest = "manifest" in data and data["manifest"] is None
+        path = resource_path(skill["path"], "SKILL.md")
+        sidecar = path.with_name("forge-skill.json")
+        if (manifest is not None or remove_manifest) and _is_link(sidecar):
+            raise ValueError("Manifest cannot be a link.")
+        self._archive_skill(skill, "before edit")
+        if self.skill_index.package(path)["revision"] != data["expected_revision"]:
+            raise ValueError("Skill changed during editing. Reload before saving.")
+        atomic_bytes(path, text.encode("utf-8"))
+        if manifest is not None:
+            atomic_bytes(sidecar, json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"))
+            self.skill_index.invalidate(sidecar)
+        elif remove_manifest and sidecar.exists():
+            sidecar.unlink()
+            self.skill_index.invalidate(sidecar)
+        self.skill_index.invalidate(path)
+        updated = self._find_skill(skill["id"], data.get("project"), preview=True)
+        self._archive_skill(updated, "edit")
+        return self._read_skill(skill["id"], data.get("project"), preview=True)
+
+    def restore_skill(self, data):
+        skill = self._find_skill(data["id"], data.get("project"), preview=True)
+        revision = data.get("revision")
+        if not isinstance(revision, str) or not re.fullmatch(r"[a-f0-9]{64}", revision):
+            raise ValueError("Supply a saved skill revision.")
+        folder = self._version_root(skill["id"])
+        if _is_link(folder):
+            raise ValueError("Skill version history cannot be linked.")
+        for path in sorted(folder.glob("*.json"), reverse=True):
+            if _is_link(path) or path.stat().st_size > 2 * 1024 * 1024:
+                continue
+            item = json.loads(path.read_text(encoding="utf-8"))
+            if item.get("revision") == revision:
+                edit = {**data, "text": item["text"]}
+                edit["manifest"] = item.get("manifest") or None
+                return self.edit_skill(edit)
+        raise ValueError("Saved skill revision was not found.")
+
+    def reset_skill(self, data):
+        skill = self._find_skill(data["id"], data.get("project"), preview=True)
+        if not skill.get("builtin"):
+            raise ValueError("Only bundled Forge skills can reset to the shipped version.")
+        if data.get("expected_revision") != skill["revision"]:
+            raise ValueError("Skill changed since you opened it. Reload before resetting.")
+        self._archive_skill(skill, "before reset")
+        source = ASSET_ROOT / "skills" / skill["library_id"]
+        destination = Path(skill["path"]).parent
+        from forge_library import safe_directory
+        targets = []
+        for path in source.rglob("*"):
+            if path.is_file() and not _is_link(path):
+                target = destination / path.relative_to(source)
+                safe_directory(target.parent, self.root)
+                if _is_link(target):
+                    raise ValueError("Bundled skill cannot reset a linked resource.")
+                targets.append((target, path.read_bytes()))
+        for target, content in targets:
+            atomic_bytes(target, content)
+        self.skill_index.invalidate()
+        updated = self._find_skill(skill["id"], data.get("project"), preview=True)
+        self._archive_skill(updated, "reset")
+        return self._read_skill(skill["id"], data.get("project"), preview=True)
+
+    def active_skill_instructions(self, project=None, explicit=None, query="", context=None):
+        """Reload preferences, route cheaply and inject compact complete starters."""
         with self.lock:
-            return self._active_skill_instructions(project, explicit, query)
+            return self._active_skill_instructions(project, explicit, query, context)
 
-    def _active_skill_instructions(self, project=None, explicit=None, query=""):
-        selected = select_skills(self.discover_skills(project), explicit, query)
+    def _active_skill_instructions(self, project=None, explicit=None, query="", context=None):
+        context = dict(context or {})
+        if project and "project_type" not in context:
+            folder = Path(project.get("root", project.get("path", ""))) if isinstance(project, dict) else Path(project)
+            context["project_type"] = "web" if (folder / "package.json").is_file() else "python" if (folder / "pyproject.toml").is_file() or (folder / "requirements.txt").is_file() else ""
+        selected = select_skills(self.discover_skills(project), explicit, query, context)
         output, remaining, seen_content = [], 24000, set()
         for skill in selected:
             if remaining <= 0:
@@ -871,13 +1053,13 @@ class IntegrationHub:
             try:
                 item = self.read_skill(skill["id"], project)
             except (OSError, ValueError):
-                continue  # A disappearing/disabled package cannot stop a run.
-            digest = hashlib.sha256(item["text"].encode()).hexdigest()
-            if digest in seen_content:
                 continue
-            seen_content.add(digest)
+            if item["digest"] in seen_content:
+                continue
+            seen_content.add(item["digest"])
             bounded = item["text"][:min(6000, remaining)]
-            item.update(text=bounded, truncated=item["truncated"] or len(bounded) < len(item["text"]))
+            item.update(text=bounded, truncated=item["truncated"] or len(bounded) < len(item["text"]),
+                        selection_reason=skill["selection_reason"], selection_score=skill["selection_score"])
             remaining -= len(bounded)
             output.append(item)
         return output
@@ -1328,7 +1510,11 @@ class IntegrationHub:
         for slug in bundle["skills"]:
             skill = target / "skills" / slug
             skill.mkdir(parents=True)
-            shutil.copy2(ASSET_ROOT / "skills" / slug / "SKILL.md", skill / "SKILL.md")
+            for source in (ASSET_ROOT / "skills" / slug).rglob("*"):
+                if source.is_file() and not _is_link(source):
+                    destination = skill / source.relative_to(ASSET_ROOT / "skills" / slug)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
         shutil.copy2(ASSET_ROOT / "LICENSE", target / "LICENSE")
         _atomic_json(target / "plugin.json", {"name": bundle["id"], "description": bundle["description"],
                                              "interface": {"displayName": bundle["name"]},
@@ -1392,7 +1578,7 @@ class IntegrationHub:
                 entry_kind = entry.get("kind", "plugin")
                 base = {"id": entry.get("id") or source_id + ":" + str(index), "name": entry.get("name", "Package"),
                         "description": entry.get("description", ""), "kind": entry_kind,
-                        "category": entry.get("category", "Community"), "tags": entry.get("tags", []),
+                        "category": entry.get("category", "Community"), "bundle": entry.get("bundle"), "tags": entry.get("tags", []),
                         "source": entry_source, "source_id": source_id, "source_name": catalog["name"],
                         "catalog_name": catalog["name"], "license": entry.get("license", "Review package license"),
                         "reviewed": bool(builtin), "builtin": builtin, "version": entry.get("version", "unversioned"),

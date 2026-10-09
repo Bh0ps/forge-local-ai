@@ -1,1 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="16" fill="#191918"/><path d="M17 15h31L38 27H27v7h18L34 46h-7v10H17z" fill="#e87b46"/><path d="M27 15h21L38 27H27z" fill="#ffad75"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Forge smiling spark">
+  <rect width="256" height="256" rx="56" fill="#282039"/>
+  <path d="M126 37 C133 71 160 69 158 109 C170 101 176 89 174 77 C207 112 218 160 189 192 C161 223 105 226 72 197 C36 165 52 124 81 100 C72 125 88 137 94 121 C103 99 89 70 126 37 Z" fill="#FF985B"/>
+  <path d="M82 166 C93 198 160 205 187 172 C174 213 111 221 82 192 Z" fill="#FFCB79"/>
+  <ellipse cx="107" cy="149" rx="12" ry="16" fill="#FFF8EB"/>
+  <ellipse cx="151" cy="149" rx="12" ry="16" fill="#FFF8EB"/>
+  <ellipse cx="110" cy="151" rx="5" ry="8" fill="#282039"/>
+  <ellipse cx="148" cy="151" rx="5" ry="8" fill="#282039"/>
+  <path d="M113 176 C121 186 137 187 146 174" fill="none" stroke="#282039" stroke-width="6" stroke-linecap="round"/>
+  <path d="M195 36 L202 51 L218 58 L202 65 L195 81 L188 65 L172 58 L188 51 Z" fill="#C4A2FF"/>
+  <path d="M50 60 L54 70 L64 74 L54 78 L50 88 L46 78 L36 74 L46 70 Z" fill="#FFCB79"/>
+</svg>

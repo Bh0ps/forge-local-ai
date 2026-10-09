@@ -8,7 +8,7 @@ import time
 import pytest
 
 from forge_goal_review import (GoalReview, REVIEW_TOOLS, RESPONSE_FORMAT,
-                               invocation_artifacts, parse_verdict)
+                               assignment_files, invocation_artifacts, parse_verdict)
 from test_forge_core import Engine, call, finished, service
 
 
@@ -259,7 +259,8 @@ def test_actual_reviewer_reads_project_and_usage_is_separate_once(tmp_path):
         project = svc.create_project({'name': 'Fixture', 'path': str(folder)})
         reviewer = ReviewerFixture([{'tool_calls': [call('read_file', {'path': 'result.txt'})]}, reviewer_complete(svc)])
         configure(svc, reviewer)
-        svc.core.rounds = [mark_complete(svc), {'content': 'Implementation completed.'}]
+        svc.core.rounds = [{'tool_calls': [call('read_file', {'path': 'result.txt'})]},
+                           mark_complete(svc), {'content': 'Implementation completed.'}]
         goal = svc.goal_create({'text': 'Inspect implementation.\nVerify results.', 'project_id': project['id']})
         run = svc.goal_resume({'id': goal['id']})
         result = finished(svc, run)
@@ -275,7 +276,7 @@ def test_actual_reviewer_reads_project_and_usage_is_separate_once(tmp_path):
         with svc.store._connection() as db:
             rows = [dict(row) for row in db.execute('SELECT * FROM usage')]
         assert len([row for row in rows if row['purpose'] == 'goal_review']) == 2
-        assert len([row for row in rows if row['purpose'] == 'main']) == 2
+        assert len([row for row in rows if row['purpose'] == 'main']) == 3
     finally:
         svc.shutdown()
 
@@ -327,17 +328,25 @@ def test_pause_cancels_cloud_review_and_preserves_parent_request(tmp_path):
 def completed_review_child(svc, run, answer, status='complete'):
     reviewer = GoalReview(svc.jobs)
     goal, packet, fingerprint, artifacts = reviewer.snapshot(run, answer)
+    sources = assignment_files(svc.store, {run['id']})
+    packet_artifact = svc.store.artifact(packet)
+    evidence_ids = artifacts + [packet['candidate_answer']['id']]
     child = svc.jobs.start({'text': 'Review the fixture evidence.', 'parent_id': run['id'],
         'goal_id': run['goal_id'], 'provider_id': 'openrouter', 'model': 'openrouter/free',
         'mode': 'goal_review', 'readonly': True, 'agent_tools': list(REVIEW_TOOLS),
-        'memory_enabled': False, 'memory_suggestions': False})
+        'memory_enabled': False, 'memory_suggestions': False,
+        'review_artifacts': artifacts + [packet_artifact], 'review_evidence_ids': evidence_ids,
+        'cloud_scope': {'files': sources, 'artifacts': artifacts + [packet_artifact],
+                        'attachments': [], 'goal_id': goal['id'], 'web': False}})
     evidence = artifacts[-1] if artifacts else packet['candidate_answer']['id']
     value = verdict(goal['tasks'], evidence, status)
     svc.store.add_message(child['chat_id'], 'assistant', json.dumps(value))
     svc.store.update_run(child['id'], status='completed')
     pending = {'fingerprint': fingerprint, 'answer': answer, 'review_run_id': child['id'],
-        'attempt': 1, 'evidence_artifact': svc.store.artifact(packet), 'verdict': value,
+        'attempt': 1, 'evidence_artifact': packet_artifact, 'verdict': value,
         'revision': 1, 'review': {'status': status, 'attempt': 1, 'review_run_id': child['id']}}
+    if svc.jobs.workflow.enabled(run):
+        pending['workflow_snapshot'] = svc.jobs.workflow.review_snapshot(run, sources)
     return svc.store.update_run(run['id'], review_candidate=pending, review_pending=True,
         review_attempt=1, status='paused'), child
 
@@ -547,6 +556,12 @@ def test_crash_after_complete_verdict_before_parent_completion_never_repeats_wri
         assert result['status'] == 'paused' and 'Synthetic interruption' in result['recovery']
         assert svc.store.run(run['id'])['review_pending']
         assert svc.store.run(run['id'])['review_candidate']['verdict']['verdict'] == 'complete'
+        pending = svc.store.run(run['id'])['review_candidate']
+        # Publishing host receipts must not mutate the candidate that was
+        # reviewed, otherwise restart would discard the valid saved verdict.
+        assert GoalReview(svc.jobs).snapshot(svc.store.run(run['id']), pending['answer'])[2] == pending['fingerprint']
+        receipts = svc.store.run(run['id'])['verification_feedback']['receipts']
+        assert any(receipt.get('producer_type') == 'independent_review' for receipt in receipts.values())
         counts = (len(svc.core.requests), len(remote.requests))
         monkeypatch.setattr(svc.store, 'save_goal', previous_save)
         resumed = svc.jobs.resume(run['id'])

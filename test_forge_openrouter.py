@@ -364,6 +364,9 @@ def test_remote_compaction_rate_limit_is_not_automatically_retried(env, monkeypa
     transport(monkeypatch, handler)
     run = env.service.jobs.start({'text': 'Synthetic compaction request.', 'model': FREE_ROUTER, 'provider_id': 'openrouter', 'context': 4096})
     run = env.service.store.run(run['id'])
+    # Scoped compaction summarizes completed assignment work, not the pinned
+    # current request or unrelated earlier conversation.
+    env.service.store.add_message(run['chat_id'],'assistant','Completed bounded synthetic research; keep its source reference.')
     compacted = env.service.jobs._compact(run, [], {'cancel': threading.Event()}, force=True)
     assert compacted['summary'].startswith('Deterministic checkpoint.')
     assert len(calls) == 1, 'A remote quota failure must not consume additional automatic compaction requests.'

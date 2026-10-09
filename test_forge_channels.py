@@ -95,7 +95,7 @@ def test_opt_in_configuration_contains_only_credential_reference_and_getme_is_ex
     assert 'token' not in saved and saved['credential_ref'] in env.vault.values
     connected = env.manager.test(config['id'])
     assert connected['bot']['username'] == 'forge_fixture_bot'
-    assert [c[0] for c in env.bot.calls] == ['getMe']
+    assert [c[0] for c in env.bot.calls] == ['getMe','setMyCommands']
 
 
 def test_pairing_requires_local_approval_and_binds_sender_and_chat(env):

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "backend",
+  "phases": [
+    "discover",
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "data",
+    "analysis"
+  ],
+  "triggers": [
+    "csv",
+    "tsv",
+    "dataset",
+    "analyze data",
+    "import data",
+    "export data",
+    "spreadsheet",
+    "chart"
+  ],
+  "recommended_tools": [
+    "read_file",
+    "run_command",
+    "artifact_read"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

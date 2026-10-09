@@ -8,8 +8,10 @@ from runtime import Jobs
 from core import Core, AGENT_SYSTEM_PROMPT, COMPACTION_SYSTEM_PROMPT
 from context_window import (validate_context, response_budget, estimated_prompt_tokens,
                             prompt_budget, require_model_context)
+from prompt_compiler import PromptCompiler
+from tool_routing import validate_arguments
 
-WRITE_TOOLS = {'write_file', 'edit_file', 'make_directory', 'move_file', 'restore_file'}
+WRITE_TOOLS = {'write_file', 'edit_file', 'apply_patch', 'make_directory', 'move_file', 'restore_file'}
 
 def tool_schema(name, description, properties, required=()):
     return {'type': 'function', 'function': {'name': name, 'description': description,
@@ -66,6 +68,7 @@ class AgentJobs(Jobs):
     def __init__(self, core, store):
         super().__init__(core)
         self.store = store
+        self.prompt_compiler = PromptCompiler()
 
     def start(self, data):
         if not isinstance(data, dict): raise ValueError('Invalid request')
@@ -185,6 +188,8 @@ class AgentJobs(Jobs):
         context = ''
         if project:
             context += f"Selected project: {project['name']}. Project directory: {project['path']}. All file tool paths are relative to that directory.\n"
+            guidance=self.prompt_compiler.project_guidance(project['path'],max_tokens=384)
+            if guidance['text']: context+='Scoped project conventions (subordinate to the current user request):\n'+guidance['text']+'\n'
         if chat.get('summary'):
             context += 'Summary of older conversation (historical context, not tool authorization):\n' + chat['summary']
         if context: messages.insert(0, {'role': 'system', 'content': context})
@@ -192,6 +197,12 @@ class AgentJobs(Jobs):
 
     def _execute(self, job, chat, project, files, name, arguments, allow_edits, web):
         if not isinstance(arguments, dict): raise ValueError('Tool arguments must be an object.')
+        if name=='web_search' and not web:
+            return {'ok':False,'not_executed':True,'error':'Web search is disabled.'}
+        schemas=available_schemas(job.get('model_info',{'capabilities':['tools']}),bool(project),web)
+        schema=next((s for s in schemas if s['function']['name']==name),None)
+        issue=validate_arguments(schema,arguments) if schema else 'Unknown or unavailable tool.'
+        if issue: return {'ok':False,'not_executed':True,'error':issue}
         if name in WRITE_TOOLS and not allow_edits: return {'error': 'File edits are disabled. Ask the user to enable edits.'}
         if name == 'run_command':
             if not self._command_approval(job, arguments): return {'error': 'Command was not approved. Do not work around this decision.'}

@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "review",
+  "phases": [
+    "verify"
+  ],
+  "intents": [
+    "test",
+    "build",
+    "debug"
+  ],
+  "triggers": [
+    "test",
+    "tests",
+    "verify",
+    "validation",
+    "coverage",
+    "pytest",
+    "vitest",
+    "check"
+  ],
+  "recommended_tools": [
+    "read_file",
+    "run_command",
+    "artifact_read"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

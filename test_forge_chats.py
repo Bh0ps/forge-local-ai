@@ -48,7 +48,7 @@ def test_schema4_backup_is_consistent_and_keeps_chat_project_identity(tmp_path):
     upgraded=ForgeStore(home)
     assert upgraded.get_chat(chat['id'])['archived'] is False
     assert upgraded.get_project(proj['id'])['path']==str(folder)
-    backups=list((home/'backups').glob('pre-schema-5-*/forge.sqlite3'))
+    backups=list((home/'backups').glob('pre-schema-6-*/forge.sqlite3'))
     assert len(backups)==1
     with sqlite3.connect(backups[0]) as snapshot:
         assert snapshot.execute('SELECT MAX(version) FROM forge_migrations').fetchone()[0]==3
@@ -56,7 +56,7 @@ def test_schema4_backup_is_consistent_and_keeps_chat_project_identity(tmp_path):
         assert snapshot.execute('SELECT content FROM messages').fetchone()[0]=='Synthetic old history'
         assert 'archived' not in [row[1] for row in snapshot.execute('PRAGMA table_info(chats)')]
     ForgeStore(home)
-    assert len(list((home/'backups').glob('pre-schema-5-*/forge.sqlite3')))==1
+    assert len(list((home/'backups').glob('pre-schema-6-*/forge.sqlite3')))==1
 
 
 def test_archive_restore_lists_boolean_state_and_prevents_running_or_resuming(service):

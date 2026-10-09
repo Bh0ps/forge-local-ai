@@ -12,9 +12,9 @@ from native_browser import BrowserGuard, WebView2Page
 PANEL_ID = 'forge-browser-panel'
 
 
-def validate_bounds(request, snapshot, client):
+def validate_bounds(request, snapshot, client, panel_id=PANEL_ID):
     """CSS requests are claims; bounds always come from the host's DOM snapshot."""
-    if not isinstance(request, dict) or request.get('panel_id', PANEL_ID) != PANEL_ID:
+    if panel_id not in (PANEL_ID, 'forge-preview-panel') or not isinstance(request, dict) or request.get('panel_id', panel_id) != panel_id:
         raise BrowserGuard('Unknown native browser panel.')
     if not isinstance(snapshot, dict) or not snapshot.get('visible') or snapshot.get('hud') or snapshot.get('modal'):
         raise BrowserGuard('Open the Browser panel in the full Forge workspace.')
@@ -48,12 +48,16 @@ class EmbeddedWebView2Page(WebView2Page):
     """Shares the reviewed DOM tools, with no remote Python bridge or host objects."""
     embedded = True
 
-    def __init__(self, owner, home, ui_dispatch, changed):
+    def __init__(self, owner, home, ui_dispatch, changed, panel_id=PANEL_ID,
+                 profile_name='native-browser-profile', navigation_guard=None, diagnostics=False):
         from pathlib import Path
         from webview.platforms.edgechromium import WebView2, CoreWebView2CreationProperties
         from System.Drawing import Color
         from System.Windows.Forms import Panel, TextBox, DockStyle
         self.ui, self.changed, self.owner = ui_dispatch, changed, owner
+        if panel_id not in (PANEL_ID, 'forge-preview-panel') or profile_name not in ('native-browser-profile', 'native-preview-profile'):
+            raise BrowserGuard('Unknown embedded browser profile.')
+        self.panel_id, self.navigation_guard, self.capture_diagnostics = panel_id, navigation_guard, diagnostics
         self.event = threading.Event()
         self.error = None
         self.visible = False
@@ -65,7 +69,7 @@ class EmbeddedWebView2Page(WebView2Page):
         self.container.Dock = getattr(DockStyle, 'None')
         self.control = WebView2()
         props = CoreWebView2CreationProperties()
-        props.UserDataFolder = str(Path(home) / 'state/native-browser-profile')
+        props.UserDataFolder = str(Path(home) / 'state' / profile_name)
         self.control.CreationProperties = props
         self.control.Dock = DockStyle.Fill
         self.container.Controls.Add(self.control)
@@ -100,13 +104,13 @@ class EmbeddedWebView2Page(WebView2Page):
 
     def _layout(self):
         return self._main_evaluate(r'''(() => {
-         const panel=document.getElementById('forge-browser-panel');
-         if(!panel||panel.getAttribute('data-forge-browser-panel')!=='forge-browser-panel')return {visible:false};
+         const id=__PANEL_ID__,panel=document.getElementById(id);
+         if(!panel||panel.getAttribute('data-forge-browser-panel')!==id)return {visible:false};
          const r=panel.getBoundingClientRect(),s=getComputedStyle(panel);
          return {visible:r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden',
            hud:!!document.querySelector('.app.hud'),modal:!!document.querySelector('.modal-backdrop, dialog[open]'),
            viewport:{width:innerWidth,height:innerHeight},rect:{x:r.x,y:r.y,width:r.width,height:r.height}};
-        })()''')
+        })()'''.replace('__PANEL_ID__', json.dumps(self.panel_id)))
 
     def bind(self, request=None):
         snapshot = self._layout()
@@ -114,7 +118,7 @@ class EmbeddedWebView2Page(WebView2Page):
             from System.Drawing import Rectangle
             main = owner.webview
             client = (main.Left, main.Top, main.ClientSize.Width, main.ClientSize.Height)
-            bounds = validate_bounds(request or {'panel_id':PANEL_ID}, snapshot, client)
+            bounds = validate_bounds(request or {'panel_id':self.panel_id}, snapshot, client, self.panel_id)
             self.container.Bounds = Rectangle(*bounds)
             self.container.BringToFront()
             self.container.Visible = bool(owner.Visible)
@@ -131,8 +135,8 @@ class EmbeddedWebView2Page(WebView2Page):
         snapshot = self._layout()
         def check(owner):
             main = owner.webview
-            bounds = validate_bounds({'panel_id':PANEL_ID}, snapshot,
-                (main.Left, main.Top, main.ClientSize.Width, main.ClientSize.Height))
+            bounds = validate_bounds({'panel_id':self.panel_id}, snapshot,
+                (main.Left, main.Top, main.ClientSize.Width, main.ClientSize.Height), self.panel_id)
             if not owner.Visible or bounds != self.bound:
                 self._hide_ui()
                 raise BrowserGuard('Browser panel changed. Inspect again after reopening it.')
@@ -143,7 +147,8 @@ class EmbeddedWebView2Page(WebView2Page):
 
     def show(self, activate=True):
         if not self._layout().get('visible'):
-            self._main_evaluate("window.dispatchEvent(new CustomEvent('forge:browser-open'));true")
+            event = 'forge:preview-open' if self.panel_id == 'forge-preview-panel' else 'forge:browser-open'
+            self._main_evaluate('window.dispatchEvent(new CustomEvent('+json.dumps(event)+'));true')
             deadline = time.monotonic()+3
             while time.monotonic()<deadline:
                 if self._layout().get('visible'): break
@@ -154,6 +159,23 @@ class EmbeddedWebView2Page(WebView2Page):
 
     def focused(self):
         return self.ui(lambda owner: bool(self.visible and owner.Visible and self.control.ContainsFocus))
+
+    def set_viewport(self, width=None, height=None):
+        self.preflight()
+        def resize(owner):
+            from System.Drawing import Rectangle
+            from System.Windows.Forms import DockStyle
+            if width is None:
+                self.control.Dock = DockStyle.Fill
+                return {'width': None, 'height': None, 'mode': 'fit'}
+            scale = float(getattr(owner, 'DeviceDpi', 96)) / 96
+            w, h = round(width * scale), round(height * scale)
+            if w > self.container.ClientSize.Width or h > self.container.ClientSize.Height:
+                raise BrowserGuard('This viewport needs a larger preview panel.')
+            self.control.Dock = getattr(DockStyle, 'None')
+            self.control.Bounds = Rectangle((self.container.ClientSize.Width-w)//2, 0, w, h)
+            return {'width': width, 'height': height, 'mode': 'fixed'}
+        return self.ui(resize)
 
     def _hide_ui(self):
         self.container.Visible = False

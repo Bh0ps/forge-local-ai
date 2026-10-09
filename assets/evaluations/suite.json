@@ -1,0 +1,293 @@
+{
+  "schema_version": 1,
+  "name": "Forge local execution evaluation",
+  "categories": {
+    "app": 12,
+    "broader": 4,
+    "continuity": 4
+  },
+  "tasks": [
+    {
+      "id": "todo-flow",
+      "category": "app",
+      "prompt": "Build a task list. Submitting a trimmed nonempty task adds a row with a labeled checkbox. Checking it updates the remaining count. All/Active/Done filters show the correct rows; blank tasks must not be added. Preserve the public element IDs as the integration contract. Implement in index.html/styles.css/app.js using plain browser code without dependencies or network calls. Keep a useful accessible interface.",
+      "files": {
+        "index.html": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Tasks</title><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><h1>Tasks</h1><form id=\"task-form\"><label for=\"task-input\">Task</label><input id=\"task-input\"><button>Add task</button></form><label for=\"filter\">Show</label><select id=\"filter\"><option value=\"all\">All</option><option value=\"active\">Active</option><option value=\"done\">Done</option></select><ul id=\"task-list\"></ul><p id=\"remaining\">0 remaining</p></main><script src=\"app.js\"></script></body></html>",
+        "styles.css": "body{font-family:system-ui;color:#172033;background:#ffffff}main{max-width:900px;margin:auto;padding:24px}button,input,select{font:inherit}button{cursor:pointer}\n",
+        "app.js": "// Implement the requested user flow here.\n"
+      },
+      "oracle": "todo",
+      "reference_files": {
+        "app.js": "const tasks=[];const form=document.querySelector('#task-form'),input=document.querySelector('#task-input'),filter=document.querySelector('#filter');function render(){document.querySelector('#task-list').replaceChildren();tasks.forEach((task,i)=>{if(filter.value==='active'&&task.done||filter.value==='done'&&!task.done)return;const li=document.createElement('li'),label=document.createElement('label'),box=document.createElement('input');box.type='checkbox';box.checked=task.done;box.onchange=()=>{task.done=box.checked;render()};label.append(box,document.createTextNode(task.text));li.append(label);document.querySelector('#task-list').append(li)});document.querySelector('#remaining').textContent=tasks.filter(t=>!t.done).length+' remaining'}form.onsubmit=e=>{e.preventDefault();if(input.value.trim()){tasks.push({text:input.value.trim(),done:false});input.value='';render()}};filter.onchange=render;render();"
+      }
+    },
+    {
+      "id": "signup-validation",
+      "category": "app",
+      "prompt": "Implement client validation: a simple email must have text before and after @ and a dot in its domain; password needs at least eight characters. Invalid submissions show a useful error and aria-invalid on the invalid field; valid submissions clear errors and announce success without sending a network request. Preserve the public element IDs as the integration contract. Implement in index.html/styles.css/app.js using plain browser code without dependencies or network calls. Keep a useful accessible interface.",
+      "files": {
+        "index.html": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Create account</title><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><h1>Create account</h1><form id=\"signup\"><label for=\"email\">Email</label><input id=\"email\" type=\"text\"><label for=\"password\">Password</label><input id=\"password\" type=\"password\"><button>Create account</button></form><p id=\"error\" role=\"alert\"></p><p id=\"success\" role=\"status\"></p></main><script src=\"app.js\"></script></body></html>",
+        "styles.css": "body{font-family:system-ui;color:#172033;background:#ffffff}main{max-width:900px;margin:auto;padding:24px}button,input,select{font:inherit}button{cursor:pointer}\n",
+        "app.js": "// Implement the requested user flow here.\n"
+      },
+      "oracle": "signup",
+      "reference_files": {
+        "app.js": "document.querySelector('#signup').onsubmit=e=>{e.preventDefault();const email=document.querySelector('#email'),password=document.querySelector('#password'),validEmail=/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email.value.trim()),validPassword=password.value.length>=8;email.setAttribute('aria-invalid',String(!validEmail));password.setAttribute('aria-invalid',String(!validPassword));document.querySelector('#error').textContent=!validEmail?'Enter a valid email.':!validPassword?'Use at least eight characters.':'';document.querySelector('#success').textContent=validEmail&&validPassword?'Account created for '+email.value.trim():''};"
+      }
+    },
+    {
+      "id": "catalog-filter",
+      "category": "app",
+      "prompt": "Render products Alder Lamp (£40), Blue Mug (£12), Cedar Desk (£120), Amber Mug (£8). Search is case-insensitive substring matching. Name order and ascending price order must work on the filtered results. Show a useful empty state for zero matches. Preserve the public element IDs as the integration contract. Implement in index.html/styles.css/app.js using plain browser code without dependencies or network calls. Keep a useful accessible interface.",
+      "files": {
+        "index.html": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Catalog</title><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><h1>Catalog</h1><label for=\"search\">Search products</label><input id=\"search\"><label for=\"sort\">Sort</label><select id=\"sort\"><option value=\"name\">Name</option><option value=\"price\">Price ascending</option></select><ul id=\"products\"></ul><p id=\"empty\" hidden>No matching products</p></main><script src=\"app.js\"></script></body></html>",
+        "styles.css": "body{font-family:system-ui;color:#172033;background:#ffffff}main{max-width:900px;margin:auto;padding:24px}button,input,select{font:inherit}button{cursor:pointer}\n",
+        "app.js": "// Implement the requested user flow here.\n"
+      },
+      "oracle": "catalog",
+      "reference_files": {
+        "app.js": "const products=[{name:'Alder Lamp',price:40},{name:'Blue Mug',price:12},{name:'Cedar Desk',price:120},{name:'Amber Mug',price:8}];function render(){const query=document.querySelector('#search').value.toLowerCase(),sort=document.querySelector('#sort').value;const rows=products.filter(p=>p.name.toLowerCase().includes(query)).sort((a,b)=>sort==='price'?a.price-b.price:a.name.localeCompare(b.name));document.querySelector('#products').replaceChildren(...rows.map(p=>{const li=document.createElement('li');li.textContent=p.name+' £'+p.price;return li}));document.querySelector('#empty').hidden=rows.length!==0}document.querySelector('#search').oninput=render;document.querySelector('#sort').onchange=render;render();"
+      }
+    },
+    {
+      "id": "cart-totals",
+      "category": "app",
+      "prompt": "Make the basket work. Adding a mug or lamp increases its quantity; each cart row exposes data-sku with its SKU, a labeled number input for quantity, and a remove button. Changing quantity updates totals exactly to two decimal places. Removing the final row returns an empty basket with £0.00. Preserve the public element IDs as the integration contract. Implement in index.html/styles.css/app.js using plain browser code without dependencies or network calls. Keep a useful accessible interface.",
+      "files": {
+        "index.html": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Basket</title><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><h1>Basket</h1><button data-add=\"mug\">Add mug (£12.50)</button><button data-add=\"lamp\">Add lamp (£40)</button><ul id=\"cart\"></ul><p id=\"total\">£0.00</p></main><script src=\"app.js\"></script></body></html>",
+        "styles.css": "body{font-family:system-ui;color:#172033;background:#ffffff}main{max-width:900px;margin:auto;padding:24px}button,input,select{font:inherit}button{cursor:pointer}\n",
+        "app.js": "// Implement the requested user flow here.\n"
+      },
+      "oracle": "cart",
+      "reference_files": {
+        "app.js": "const prices={mug:1250,lamp:4000},cart={};function render(){const list=document.querySelector('#cart');list.replaceChildren();Object.entries(cart).forEach(([sku,qty])=>{const li=document.createElement('li');li.dataset.sku=sku;const label=document.createElement('label');label.textContent=sku+' quantity ';const input=document.createElement('input');input.type='number';input.min='1';input.value=qty;input.oninput=()=>{const value=Number(input.value);if(Number.isInteger(value)&&value>=1){cart[sku]=value;render()}};label.append(input);const remove=document.createElement('button');remove.textContent='Remove '+sku;remove.onclick=()=>{delete cart[sku];render()};li.append(label,remove);list.append(li)});document.querySelector('#total').textContent='£'+(Object.entries(cart).reduce((sum,[sku,qty])=>sum+prices[sku]*qty,0)/100).toFixed(2)}document.querySelectorAll('[data-add]').forEach(button=>button.onclick=()=>{cart[button.dataset.add]=(cart[button.dataset.add]||0)+1;render()});render();"
+      }
+    },
+    {
+      "id": "theme-persistence",
+      "category": "app",
+      "prompt": "Implement a light/dark switch. Set body data-theme to light by default and restore a saved localStorage theme. The button toggles light/dark, persists the theme key and has an accessible name stating the next action. Use readable foreground/background colors in both themes. Preserve the public element IDs as the integration contract. Implement in index.html/styles.css/app.js using plain browser code without dependencies or network calls. Keep a useful accessible interface.",
+      "files": {
+        "index.html": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Appearance</title><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><h1>Appearance</h1><button id=\"theme-button\">Switch theme</button><p>Readable content in both themes.</p></main><script src=\"app.js\"></script></body></html>",
+        "styles.css": "body{font-family:system-ui;color:#172033;background:#ffffff}main{max-width:900px;margin:auto;padding:24px}button,input,select{font:inherit}button{cursor:pointer}\n",
+        "app.js": "// Implement the requested user flow here.\n"
+      },
+      "oracle": "theme",
+      "reference_files": {
+        "app.js": "const button=document.querySelector('#theme-button');function apply(theme){document.body.dataset.theme=theme;document.body.style.backgroundColor=theme==='dark'?'#172033':'#ffffff';document.body.style.color=theme==='dark'?'#ffffff':'#172033';button.textContent=theme==='dark'?'Switch to light theme':'Switch to dark theme'}apply(localStorage.getItem('theme')==='dark'?'dark':'light');button.onclick=()=>{const theme=document.body.dataset.theme==='dark'?'light':'dark';localStorage.setItem('theme',theme);apply(theme)};"
+      }
+    },
+    {
+      "id": "dialog-keyboard",
+      "category": "app",
+      "prompt": "Make the contact dialog open/close with its buttons. Opening moves focus into the dialog. Escape closes it; closing returns focus to Contact us. Keep hidden content out of the normal interaction flow. Preserve the public element IDs as the integration contract. Implement in index.html/styles.css/app.js using plain browser code without dependencies or network calls. Keep a useful accessible interface.",
+      "files": {
+        "index.html": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Contact</title><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><h1>Contact</h1><button id=\"open\">Contact us</button><div id=\"dialog\" role=\"dialog\" aria-label=\"Contact details\" aria-modal=\"true\" hidden><p>Email hello@example.test</p><button id=\"close\">Close contact details</button></div></main><script src=\"app.js\"></script></body></html>",
+        "styles.css": "body{font-family:system-ui;color:#172033;background:#ffffff}main{max-width:900px;margin:auto;padding:24px}button,input,select{font:inherit}button{cursor:pointer}\n",
+        "app.js": "// Implement the requested user flow here.\n"
+      },
+      "oracle": "dialog",
+      "reference_files": {
+        "app.js": "const dialog=document.querySelector('#dialog'),open=document.querySelector('#open'),close=document.querySelector('#close');function dismiss(){dialog.hidden=true;open.focus()}open.onclick=()=>{dialog.hidden=false;close.focus()};close.onclick=dismiss;document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!dialog.hidden){e.preventDefault();dismiss()}});"
+      }
+    },
+    {
+      "id": "tabs-keyboard",
+      "category": "app",
+      "prompt": "Implement accessible tabs with Overview initially selected. Exactly one tab has aria-selected true and tabIndex 0, and only its panel is visible. Clicks switch tabs. Left/Right arrows wrap through tabs and move focus. Preserve the public element IDs as the integration contract. Implement in index.html/styles.css/app.js using plain browser code without dependencies or network calls. Keep a useful accessible interface.",
+      "files": {
+        "index.html": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Project overview</title><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><h1>Project overview</h1><div role=\"tablist\" aria-label=\"Project sections\"><button role=\"tab\" id=\"overview-tab\" aria-controls=\"overview-panel\">Overview</button><button role=\"tab\" id=\"activity-tab\" aria-controls=\"activity-panel\">Activity</button><button role=\"tab\" id=\"settings-tab\" aria-controls=\"settings-panel\">Settings</button></div><section role=\"tabpanel\" id=\"overview-panel\">Overview content</section><section role=\"tabpanel\" id=\"activity-panel\">Activity content</section><section role=\"tabpanel\" id=\"settings-panel\">Settings content</section></main><script src=\"app.js\"></script></body></html>",
+        "styles.css": "body{font-family:system-ui;color:#172033;background:#ffffff}main{max-width:900px;margin:auto;padding:24px}button,input,select{font:inherit}button{cursor:pointer}\n",
+        "app.js": "// Implement the requested user flow here.\n"
+      },
+      "oracle": "tabs",
+      "reference_files": {
+        "app.js": "const tabs=[...document.querySelectorAll('[role=tab]')];function select(index,focus=false){tabs.forEach((tab,i)=>{tab.setAttribute('aria-selected',String(i===index));tab.tabIndex=i===index?0:-1;document.getElementById(tab.getAttribute('aria-controls')).hidden=i!==index});if(focus)tabs[index].focus()}tabs.forEach((tab,i)=>{tab.onclick=()=>select(i);tab.onkeydown=e=>{if(e.key==='ArrowRight'||e.key==='ArrowLeft'){e.preventDefault();select((i+(e.key==='ArrowRight'?1:tabs.length-1))%tabs.length,true)}}});select(0);"
+      }
+    },
+    {
+      "id": "landing-accessibility",
+      "category": "app",
+      "prompt": "Improve the landing page with readable typography, clear spacing and a responsive service grid. Below a breakpoint of 768px or less the grid must become one column. Use semantic headings, named navigation and a labeled email field. Text contrast must be at least 4.5:1 and keyboard focus must be visibly styled. Keep the page local and dependency-free. Preserve the public element IDs as the integration contract. Implement in index.html/styles.css/app.js using plain browser code without dependencies or network calls. Keep a useful accessible interface.",
+      "files": {
+        "index.html": "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Alder Studio</title><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><h1>Alder Studio</h1><header><nav aria-label=\"Primary\"><a href=\"#services\">Services</a><a href=\"#contact\">Contact</a></nav></header><section><h2>Thoughtful websites for small teams</h2><a href=\"#contact\" id=\"cta\">Discuss your project</a></section><section id=\"services\"><h2>Services</h2><div class=\"service-grid\"><article>Design</article><article>Development</article><article>Support</article></div></section><section id=\"contact\"><h2>Contact</h2><form><label for=\"contact-email\">Email</label><input id=\"contact-email\" type=\"email\"><button>Send enquiry</button></form></section></main><script src=\"app.js\"></script></body></html>",
+        "styles.css": "body{font-family:system-ui;color:#172033;background:#ffffff}main{max-width:900px;margin:auto;padding:24px}button,input,select{font:inherit}button{cursor:pointer}\n",
+        "app.js": "// Implement the requested user flow here.\n"
+      },
+      "oracle": "landing",
+      "reference_files": {
+        "app.js": "",
+        "styles.css": "body{font-family:system-ui;color:#172033;background:#ffffff}main{max-width:900px;margin:auto;padding:24px}button,input{font:inherit}.service-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px}a:focus-visible,button:focus-visible,input:focus-visible{outline:3px solid #1645d5;outline-offset:3px}@media(max-width:768px){.service-grid{grid-template-columns:1fr}main{padding:16px}}\n"
+      }
+    },
+    {
+      "id": "api-pagination",
+      "category": "app",
+      "prompt": "Fix service.py paginate(records,page,page_size). Return items/page/total/total_pages, preserve input order and do not mutate records. Empty total_pages is 0. Raise ValueError for page<1, noninteger/bool page, or noninteger/bool page_size outside 1..100. Out-of-range pages return an empty items list. Use only pure Python.",
+      "files": {
+        "service.py": "def paginate(records, page, page_size):\n    return {'items': records, 'page': page, 'total': len(records), 'total_pages': 1}\n"
+      },
+      "oracle": "pagination",
+      "reference_files": {
+        "service.py": "def paginate(records,page,page_size):\n    if type(page) is not int or page<1 or type(page_size) is not int or not 1<=page_size<=100: raise ValueError('Invalid page')\n    total=len(records)\n    return {'items':list(records[(page-1)*page_size:page*page_size]),'page':page,'total':total,'total_pages':(total+page_size-1)//page_size}\n"
+      }
+    },
+    {
+      "id": "pricing-boundaries",
+      "category": "app",
+      "prompt": "Implement pricing.py total_cents(items,coupon=None). Items have integer nonnegative unit_cents and integer quantity>=1; booleans are invalid. Sum integer cents. Coupon SAVE10 applies ten percent discount rounded half up to the nearest cent; unknown nonempty coupons raise ValueError. Empty items total 0. Do not mutate inputs; use pure Python.",
+      "files": {
+        "pricing.py": "def total_cents(items, coupon=None):\n    return 0\n"
+      },
+      "oracle": "pricing",
+      "reference_files": {
+        "pricing.py": "def total_cents(items,coupon=None):\n    total=0\n    for item in items:\n        price,qty=item['unit_cents'],item['quantity']\n        if type(price) is not int or price<0 or type(qty) is not int or qty<1: raise ValueError('Invalid line')\n        total+=price*qty\n    if coupon not in (None,'','SAVE10'): raise ValueError('Unknown coupon')\n    return (total*90+50)//100 if coupon=='SAVE10' else total\n"
+      }
+    },
+    {
+      "id": "data-validation",
+      "category": "app",
+      "prompt": "Implement normalizer.py normalize_people(rows). For each row trim name, lowercase/trim email and convert age to an integer in 0..120. Name must be nonempty, email must contain @ and a dot in its domain, and age must contain only integer text. Keep first valid occurrence of an email; reject duplicates. Return {'people':[{'name','email','age'}], 'issues':[{'row':one-based index,'reason':nonempty explanation}]}. Preserve order and inputs. Use pure Python.",
+      "files": {
+        "normalizer.py": "def normalize_people(rows):\n    return {'people': rows, 'issues': []}\n"
+      },
+      "oracle": "people",
+      "reference_files": {
+        "normalizer.py": "def normalize_people(rows):\n    people,issues,seen=[],[],set()\n    for index,row in enumerate(rows,1):\n        name=str(row.get('name','')).strip(); email=str(row.get('email','')).strip().lower(); raw=str(row.get('age','')).strip()\n        valid=name and '@' in email and '.' in email.split('@')[-1] and raw.isdigit() and 0<=int(raw)<=120 and email not in seen\n        if not valid: issues.append({'row':index,'reason':'Invalid or duplicate record'}); continue\n        seen.add(email); people.append({'name':name,'email':email,'age':int(raw)})\n    return {'people':people,'issues':issues}\n"
+      }
+    },
+    {
+      "id": "sqlite-upgrade",
+      "category": "app",
+      "prompt": "Write migration.sql for an existing SQLite accounts(id INTEGER PRIMARY KEY,name TEXT NOT NULL) table containing existing rows. Add nullable email with uniqueness for non-null email and active INTEGER NOT NULL DEFAULT 1 constrained to 0 or 1. Preserve IDs/names. The migration must support inserting rows with no email and reject duplicate non-null emails and active=2. Do not drop the table or write any database files; only edit migration.sql.",
+      "files": {
+        "migration.sql": "-- Add the requested schema changes without dropping existing data.\n"
+      },
+      "oracle": "migration",
+      "reference_files": {
+        "migration.sql": "ALTER TABLE accounts ADD COLUMN email TEXT;\nALTER TABLE accounts ADD COLUMN active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1));\nCREATE UNIQUE INDEX accounts_email_unique ON accounts(email);\n"
+      }
+    },
+    {
+      "id": "sales-analysis",
+      "category": "broader",
+      "prompt": "Read orders.csv and produce report.csv with columns region,total,orders, sorted alphabetically by region. Include only paid orders, total decimal amounts to exactly two decimal places, and count orders. Preserve orders.csv. Do not invent records.",
+      "files": {
+        "orders.csv": "region,amount,status\nEast,10.00,paid\nWest,7.50,paid\nEast,3.25,refunded\nNorth,2.00,paid\nWest,1.25,paid\nEast,5.00,paid\n"
+      },
+      "oracle": "sales",
+      "reference_files": {
+        "report.csv": "region,total,orders\nEast,15.00,2\nNorth,2.00,1\nWest,8.75,2\n"
+      }
+    },
+    {
+      "id": "source-comparison",
+      "category": "broader",
+      "prompt": "Read both local setup manuals. Create requirements.json with python,node,port,authentication,source. Resolve conflicts using the newer dated manual. Include the actual source filename for every resolved value in source (a map with the same four keys). Use evidence from the files, not outside knowledge.",
+      "files": {
+        "setup-2024.txt": "Published 2024-04-02. Python 3.11, Node 20+, coordinator port 8080, no pairing required for local use.\n",
+        "setup-2026.txt": "Published 2026-06-12. This manual supersedes 2024 instructions. Python 3.12, Node 22.12+, coordinator port 8081, pairing is required for browser access.\n"
+      },
+      "oracle": "sources",
+      "reference_files": {
+        "requirements.json": "{\"python\": \"3.12\", \"node\": \"22.12+\", \"port\": 8081, \"authentication\": \"pairing required for browser access\", \"source\": {\"python\": \"setup-2026.txt\", \"node\": \"setup-2026.txt\", \"port\": \"setup-2026.txt\", \"authentication\": \"setup-2026.txt\"}}"
+      }
+    },
+    {
+      "id": "operational-runbook",
+      "category": "broader",
+      "prompt": "From operations.txt create runbook.json containing prerequisites (an array) and steps (an ordered array of operations). Operations use the exact documented IDs: stop,backup,migrate,verify,start. Include each once in the safe dependency order. Prerequisites must include the documented free disk space in MB as disk_space_mb, and never include the private credential value. Each step has operation and purpose. Preserve the source.",
+      "files": {
+        "operations.txt": "Upgrade dependencies: stop before backup; backup before migrate; migrate before verify; verify before start. Ensure disk_space_mb=500 and an available rollback copy. Private credential: example-do-not-export-739.\n"
+      },
+      "oracle": "runbook",
+      "reference_files": {
+        "runbook.json": "{\"prerequisites\": [{\"disk_space_mb\": 500}, {\"rollback_copy\": \"available\"}], \"steps\": [{\"operation\": \"stop\", \"purpose\": \"Stop writers\"}, {\"operation\": \"backup\", \"purpose\": \"Keep rollback evidence\"}, {\"operation\": \"migrate\", \"purpose\": \"Apply schema changes\"}, {\"operation\": \"verify\", \"purpose\": \"Check migration results\"}, {\"operation\": \"start\", \"purpose\": \"Resume the service\"}]}"
+      }
+    },
+    {
+      "id": "invoice-export",
+      "category": "broader",
+      "prompt": "Create invoice.csv from items.json with columns item,quantity,unit_price,line_total and a final TOTAL row (quantity/unit_price blank, grand total in line_total). Use exactly two decimal places, round line totals half up and use the sum of rounded lines as grand total. Preserve source items and correctly CSV-quote names containing commas.",
+      "files": {
+        "items.json": "[{\"item\": \"Desk, oak\", \"quantity\": 2, \"unit_price\": \"19.995\"}, {\"item\": \"Lamp\", \"quantity\": 3, \"unit_price\": \"7.125\"}]"
+      },
+      "oracle": "invoice",
+      "reference_files": {
+        "invoice.csv": "item,quantity,unit_price,line_total\n\"Desk, oak\",2,20.00,39.99\nLamp,3,7.13,21.38\nTOTAL,,,61.37\n"
+      }
+    },
+    {
+      "id": "restart-checkpoint",
+      "category": "continuity",
+      "injection": "restart",
+      "prompt": "Complete this tracked goal in two ordered stages. First read orders.csv and write normalized.json with all six rows as objects having region,amount (two-decimal string),status. Then create totals.json containing paid-only regional totals as objects with region,total (two-decimal string),orders; initially sort by region ascending. Preserve orders.csv. If a correct normalized.json already exists, inspect it and continue without rewriting the completed stage. Record goal evidence and finish both stages.",
+      "files": {
+        "orders.csv": "region,amount,status\nEast,10.00,paid\nWest,7.50,paid\nEast,3.25,refunded\nNorth,2.00,paid\nWest,1.25,paid\nEast,5.00,paid\n"
+      },
+      "oracle": "continuity",
+      "reference_files": {
+        "normalized.json": "[{\"region\": \"East\", \"amount\": \"10.00\", \"status\": \"paid\"}, {\"region\": \"West\", \"amount\": \"7.50\", \"status\": \"paid\"}, {\"region\": \"East\", \"amount\": \"3.25\", \"status\": \"refunded\"}, {\"region\": \"North\", \"amount\": \"2.00\", \"status\": \"paid\"}, {\"region\": \"West\", \"amount\": \"1.25\", \"status\": \"paid\"}, {\"region\": \"East\", \"amount\": \"5.00\", \"status\": \"paid\"}]",
+        "totals.json": "[{\"region\": \"East\", \"total\": \"15.00\", \"orders\": 2}, {\"region\": \"North\", \"total\": \"2.00\", \"orders\": 1}, {\"region\": \"West\", \"total\": \"8.75\", \"orders\": 2}]"
+      },
+      "tasks": [
+        "Write and verify normalized.json from all source rows.",
+        "Write and verify totals.json for paid regional totals."
+      ]
+    },
+    {
+      "id": "steering-retained",
+      "category": "continuity",
+      "injection": "steer",
+      "prompt": "Complete this tracked goal in two ordered stages. First read orders.csv and write normalized.json with all six rows as objects having region,amount (two-decimal string),status. Then create totals.json containing paid-only regional totals as objects with region,total (two-decimal string),orders; initially sort by region ascending. Preserve orders.csv. If a correct normalized.json already exists, inspect it and continue without rewriting the completed stage. Record goal evidence and finish both stages.",
+      "files": {
+        "orders.csv": "region,amount,status\nEast,10.00,paid\nWest,7.50,paid\nEast,3.25,refunded\nNorth,2.00,paid\nWest,1.25,paid\nEast,5.00,paid\n"
+      },
+      "oracle": "continuity",
+      "reference_files": {
+        "normalized.json": "[{\"region\": \"East\", \"amount\": \"10.00\", \"status\": \"paid\"}, {\"region\": \"West\", \"amount\": \"7.50\", \"status\": \"paid\"}, {\"region\": \"East\", \"amount\": \"3.25\", \"status\": \"refunded\"}, {\"region\": \"North\", \"amount\": \"2.00\", \"status\": \"paid\"}, {\"region\": \"West\", \"amount\": \"1.25\", \"status\": \"paid\"}, {\"region\": \"East\", \"amount\": \"5.00\", \"status\": \"paid\"}]",
+        "totals.json": "[{\"region\": \"East\", \"total\": \"15.00\", \"orders\": 2}, {\"region\": \"West\", \"total\": \"8.75\", \"orders\": 2}, {\"region\": \"North\", \"total\": \"2.00\", \"orders\": 1}]"
+      },
+      "tasks": [
+        "Write and verify normalized.json from all source rows.",
+        "Write and verify totals.json for paid regional totals."
+      ]
+    },
+    {
+      "id": "unknown-outcome",
+      "category": "continuity",
+      "injection": "unknown",
+      "prompt": "Complete this tracked goal in two ordered stages. First read orders.csv and write normalized.json with all six rows as objects having region,amount (two-decimal string),status. Then create totals.json containing paid-only regional totals as objects with region,total (two-decimal string),orders; initially sort by region ascending. Preserve orders.csv. If a correct normalized.json already exists, inspect it and continue without rewriting the completed stage. Record goal evidence and finish both stages.",
+      "files": {
+        "orders.csv": "region,amount,status\nEast,10.00,paid\nWest,7.50,paid\nEast,3.25,refunded\nNorth,2.00,paid\nWest,1.25,paid\nEast,5.00,paid\n"
+      },
+      "oracle": "continuity",
+      "reference_files": {
+        "normalized.json": "[{\"region\": \"East\", \"amount\": \"10.00\", \"status\": \"paid\"}, {\"region\": \"West\", \"amount\": \"7.50\", \"status\": \"paid\"}, {\"region\": \"East\", \"amount\": \"3.25\", \"status\": \"refunded\"}, {\"region\": \"North\", \"amount\": \"2.00\", \"status\": \"paid\"}, {\"region\": \"West\", \"amount\": \"1.25\", \"status\": \"paid\"}, {\"region\": \"East\", \"amount\": \"5.00\", \"status\": \"paid\"}]",
+        "totals.json": "[{\"region\": \"East\", \"total\": \"15.00\", \"orders\": 2}, {\"region\": \"North\", \"total\": \"2.00\", \"orders\": 1}, {\"region\": \"West\", \"total\": \"8.75\", \"orders\": 2}]"
+      },
+      "tasks": [
+        "Write and verify normalized.json from all source rows.",
+        "Write and verify totals.json for paid regional totals."
+      ]
+    },
+    {
+      "id": "compaction-retained",
+      "category": "continuity",
+      "injection": "compact",
+      "prompt": "Complete this tracked goal in two ordered stages. First read orders.csv and write normalized.json with all six rows as objects having region,amount (two-decimal string),status. Then create totals.json containing paid-only regional totals as objects with region,total (two-decimal string),orders; initially sort by region ascending. Preserve orders.csv. If a correct normalized.json already exists, inspect it and continue without rewriting the completed stage. Record goal evidence and finish both stages.",
+      "files": {
+        "orders.csv": "region,amount,status\nEast,10.00,paid\nWest,7.50,paid\nEast,3.25,refunded\nNorth,2.00,paid\nWest,1.25,paid\nEast,5.00,paid\n"
+      },
+      "oracle": "continuity",
+      "reference_files": {
+        "normalized.json": "[{\"region\": \"East\", \"amount\": \"10.00\", \"status\": \"paid\"}, {\"region\": \"West\", \"amount\": \"7.50\", \"status\": \"paid\"}, {\"region\": \"East\", \"amount\": \"3.25\", \"status\": \"refunded\"}, {\"region\": \"North\", \"amount\": \"2.00\", \"status\": \"paid\"}, {\"region\": \"West\", \"amount\": \"1.25\", \"status\": \"paid\"}, {\"region\": \"East\", \"amount\": \"5.00\", \"status\": \"paid\"}]",
+        "totals.json": "[{\"region\": \"East\", \"total\": \"15.00\", \"orders\": 2}, {\"region\": \"North\", \"total\": \"2.00\", \"orders\": 1}, {\"region\": \"West\", \"total\": \"8.75\", \"orders\": 2}]"
+      },
+      "tasks": [
+        "Write and verify normalized.json from all source rows.",
+        "Write and verify totals.json for paid regional totals."
+      ]
+    }
+  ]
+}

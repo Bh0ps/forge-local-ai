@@ -12,6 +12,7 @@ import httpx
 
 from forge_credentials import CredentialVault
 from forge_inference import CompatibleProvider, validated_response_format
+from storage import _now
 
 
 OPENROUTER_URL = 'https://openrouter.ai/api/v1'
@@ -245,6 +246,8 @@ class OpenRouterConnection:
             config.pop('account', None)
             config.pop('models', None)
             config['connected'] = False
+            config['metadata_auth'] = {'state':'unverified','checked_at':None}
+            config['catalog_verified_at'] = None
         if config['enabled'] and not config.get('credential_ref'):
             raise OpenRouterFailure('Save an OpenRouter API key before enabling it.')
         model = data.get('model', config.get('model', FREE_ROUTER))
@@ -260,9 +263,23 @@ class OpenRouterConnection:
         if not config or not config.get('credential_ref'):
             raise OpenRouterFailure('Save an OpenRouter API key before testing the connection.')
         provider = OpenRouterProvider(config, self.vault, self.http_client)
-        account = provider.account()
-        models = provider.models(refresh=True)
-        saved = self.store.save_entity('providers', {**config, 'connected': True, 'account': account, 'models': models})
+        stamp=_now()
+        authenticated=False
+        try:
+            account = provider.account()
+            authenticated=True
+            config={**config,'account':account,'account_checked_at':stamp,
+                    'metadata_auth':{'state':'verified','checked_at':stamp}}
+            models = provider.models(refresh=True)
+        except OpenRouterFailure as exc:
+            self.store.save_entity('providers',{**config,'connected':False,
+                'metadata_auth':{'state':'verified' if authenticated else 'error','checked_at':stamp,
+                                 **({} if authenticated else {'error':str(exc)})},
+                'catalog_error':str(exc) if authenticated else None,'connection_checked_at':stamp})
+            raise
+        saved = self.store.save_entity('providers', {**config, 'connected': True, 'account': account, 'models': models,
+            'metadata_auth':{'state':'verified','checked_at':stamp},'account_checked_at':stamp,
+            'catalog_verified_at':stamp,'connection_checked_at':stamp,'catalog_error':None})
         return self._public(saved)
 
     def dispatch(self, action, data=None):

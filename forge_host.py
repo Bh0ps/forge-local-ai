@@ -33,6 +33,15 @@ class PairingAuthority:
         return {'code': code, 'expires_in': 180}
 
     def pair(self, code, client='local'):
+        return self._pair(code, client)
+
+    def pair_browser(self, code, client, origin):
+        """Issue two independent secrets; only the session goes into a cookie."""
+        proof = secrets.token_urlsafe(48)
+        session = self._pair(code, client, origin=origin, proof=proof)
+        return {'session': session, 'client_proof': proof}
+
+    def _pair(self, code, client, origin=None, proof=None):
         now = self.clock()
         with self._lock:
             attempts, reset = self._attempts.get(client, (0, now + 60))
@@ -47,7 +56,9 @@ class PairingAuthority:
                 raise ValueError('Invalid or expired pairing code. Generate a code in Forge Settings.')
             del self._codes[found]
             token = secrets.token_urlsafe(48)
-            self._sessions[hashlib.sha256(token.encode()).hexdigest()] = now + 86400
+            self._sessions[hashlib.sha256(token.encode()).hexdigest()] = {
+                'expires_at': now + 86400, 'origin': origin,
+                'proof_digest': hashlib.sha256(proof.encode()).hexdigest() if proof else None}
             return token
 
     def valid(self, token):
@@ -55,7 +66,18 @@ class PairingAuthority:
             return False
         digest = hashlib.sha256(token.encode()).hexdigest()
         with self._lock:
-            return self._sessions.get(digest, 0) > self.clock()
+            return self._sessions.get(digest, {}).get('expires_at', 0) > self.clock()
+
+    def valid_browser(self, token, proof, origin):
+        """Cookies are host-scoped, so require a separate exact-origin proof."""
+        if not isinstance(token, str) or len(token) > 256 or not isinstance(proof, str) or not 32 <= len(proof) <= 256:
+            return False
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        proof_digest = hashlib.sha256(proof.encode()).hexdigest()
+        with self._lock:
+            session = self._sessions.get(digest, {})
+            return bool(session.get('expires_at', 0) > self.clock() and session.get('origin') == origin
+                        and session.get('proof_digest') and hmac.compare_digest(session['proof_digest'], proof_digest))
 
     def revoke(self, token):
         with self._lock:

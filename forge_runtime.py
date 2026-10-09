@@ -26,7 +26,10 @@ import zipfile
 
 import httpx
 
-from forge_inference import ENGINE_PROFILES, memory_telemetry
+from forge_inference import ENGINE_PROFILES, memory_telemetry, InferenceQueue
+from inference_stream import cancellable_inference, bounded_lines
+from core import Core
+import statistics
 from tool_calls import ToolCallAccumulator
 
 
@@ -41,6 +44,8 @@ class RuntimeManager:
         self._validation = {'state': 'idle'}
         self._cancel = threading.Event()
         self.configs = {}
+        self.inference_queue = InferenceQueue()
+        self.usage_store = None
         if self.config_path.is_file():
             try:
                 self.configs = json.loads(self.config_path.read_text(encoding='utf-8'))
@@ -411,6 +416,29 @@ class RuntimeManager:
         image.save(buffer, 'PNG')
         return base64.b64encode(buffer.getvalue()).decode()
 
+    def _validation_lines(self, url, body):
+        async def consume(response, publish):
+            async for line in bounded_lines(response):
+                if self._cancel.is_set(): return
+                progress={}
+                raw=line[5:].strip() if line.startswith('data:') else line
+                try:
+                    value=json.loads(raw)
+                    if isinstance(value,dict):
+                        progress=value.get('message') or {}
+                        choices=value.get('choices') or []
+                        if choices and isinstance(choices[0],dict):
+                            delta=choices[0].get('delta') or {}
+                            progress={'content':delta.get('content') or '',
+                                'thinking':delta.get('reasoning_content') or '',
+                                'tool_calls':delta.get('tool_calls') or []}
+                except ValueError: pass
+                await publish({'line':line,'message':progress})
+        with self.inference_queue.lease(self._cancel, True):
+            for packet in cancellable_inference(url, body, self._cancel, consume,
+                timeouts=Core._inference_timeouts(connect=10), provider='Managed runtime validation'):
+                yield packet['line']
+
     def _probe(self, base, engine, model, purpose, image=None, context=32768):
         tools = [{'type': 'function', 'function': {'name': 'forge_validation_echo',
                   'description': 'Echo a validation marker.', 'parameters': {'type': 'object',
@@ -437,46 +465,57 @@ class RuntimeManager:
         start, first, output, final = time.monotonic(), None, '', {}
         completed=False; truncated=False
         accumulator = ToolCallAccumulator()
-        with httpx.Client(timeout=httpx.Timeout(180, connect=10)) as client:
-            with client.stream('POST', url, json=body) as response:
-                response.raise_for_status()
-                for line in response.iter_lines():
-                    if self._cancel.is_set():
-                        raise ValueError('Validation cancelled.')
-                    if not line:
+        try:
+            for line in self._validation_lines(url, body):
+                if self._cancel.is_set():
+                    raise ValueError('Validation cancelled.')
+                if not line:
+                    continue
+                if engine != 'ollama':
+                    if not line.startswith('data:'):
                         continue
-                    if engine != 'ollama':
-                        if not line.startswith('data:'):
-                            continue
-                        line = line[5:].strip()
-                        if line == '[DONE]':
-                            completed=True
-                            break
-                    packet = json.loads(line)
-                    if engine == 'ollama':
-                        delta = packet.get('message', {})
-                        if packet.get('done'):
-                            final = packet
-                            completed=True
-                            truncated=packet.get('done_reason') in ('length','max_tokens')
-                    else:
-                        choices = packet.get('choices', [])
-                        delta = choices[0].get('delta', {}) if choices else {}
-                        if choices and choices[0].get('finish_reason'):
-                            completed=True
-                            truncated=choices[0]['finish_reason'] in ('length','max_tokens')
-                        if packet.get('usage'):
-                            final['usage'] = packet['usage']
-                        if packet.get('timings'):
-                            final['timings'] = packet['timings']
-                    content = delta.get('content') or ''
-                    if (content or delta.get('tool_calls')) and first is None:
-                        first = time.monotonic()
-                    output += content
-                    if len(output) > 100000:
-                        raise ValueError('Validation response exceeded its output limit.')
-                    if delta.get('tool_calls'):
-                        accumulator.add(delta['tool_calls'])
+                    line = line[5:].strip()
+                    if line == '[DONE]':
+                        break
+                packet = json.loads(line)
+                if packet.get('error'): raise ValueError('Managed validation provider returned an error.')
+                if engine == 'ollama':
+                    delta = packet.get('message', {})
+                    if packet.get('done'):
+                        final = packet
+                        completed=packet.get('done_reason') in (None,'stop','tool_calls','function_call')
+                        truncated=not completed
+                else:
+                    choices = packet.get('choices', [])
+                    delta = choices[0].get('delta', {}) if choices else {}
+                    if choices and choices[0].get('finish_reason'):
+                        completed=choices[0]['finish_reason'] in ('stop','tool_calls','function_call')
+                        truncated=not completed
+                    if packet.get('usage'):
+                        final['usage'] = packet['usage']
+                    if packet.get('timings'):
+                        final['timings'] = packet['timings']
+                content = delta.get('content') or ''
+                if (content or delta.get('tool_calls')) and first is None:
+                    first = time.monotonic()
+                output += content
+                if len(output) > 100000:
+                    raise ValueError('Validation response exceeded its output limit.')
+                if delta.get('tool_calls'):
+                    accumulator.add(delta['tool_calls'])
+        finally:
+            if self.usage_store is not None:
+                counts=final.get('usage') or {}
+                count=final.get('eval_count',counts.get('completion_tokens'))
+                prompt=final.get('prompt_eval_count',counts.get('prompt_tokens'))
+                elapsed=time.monotonic()-start
+                self.usage_store.record_usage({'id':uuid4().hex,'provider':'managed-validation','model':model,
+                    'purpose':'runtime-validation-'+purpose,'input_tokens':prompt or 0,
+                    'output_tokens':count if count is not None else (len(output.encode('utf-8'))+2)//3,
+                    'estimated':prompt is None or count is None,'cancelled':self._cancel.is_set(),
+                    'decode_seconds':final.get('eval_duration',0)/1e9,'total_seconds':elapsed,
+                    'phase_timings':{'first_output_seconds':first-start if first is not None else None,
+                        'total_seconds':elapsed,'provenance':{'first_output':'measured'}}})
         elapsed = time.monotonic() - start
         count = final.get('eval_count', (final.get('usage') or {}).get('completion_tokens'))
         decode = final.get('eval_duration', 0) / 1e9
@@ -512,7 +551,7 @@ class RuntimeManager:
                 for profile in ('f16', 'q8_0'):
                     with self._lock:
                         self._validation['phase'] = profile
-                    launched = self.start({**data, 'profile': profile, 'advanced':{} if profile=='f16' else data.get('advanced',{})}, validation=True)
+                    launched = self.start({**data, 'profile': profile, 'advanced':data.get('advanced',{})}, validation=True)
                     base = launched['url']
                     deadline = time.monotonic() + 120
                     with httpx.Client(timeout=2) as client:
@@ -542,7 +581,7 @@ class RuntimeManager:
                     sampler.start()
                     try:
                         probes = [self._probe(base, config['engine'], model, 'coding', context=data.get('context', 32768))]
-                        probes.extend(self._probe(base, config['engine'], model, 'coding', context=data.get('context', 32768)) for _ in range(2))
+                        probes.extend(self._probe(base, config['engine'], model, 'coding', context=data.get('context', 32768)) for _ in range(5))
                         probes.append(self._probe(base, config['engine'], model, 'tools', context=data.get('context', 32768)))
                         probes.append(self._probe(base, config['engine'], model, 'vision', self._vision_image(), data.get('context', 32768)))
                     finally:
@@ -556,17 +595,17 @@ class RuntimeManager:
                                         'sampled_peak_gpu_mb': peaks, 'memory_samples': len(samples)}
                     self.stop(identifier)
                 f16, q8 = records['f16']['probes'], records['q8_0']['probes']
-                baseline = [p['tps'] for p in f16[1:3] if p['tps']]
-                optimized = [p['tps'] for p in q8[1:3] if p['tps']]
-                baseline_speed = sum(baseline) / len(baseline) if baseline else None
-                optimized_speed = sum(optimized) / len(optimized) if optimized else None
+                baseline = [p['tps'] for p in f16[1:6] if p['tps']]
+                optimized = [p['tps'] for p in q8[1:6] if p['tps']]
+                baseline_speed = statistics.median(baseline) if baseline else None
+                optimized_speed = statistics.median(optimized) if optimized else None
                 preserved = all(p['passed'] for p in f16 + q8)
-                faster = bool(baseline_speed and optimized_speed and optimized_speed >= baseline_speed)
+                faster = bool(baseline_speed and optimized_speed and optimized_speed >= baseline_speed * 1.05)
                 result = {'model': model, 'engine_version': config['version'], 'executable_sha256': config['executable_sha256'],
                           'projector': data.get('mmproj_path'), 'context': data.get('context', 32768),
                           'profiles': records, 'promoted': preserved and faster,
                           'binding':self._model_binding(data),'advanced':data.get('advanced') or {},
-                          'baseline_tps': baseline_speed, 'optimized_tps': optimized_speed,
+                          'baseline_tps': baseline_speed, 'optimized_tps': optimized_speed, 'warm_repetitions':5, 'minimum_gain':0.05,
                           'reason': 'Vision and streamed tools passed; measured decoding improved.' if preserved and faster
                                     else 'Profile was not promoted: capability checks failed or decoding did not improve.'}
                 with self._lock:

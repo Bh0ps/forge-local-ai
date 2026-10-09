@@ -1,5 +1,6 @@
 """Forge's ordered local migrations, run journal, checkpoints and usage ledger."""
 from datetime import datetime, timezone
+from copy import deepcopy
 import base64
 from hashlib import sha256
 import json
@@ -8,6 +9,7 @@ from pathlib import Path
 import shutil
 import sqlite3
 import threading
+import time
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -20,6 +22,9 @@ DEFAULTS = dict(context=32768, model='', provider_id='ollama', permission_profil
                 computer_tools=False,browser_tools=True,num_thread=4,
                 memory_enabled=True,memory_suggestions=True,memory_semantic=False,memory_model_path='',
                 goal_review_enabled=False,goal_review_model='openrouter/free',goal_review_context=32768,goal_review_max_revisions=3,
+                adaptive_enabled=False,adaptive_model_locked=True,adaptive_context_locked=True,
+                adaptive_profile_ids=[],cloud_required_review=False,
+                guided_execution=True,goal_cloud_guidance=False,
                 goal_limits={'minutes':60, 'tokens':100000, 'rounds':128, 'tools':256})
 TERMINAL = {'completed', 'cancelled', 'failed', 'paused', 'interrupted'}
 
@@ -42,7 +47,12 @@ def atomic_text(path, text):
     try:
         with temporary.open('w', encoding='utf-8', newline='\n') as out:
             out.write(text); out.flush(); os.fsync(out.fileno())
-        os.replace(temporary, path)
+        for attempt in range(4):
+            try:
+                os.replace(temporary, path); break
+            except PermissionError:
+                if os.name!='nt' or attempt==3: raise
+                time.sleep(.01*(2**attempt))
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -65,6 +75,8 @@ class ForgeStore(Store):
         self._goal_lock = threading.RLock()
         self._event_listeners = []
         self._listener_lock = threading.RLock()
+        self._storage_metrics_lock=threading.Lock()
+        self._storage_metrics={}
         self._migrate()
 
     def _import_sidekick(self, destination):
@@ -97,14 +109,14 @@ class ForgeStore(Store):
         with self._connection() as db:
             present=db.execute("SELECT 1 FROM sqlite_master WHERE name='forge_migrations'").fetchone()
             previous=db.execute('SELECT COALESCE(MAX(version),0) FROM forge_migrations').fetchone()[0] if present else 0
-        if 0<previous<5:
-            backup=self.home/'backups'/('pre-schema-5-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f'))
+        if 0<previous<6:
+            backup=self.home/'backups'/('pre-schema-6-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f'))
             backup.mkdir()
             with sqlite3.connect(self.db_path) as src, sqlite3.connect(backup/'forge.sqlite3') as dst: src.backup(dst)
         with self._connection(transaction='write') as db:
             db.execute('CREATE TABLE IF NOT EXISTS forge_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
             version = db.execute('SELECT COALESCE(MAX(version),0) FROM forge_migrations').fetchone()[0]
-            if version > 5: raise ValueError('This workspace requires a newer Forge version.')
+            if version > 6: raise ValueError('This workspace requires a newer Forge version.')
             if version < 1:
                 for statement in (
                     'CREATE TABLE forge_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)',
@@ -137,6 +149,13 @@ class ForgeStore(Store):
                     db.execute(statement)
                 db.execute('INSERT INTO forge_settings VALUES(?,?) ON CONFLICT(key) DO NOTHING',('setup_origin',encode(self.installation_origin)))
                 db.execute('INSERT INTO forge_migrations VALUES(5,?)',(_now(),))
+            if version < 6:
+                columns={row['name'] for row in db.execute('PRAGMA table_info(usage)')}
+                if 'phase_timings' not in columns: db.execute("ALTER TABLE usage ADD COLUMN phase_timings TEXT NOT NULL DEFAULT '{}'")
+                if 'token_breakdown' not in columns: db.execute("ALTER TABLE usage ADD COLUMN token_breakdown TEXT NOT NULL DEFAULT '{}'")
+                db.execute('CREATE INDEX IF NOT EXISTS usage_model_date ON usage(model,created_at)')
+                db.execute('CREATE INDEX IF NOT EXISTS usage_project_date ON usage(project_id,created_at)')
+                db.execute('INSERT INTO forge_migrations VALUES(6,?)',(_now(),))
         if not self.entities('agents'):
             for role, instruction in (
                 ('Researcher','Research using primary sources. Cite sources and explain uncertainty. Do not edit the project.'),
@@ -239,6 +258,12 @@ class ForgeStore(Store):
         if 'temperature' in settings and (type(settings['temperature']) not in (float,int) or not 0<=settings['temperature']<=1): raise ValueError('Invalid temperature.')
         for key in ('memory_enabled','memory_suggestions','memory_semantic'):
             if key in settings and type(settings[key]) is not bool: raise ValueError('Memory preferences must be true or false.')
+        for key in ('adaptive_enabled','adaptive_model_locked','adaptive_context_locked','cloud_required_review','guided_execution','goal_cloud_guidance'):
+            if key in settings and type(settings[key]) is not bool: raise ValueError(key+' must be true or false.')
+        if 'adaptive_profile_ids' in settings:
+            values=settings['adaptive_profile_ids']
+            if not isinstance(values,list) or len(values)>20 or any(not isinstance(v,str) or len(v)>64 for v in values):
+                raise ValueError('Choose at most 20 calibrated profiles.')
         if 'memory_model_path' in settings and (not isinstance(settings['memory_model_path'],str) or len(settings['memory_model_path'])>1000): raise ValueError('Invalid local embedding directory.')
         if 'goal_limits' in settings: settings={**settings,'goal_limits':validate_goal_limits(settings['goal_limits'])}
         if 'goal_review_enabled' in settings and type(settings['goal_review_enabled']) is not bool: raise ValueError('Goal review must be true or false.')
@@ -271,13 +296,24 @@ class ForgeStore(Store):
             return json.loads(row[0])
 
     def save_entity(self,kind,data):
+        started=time.monotonic()
         data=dict(data); identifier=data.get('id') or uuid4().hex
         if not isinstance(identifier,str) or len(identifier)>64 or not all(c.isalnum() or c in '-_' for c in identifier): raise ValueError('Invalid entity ID.')
         data.update(id=identifier,updated_at=_now())
         if len(encode(data))>2000000: raise ValueError('Entity is too large.')
         with self._connection(transaction='write') as db:
             db.execute('INSERT INTO entities VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data',(kind,identifier,encode(data)))
+        self._record_storage('entity_write',time.monotonic()-started)
         return data
+
+    def _record_storage(self,operation,seconds):
+        with self._storage_metrics_lock:
+            previous=self._storage_metrics.get(operation,{'count':0,'total_seconds':0.0})
+            self._storage_metrics[operation]={'count':previous['count']+1,'total_seconds':previous['total_seconds']+seconds,'last_seconds':seconds}
+
+    def storage_timings(self):
+        with self._storage_metrics_lock:
+            return {'measured':True,'since_process_start':True,'operations':deepcopy(self._storage_metrics)}
 
     def delete_entity(self,kind,identifier):
         with self._connection(transaction='write') as db: db.execute('DELETE FROM entities WHERE kind=? AND id=?',(kind,identifier))
@@ -325,7 +361,7 @@ class ForgeStore(Store):
                 # Bind the goal, chat, request and run in one admission commit.
                 # TODO.md contains no chat identity, so its checksum stays valid.
                 goal.update(chat_id=chat_id,updated_at=stamp)
-                data['goal_initial']={key:goal.get(key) for key in ('request','tasks','reviewed_plan')}
+                data['goal_initial']={key:goal.get(key) for key in ('request','tasks','reviewed_plan','scope_revision')}
                 db.execute("UPDATE entities SET data=? WHERE kind='goals' AND id=?",(encode(goal),goal['id']))
             cursor=db.execute('INSERT INTO messages(chat_id,role,content,metadata,created_at) VALUES(?,?,?,?,?)',
                 (chat_id,'user',data['request'],metadata,stamp))
@@ -353,11 +389,13 @@ class ForgeStore(Store):
             return [json.loads(r[0]) for r in rows]
 
     def update_run(self,identifier,**changes):
+        started=time.monotonic()
         with self._connection(transaction='write') as db:
             row=db.execute('SELECT data FROM runs WHERE id=?',(identifier,)).fetchone()
             if not row: raise ValueError('Run not found.')
             data=json.loads(row[0]); data.update(changes,updated_at=_now())
             db.execute('UPDATE runs SET status=?,data=?,updated_at=? WHERE id=?',(data['status'],encode(data),data['updated_at'],identifier))
+        self._record_storage('run_write',time.monotonic()-started)
         return data
 
     def finish_run(self,identifier,changes,payload):
@@ -403,6 +441,18 @@ class ForgeStore(Store):
         with self._connection() as db:
             rows=db.execute('SELECT * FROM run_events WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?',(identifier,after,min(1000,limit))).fetchall()
             return [dict(json.loads(r['payload']),seq=r['seq'],type=r['type'],run_id=identifier) for r in rows]
+
+    def poll_snapshot(self,identifier,after=0):
+        """One WAL read snapshot keeps status, delivered events and cursor coherent."""
+        if type(after) is not int or after<0: raise ValueError('Invalid event cursor.')
+        with self._connection(transaction='read') as db:
+            row=db.execute('SELECT data FROM runs WHERE id=?',(identifier,)).fetchone()
+            if not row: raise ValueError('Run not found.')
+            run=json.loads(row[0])
+            rows=db.execute('SELECT * FROM run_events WHERE run_id=? AND seq>? ORDER BY seq LIMIT 500',(identifier,after)).fetchall()
+            events=[dict(json.loads(row['payload']),seq=row['seq'],type=row['type'],run_id=identifier) for row in rows]
+            latest=db.execute('SELECT COALESCE(MAX(seq),0) FROM run_events WHERE run_id=?',(identifier,)).fetchone()[0]
+        return run,events,latest
 
     def invocation(self,identifier,run_id,name,arguments):
         with self._connection(transaction='write') as db:
@@ -456,16 +506,17 @@ class ForgeStore(Store):
         return {'artifact':identifier,'text':text[start:start+limit],'total_characters':len(text),'next':min(start+limit,len(text))}
 
     def goal(self,identifier):
-        result=self.entity('goals',identifier)
-        path=self.home/'state/goals'/identifier/'TODO.md'
-        text=path.read_text(encoding='utf-8') if path.exists() else ''
-        result.update(path=str(path),markdown=text,external_edits=sha256(text.encode()).hexdigest()!=result.get('markdown_hash'))
-        return result
+        with self._goal_lock:
+            result=self.entity('goals',identifier)
+            path=self.home/'state/goals'/identifier/'TODO.md'
+            text=path.read_text(encoding='utf-8') if path.exists() else ''
+            result.update(path=str(path),markdown=text,external_edits=sha256(text.encode()).hexdigest()!=result.get('markdown_hash'))
+            return result
 
     def active_goals(self):
         """List live goal runs whose conversation still exists, retaining history elsewhere."""
         with self._connection() as db:
-            rows=db.execute("SELECT e.data,r.id AS run_id,r.status,r.chat_id FROM entities e "
+            rows=db.execute("SELECT e.data,r.id AS run_id,r.status,r.chat_id,json_extract(r.data,'$.execution_mode') AS execution_mode FROM entities e "
                 "JOIN runs r ON r.goal_id=e.id JOIN chats c ON c.id=r.chat_id "
                 "WHERE e.kind='goals' AND r.parent_id IS NULL AND c.archived=0 "
                 "AND r.status NOT IN ('completed','cancelled','failed') "
@@ -473,10 +524,10 @@ class ForgeStore(Store):
         result=[]; seen=set()
         for row in rows:
             goal=json.loads(row['data'])
-            if row['status'] in ('paused','interrupted') and goal.get('review',{}).get('status') not in ('error','needs_changes','insufficient_evidence','reviewing'): continue
+            if row['status'] in ('paused','interrupted') and row['execution_mode']!='guided' and goal.get('review',{}).get('status') not in ('error','needs_changes','insufficient_evidence','reviewing'): continue
             if goal.get('status')=='completed' or goal.get('project_missing') or goal.get('chat_id')!=row['chat_id'] or goal['id'] in seen: continue
             seen.add(goal['id'])
-            result.append({**goal,'run_id':row['run_id'],'chat_id':row['chat_id'],'status':row['status']})
+            result.append({**goal,'run_id':row['run_id'],'chat_id':row['chat_id'],'status':row['status'],'execution_mode':row['execution_mode']})
         return result
 
     def save_goal(self,data,*,reconcile=False):
@@ -487,8 +538,31 @@ class ForgeStore(Store):
             try: previous=self.goal(identifier)
             except ValueError: previous={}
             if previous.get('external_edits') and not reconcile: raise ValueError('TODO.md was edited externally. Reconcile or import it before updating.')
-            merged={**previous,**data,'id':identifier}; merged.pop('markdown',None); merged.pop('external_edits',None)
-            tasks=merged.get('tasks') or []
+            merged={**previous,**deepcopy(data),'id':identifier}; merged.pop('markdown',None); merged.pop('external_edits',None)
+            tasks=deepcopy(merged.get('tasks') or [])
+            if not isinstance(tasks,list) or len(tasks)>1000: raise ValueError('Provide at most 1,000 goal tasks.')
+            old_tasks=previous.get('tasks') or []
+            by_text={}
+            for item in old_tasks: by_text.setdefault(item['text'],[]).append(item)
+            seen=set()
+            for task in tasks:
+                if not isinstance(task,dict) or not isinstance(task.get('text'),str) or not task['text'].strip(): raise ValueError('Each goal task needs non-empty text.')
+                if not task.get('id'):
+                    matches=by_text.get(task['text'],[])
+                    if len(matches)>1: raise ValueError('Task text is ambiguous. Preserve its existing task ID.')
+                    task['id']=matches[0]['id'] if matches else uuid4().hex
+                if not isinstance(task['id'],str) or not 1<=len(task['id'])<=128 or task['id'] in seen: raise ValueError('Goal task IDs must be unique bounded strings.')
+                seen.add(task['id']); task.setdefault('status','pending')
+                if task['status'] not in ('pending','in_progress','completed'): raise ValueError('Choose pending, in_progress or completed task status.')
+                if not isinstance(task.get('evidence',[]),list) or len(task.get('evidence',[]))>100: raise ValueError('Task evidence must be a bounded list.')
+                if any(not isinstance(value,str) or len(value)>8000 for value in task.get('evidence',[])): raise ValueError('Task evidence must contain bounded text references.')
+            shape=lambda values:[(t['id'],t['text'],t.get('requirement_id')) for t in values if t.get('origin')!='review']
+            changed=shape(tasks)!=shape(old_tasks) or merged.get('request')!=previous.get('request') or merged.get('reviewed_plan')!=previous.get('reviewed_plan')
+            scope_revision=previous.get('scope_revision',1)+(int(changed) if previous else 0)
+            history=deepcopy(previous.get('requirement_history') or [])
+            if not history or changed:
+                history.append({'revision':scope_revision,'request':merged.get('request',''),'tasks':[{k:t.get(k) for k in ('id','text','requirement_id')} for t in tasks if t.get('origin')!='review'],'created_at':_now()})
+            merged.update(revision=previous.get('revision',0)+1,scope_revision=scope_revision,requirement_history=history,tasks=tasks)
             text='# '+str(merged.get('title','Goal')).replace('\n',' ')+'\n\n'
             for index,task in enumerate(tasks,1):
                 task.setdefault('id',uuid4().hex); task.setdefault('status','pending')
@@ -501,18 +575,66 @@ class ForgeStore(Store):
             self.save_entity('goals',merged); atomic_text(path,text)
             return self.goal(identifier)
 
+    def update_goal_progress(self,identifier,data,*,expected_revision=None):
+        """Compatibility progress adapter: model bookkeeping cannot rewrite requirements."""
+        with self._goal_lock:
+            current=self.goal(identifier)
+            if expected_revision is not None and expected_revision!=current.get('revision',0): raise ValueError('Goal changed. Read goal_read and use its current revision before updating.')
+            allowed={'tasks','checkpoint','blockers','next_action'}
+            if set(data)-allowed: raise ValueError('Progress updates cannot revise goal requirements.')
+            updates=data.get('tasks')
+            tasks=deepcopy(current.get('tasks',[]))
+            if updates is not None:
+                if not isinstance(updates,list) or len(updates)>len(tasks): raise ValueError('Progress updates must reference existing task IDs.')
+                indexed={t['id']:t for t in tasks}; matched=set()
+                for update in updates:
+                    if not isinstance(update,dict) or set(update)-{'id','text','status','evidence','note','requirement_id','origin'}: raise ValueError('Use existing task IDs and status/evidence only.')
+                    target=indexed.get(update.get('id'))
+                    if not target and not update.get('id'):
+                        matches=[t for t in tasks if t['text']==update.get('text')]
+                        if len(matches)==1: target=matches[0]
+                    if not target or target['id'] in matched: raise ValueError('Task identity is missing, ambiguous or duplicated. Use goal_read task IDs; requirements cannot be replaced by progress updates.')
+                    if 'text' in update and update['text']!=target['text'] or 'requirement_id' in update and update['requirement_id']!=target.get('requirement_id'): raise ValueError('Progress updates cannot replace task text or requirement identity.')
+                    if 'origin' in update and update['origin']!=target.get('origin'): raise ValueError('Progress updates cannot change trusted task origins.')
+                    matched.add(target['id'])
+                    for key in ('status','evidence','note'):
+                        if key in update: target[key]=deepcopy(update[key])
+            return self.save_goal({**current,**{k:v for k,v in data.items() if k!='tasks'},'tasks':tasks})
+
+    def update_goal_task(self,identifier,task_id,expected_revision,status,evidence=None,note=''):
+        if type(expected_revision) is not int: raise ValueError('Provide the current goal revision from goal_read.')
+        if not isinstance(note,str) or len(note)>2000: raise ValueError('Task notes must be bounded text.')
+        return self.update_goal_progress(identifier,{'tasks':[{'id':task_id,'status':status,'evidence':evidence or [],'note':note}]},expected_revision=expected_revision)
+
     def record_usage(self,record):
         row={**dict(input_tokens=0,cached_input_tokens=0,output_tokens=0,estimated=True,
                  decode_seconds=0,total_seconds=0,cancelled=False,created_at=_now(),project_id=None,run_id=None),**record}
-        fields=('id','run_id','project_id','provider','model','purpose','input_tokens','cached_input_tokens','output_tokens','estimated','decode_seconds','total_seconds','cancelled','created_at')
+        fields=('id','run_id','project_id','provider','model','purpose','input_tokens','cached_input_tokens','output_tokens','estimated','decode_seconds','total_seconds','cancelled','created_at','phase_timings','token_breakdown')
+        row['phase_timings']=encode(row.get('phase_timings') or {})
+        row['token_breakdown']=encode(row.get('token_breakdown') or {})
         for key in ('input_tokens','cached_input_tokens','output_tokens'):
             row[key]=max(0,int(row[key] or 0))
         with self._connection(transaction='write') as db:
-            db.execute('INSERT OR IGNORE INTO usage VALUES('+','.join('?' for _ in fields)+')',tuple(row[k] for k in fields))
+            db.execute('INSERT OR IGNORE INTO usage('+','.join(fields)+') VALUES('+','.join('?' for _ in fields)+')',tuple(row[k] for k in fields))
 
     def usage(self,period='all',timezone_name='UTC',model=None,project_id=None,now=None):
         zone=ZoneInfo(timezone_name); current=(now or datetime.now(timezone.utc)).astimezone(zone)
-        with self._connection() as db: rows=[dict(r) for r in db.execute('SELECT * FROM usage ORDER BY created_at')]
+        if period not in ('all','day','month'): raise ValueError('Choose all, day or month usage.')
+        conditions=[]; parameters=[]
+        if model: conditions.append('model=?'); parameters.append(model)
+        if project_id: conditions.append('project_id=?'); parameters.append(project_id)
+        if period!='all':
+            lower=current.replace(hour=0,minute=0,second=0,microsecond=0)
+            if period=='month':
+                lower=lower.replace(day=1)
+                upper=lower.replace(year=lower.year+1,month=1) if lower.month==12 else lower.replace(month=lower.month+1)
+            else:
+                from datetime import timedelta
+                upper=lower+timedelta(days=1)
+            conditions.extend(('created_at>=?','created_at<?'))
+            parameters.extend((lower.astimezone(timezone.utc).isoformat(),upper.astimezone(timezone.utc).isoformat()))
+        statement='SELECT * FROM usage'+(' WHERE '+' AND '.join(conditions) if conditions else '')+' ORDER BY created_at'
+        with self._connection() as db: rows=[dict(r) for r in db.execute(statement,parameters)]
         totals=dict(input_tokens=0,output_tokens=0,cached_input_tokens=0,requests=0,estimated_requests=0)
         daily={}; monthly={}; by_model={}; decode=0; output=0
         for row in rows:
@@ -530,3 +652,14 @@ class ForgeStore(Store):
         return dict(totals=totals,daily=[dict(date=k,**v) for k,v in daily.items()],
                     monthly=[dict(month=k,**v) for k,v in monthly.items()],by_model=[dict(model=k,**v) for k,v in by_model.items()],
                     timezone=timezone_name,tracked_since=self.get_settings()['tracked_since'],average_tps=output/decode if decode else None)
+
+    def usage_requests(self,*,limit=50,offset=0,run_id=None):
+        if type(limit) is not int or not 1<=limit<=200 or type(offset) is not int or offset<0:
+            raise ValueError('Invalid usage pagination.')
+        where=' WHERE run_id=?' if run_id else ''; args=[run_id] if run_id else []
+        with self._connection() as db:
+            total=db.execute('SELECT COUNT(*) FROM usage'+where,args).fetchone()[0]
+            rows=[dict(row) for row in db.execute('SELECT * FROM usage'+where+' ORDER BY created_at DESC,id LIMIT ? OFFSET ?',args+[limit,offset])]
+        for row in rows:
+            for key in ('phase_timings','token_breakdown'): row[key]=json.loads(row[key])
+        return {'requests':rows,'total':total,'limit':limit,'offset':offset}

@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "fixture_hash": "8d22f7c97f6d1e8a0a092453825c70c51ac065ab22513679333c0012d7e0c06f",
+  "cases": {
+    "todo-flow": [
+      "Nonempty tasks are trimmed and rendered",
+      "Blank tasks are rejected",
+      "Remaining count reflects completion",
+      "Active filter excludes completed tasks",
+      "Done filter selects completed tasks",
+      "No browser execution errors"
+    ],
+    "signup-validation": [
+      "Invalid email has feedback and field state",
+      "Short password remains invalid",
+      "Valid submission clears errors and announces success",
+      "No browser execution errors"
+    ],
+    "catalog-filter": [
+      "Initial catalog includes the four named products in name order",
+      "Case-insensitive filtering",
+      "Filtered price ordering",
+      "Useful empty state",
+      "No browser execution errors"
+    ],
+    "cart-totals": [
+      "Repeated add increments quantity and totals",
+      "Quantity changes update exact totals",
+      "Removing a line updates totals",
+      "Removing all lines yields empty basket",
+      "No browser execution errors"
+    ],
+    "theme-persistence": [
+      "Default light theme",
+      "Dark switch persists theme",
+      "Reload restores theme",
+      "Switch back and accessible action",
+      "No browser execution errors",
+      "Dark theme text contrast"
+    ],
+    "dialog-keyboard": [
+      "Dialog starts hidden",
+      "Open shows dialog and moves focus inside",
+      "Escape closes and restores focus",
+      "Close button works",
+      "No browser execution errors"
+    ],
+    "tabs-keyboard": [
+      "One initial selected tab with visible panel",
+      "Click switches selected panel",
+      "Arrow navigation moves selection and focus",
+      "Arrow navigation wraps and roving tab stop",
+      "No browser execution errors"
+    ],
+    "landing-accessibility": [
+      "Page landmarks and labeled contact",
+      "Call to action resolves to a real section",
+      "Mobile media rule makes services one column",
+      "Visible keyboard focus is styled",
+      "No browser execution errors",
+      "Text contrast meets 4.5:1"
+    ],
+    "api-pagination": [
+      "Normal page and total calculation",
+      "Empty and out-of-range pages",
+      "Records remain unchanged",
+      "Invalid page boundary (0, 5)",
+      "Invalid page boundary (True, 5)",
+      "Invalid page boundary (1, 0)",
+      "Invalid page boundary (1, 101)",
+      "Invalid page boundary (1, True)",
+      "Invalid page boundary (1.5, 4)"
+    ],
+    "pricing-boundaries": [
+      "Integer price total",
+      "Coupon applies ten percent to a normal basket",
+      "Coupon rounding and empty basket",
+      "Input is immutable",
+      "Reject invalid line/coupon ([{'unit_cents': -1, 'quantity': 1}], None)",
+      "Reject invalid line/coupon ([{'unit_cents': 5, 'quantity': True}], None)",
+      "Reject invalid line/coupon ([{'unit_cents': True, 'quantity': 1}], None)",
+      "Reject invalid line/coupon ([{'unit_cents': 1250, 'quantity': 3}, {'unit_cents': 4000, 'quantity': 1}], 'UNKNOWN')"
+    ],
+    "data-validation": [
+      "Normalization and stable valid ordering",
+      "Invalid and duplicate provenance",
+      "Source records unchanged"
+    ],
+    "sqlite-upgrade": [
+      "Existing rows and defaults preserved",
+      "Schema rejects invalid row",
+      "Schema rejects invalid row"
+    ],
+    "sales-analysis": [
+      "Paid-only totals, counts and requested ordering",
+      "Source input preserved: orders.csv"
+    ],
+    "source-comparison": [
+      "Newer source resolves each conflict",
+      "Resolved facts retain source provenance",
+      "Source input preserved: setup-2024.txt",
+      "Source input preserved: setup-2026.txt"
+    ],
+    "operational-runbook": [
+      "Safe operation dependency sequence",
+      "Documented storage prerequisite",
+      "Private credential excluded",
+      "Source input preserved: operations.txt"
+    ],
+    "invoice-export": [
+      "CSV quoting, decimal rounding and grand total",
+      "Source input preserved: items.json"
+    ],
+    "restart-checkpoint": [
+      "Paid-only totals, counts and requested ordering",
+      "Completed normalization preserves all rows",
+      "Source input preserved: orders.csv"
+    ],
+    "steering-retained": [
+      "Paid-only totals, counts and requested ordering",
+      "Completed normalization preserves all rows",
+      "Source input preserved: orders.csv"
+    ],
+    "unknown-outcome": [
+      "Paid-only totals, counts and requested ordering",
+      "Completed normalization preserves all rows",
+      "Source input preserved: orders.csv"
+    ],
+    "compaction-retained": [
+      "Paid-only totals, counts and requested ordering",
+      "Completed normalization preserves all rows",
+      "Source input preserved: orders.csv"
+    ]
+  }
+}

@@ -13,7 +13,7 @@ from typing import Protocol
 from uuid import uuid4
 
 import httpx
-from core import Core, AGENT_SYSTEM_PROMPT, MAX_STREAM_CHARACTERS, _tool_calls
+from core import Core, AGENT_SYSTEM_PROMPT, MAX_STREAM_CHARACTERS, _tool_calls, thinking_metadata
 from context_window import estimated_prompt_tokens, prompt_budget
 from inference_stream import cancellable_inference, bounded_lines
 
@@ -75,38 +75,60 @@ class InferenceQueue:
     """One GPU lease, with foreground requests ahead of queued background work."""
     def __init__(self):
         self.condition=threading.Condition(); self.pending=[]; self.active=False; self.sequence=0
+        self.foreground_streak=0; self.enqueued={}
+
+    def _next(self):
+        background=[t for t in self.pending if t[0]]
+        oldest=min(background,key=lambda t:t[1]) if background else None
+        if oldest and (self.foreground_streak>=4 or time.monotonic()-self.enqueued[oldest]>=30):
+            return oldest
+        return min(self.pending) if self.pending else None
 
     @contextmanager
     def lease(self,cancel,background=False):
         with self.condition:
             self.sequence+=1; ticket=(1 if background else 0,self.sequence)
             heapq.heappush(self.pending,ticket)
+            self.enqueued[ticket]=time.monotonic()
             try:
-                while self.active or self.pending[0]!=ticket:
+                while self.active or self._next()!=ticket:
                     if cancel.is_set(): raise ValueError('Inference cancelled while queued.')
                     self.condition.wait(.1)
                 if cancel.is_set(): raise ValueError('Inference cancelled while queued.')
-                heapq.heappop(self.pending); self.active=True
+                self.pending.remove(ticket); heapq.heapify(self.pending); self.enqueued.pop(ticket,None); self.active=True
+                self.foreground_streak=0 if background else self.foreground_streak+1
             except BaseException:
                 if ticket in self.pending: self.pending.remove(ticket); heapq.heapify(self.pending)
+                self.enqueued.pop(ticket,None)
                 self.condition.notify_all(); raise
         try: yield
         finally:
             with self.condition: self.active=False; self.condition.notify_all()
 
 class OllamaProvider:
-    def __init__(self,core): self.core=core
+    def __init__(self,core):
+        self.core=core; self.thinking_cache={}; self.metadata_lock=threading.RLock()
     def models(self): return self.core.dispatch('models',{}).get('models',[])
-    def capabilities(self,model): return self.core.dispatch('show',{'model':model})
+    def capabilities(self,model):
+        info=self.core.dispatch('show',{'model':model})
+        with self.metadata_lock:
+            self.thinking_cache.pop(model,None)
+            self.thinking_cache[model]=thinking_metadata(info)
+            if len(self.thinking_cache)>64: self.thinking_cache.pop(next(iter(self.thinking_cache)))
+        return info
+    def invalidate_metadata(self):
+        with self.metadata_lock: self.thinking_cache.clear()
     def estimate_tokens(self,messages,tools): return estimated_prompt_tokens(messages,tools,AGENT_SYSTEM_PROMPT)
     def generate(self,data,cancel):
-        payload=Core._agent_payload(data)
+        with self.metadata_lock: cached=self.thinking_cache.get(data['model'])
+        compiled={**data,'model_metadata':cached} if cached is not None else data
+        payload=Core._agent_payload(compiled)
         payload['messages'][0]['content']=payload['messages'][0]['content'].replace('You are Sidekick','You are Forge',1)
         keep_alive=data.get('keep_alive','10m')
         payload['keep_alive']=('10m' if keep_alive else 0) if type(keep_alive) is bool else keep_alive
         if hasattr(self.core,'_stream_payload'):
             yield from self.core._stream_payload(payload,cancel)
-        else: yield from self.core.stream_agent(data,cancel)
+        else: yield from self.core.stream_agent(compiled,cancel)
 
 class CompatibleProvider:
     def __init__(self,config,vault=None):
@@ -187,6 +209,16 @@ class CompatibleProvider:
                 if timings is None: timings={}
                 if not isinstance(timings,dict): raise ValueError('Provider returned invalid generation timings.')
                 predicted_ms=timings.get('predicted_ms'); predicted_n=timings.get('predicted_n')
+                for source,target in (('prompt_ms','prompt_eval_duration'),('load_ms','load_duration')):
+                    value=timings.get(source)
+                    if value is not None:
+                        if type(value) not in (int,float) or not math.isfinite(value) or value<0:
+                            raise ValueError('Provider returned invalid generation timings.')
+                        final[target]=int(value*1e6)
+                if timings.get('prompt_n') is not None:
+                    value=timings['prompt_n']
+                    if type(value) is not int or value<0: raise ValueError('Provider returned invalid usage counters.')
+                    final['prompt_eval_count']=value
                 if predicted_ms is not None:
                     if type(predicted_ms) not in (int,float) or not math.isfinite(predicted_ms) or predicted_ms<0:
                         raise ValueError('Provider returned invalid generation timings.')
@@ -246,7 +278,51 @@ class CompatibleProvider:
 class ProviderPool:
     def __init__(self,core,store,vault=None):
         self.core=core; self.store=store; self.vault=vault; self.queue=InferenceQueue(); self.remote_queue=InferenceQueue(); self.ollama=OllamaProvider(core)
-        self.instances={}; self.lock=threading.RLock()
+        self.instances={}; self.lock=threading.RLock(); self.resource_queues={}
+        self.capability_cache={}
+        self.model_cache={}
+
+    def models(self,identifier='ollama',refresh=False):
+        provider=self.provider(identifier)
+        signature=self.instances.get(identifier,{}).get('signature','default')
+        key=(identifier,signature)
+        with self.lock:
+            cached=self.model_cache.get(key)
+            if not refresh and cached and time.monotonic()-cached[0]<30: return json.loads(json.dumps(cached[1]))
+        result=provider.models()
+        with self.lock: self.model_cache[key]=(time.monotonic(),result)
+        return json.loads(json.dumps(result))
+
+    def capabilities(self,identifier,model,refresh=False):
+        provider=self.provider(identifier)
+        signature=self.instances.get(identifier,{}).get('signature','default')
+        key=(identifier,model,signature)
+        with self.lock:
+            cached=self.capability_cache.get(key)
+            if not refresh and cached and time.monotonic()-cached[0]<60:
+                return json.loads(json.dumps(cached[1]))
+        result=provider.capabilities(model)
+        with self.lock: self.capability_cache[key]=(time.monotonic(),result)
+        return json.loads(json.dumps(result))
+
+    def invalidate(self,identifier=None):
+        with self.lock:
+            self.capability_cache={k:v for k,v in self.capability_cache.items() if identifier and k[0]!=identifier}
+            self.model_cache={k:v for k,v in self.model_cache.items() if identifier and k[0]!=identifier}
+            providers=([self.ollama] if not identifier or identifier=='ollama' else [])+[
+                item['provider'] for key,item in self.instances.items() if not identifier or key==identifier]
+            for provider in providers:
+                if isinstance(provider,OllamaProvider): provider.invalidate_metadata()
+
+    def queue_for(self,identifier,provider=None):
+        provider=provider or self.provider(identifier)
+        if getattr(provider,'remote_inference',False): return self.remote_queue
+        if identifier and identifier!='ollama':
+            config=self.store.entity('providers',identifier)
+            resource=config.get('resource_id')
+            if resource and config.get('independent_resource') is True:
+                with self.lock: return self.resource_queues.setdefault(resource,InferenceQueue())
+        return self.queue
     def provider(self,identifier):
         if not identifier or identifier=='ollama': return self.ollama
         config=self.store.entity('providers',identifier)
@@ -264,16 +340,32 @@ class ProviderPool:
         return [dict(id='ollama',name='Ollama',kind='ollama',url=self.core.base,managed=False)]+self.store.entities('providers')
     def generate(self,data,cancel,run,purpose='main',background=False):
         identifier=uuid4().hex; provider_id=data.get('provider_id','ollama'); provider=self.provider(provider_id)
-        final={}; text=''; start=time.monotonic(); first=None
+        final={}; text=''; call_bytes=0; submitted=time.monotonic(); start=None; first=None; visible=None
         from forge_speed import TokenSpeedEstimator
         meter=TokenSpeedEstimator(); last_speed=0
         try:
-            queue=self.remote_queue if getattr(provider,'remote_inference',False) else self.queue
+            queue=self.queue_for(provider_id,provider)
             with queue.lease(cancel,background):
+                if provider_id=='openrouter':
+                    # A queued request cannot retain revoked consent or an old
+                    # credential/configuration snapshot while waiting for a lane.
+                    config=self.store.entity('providers',provider_id)
+                    if not (config.get('enabled') is True and config.get('remote_consent') is True and config.get('credential_ref')):
+                        raise ValueError('OpenRouter consent was revoked while queued. No request was sent.')
+                    if self.store.get_settings().get('permission_profile')=='deny_access':
+                        raise ValueError('Current permissions deny cloud inference. No request was sent.')
+                    if run.get('agent_id') and not self.store.entity('agents',run['agent_id']).get('enabled',True):
+                        raise ValueError('This specialist was disabled while queued. No request was sent.')
+                    provider=self.provider(provider_id)
+                if cancel.is_set(): raise ValueError('Inference cancelled before sending the request.')
                 start=time.monotonic()
                 for packet in provider.generate(data,cancel):
-                    content=packet.get('message',{}).get('content') or packet.get('message',{}).get('thinking') or ''
-                    if content and first is None: first=time.monotonic()
+                    message=packet.get('message',{})
+                    content=(message.get('content') or '')+(message.get('thinking') or '')
+                    if (content or message.get('tool_calls')) and first is None: first=time.monotonic()
+                    if message.get('content') and visible is None: visible=time.monotonic()
+                    if message.get('tool_calls'):
+                        call_bytes=min(2_000_000,call_bytes+len(json.dumps(message['tool_calls'],ensure_ascii=False).encode('utf-8')))
                     text+=content
                     if content:
                         meter.observe((packet.get('message',{}).get('content') or '')+(packet.get('message',{}).get('thinking') or ''))
@@ -285,25 +377,42 @@ class ProviderPool:
                     if packet.get('done'): final=packet
                     yield packet
         finally:
-            duration=max(0,time.monotonic()-start); usage=final.get('usage') or {}
+            finished=time.monotonic(); duration=max(0,finished-submitted); usage=final.get('usage') or {}
             if not isinstance(usage,dict): usage={}
             prompt=final.get('prompt_eval_count',usage.get('prompt_tokens'))
             output=final.get('eval_count',usage.get('completion_tokens'))
+            if start is None: prompt=0; output=0
             details=usage.get('prompt_tokens_details')
             details=details if isinstance(details,dict) else {}
             cached=final.get('prompt_eval_cached_count',details.get('cached_tokens',0))
             if type(cached) is not int or cached<0: cached=0
-            decode=(final.get('eval_duration') or 0)/1e9
+            def reported_seconds(key):
+                value=final.get(key)
+                return value/1e9 if type(value) in (int,float) and math.isfinite(value) and value>=0 else None
+            decode=reported_seconds('eval_duration') or 0
             estimated=prompt is None or output is None
+            phase_timings={'queue_seconds':max(0,(start or finished)-submitted),
+                'load_seconds':reported_seconds('load_duration'),
+                'prefill_seconds':reported_seconds('prompt_eval_duration'),
+                'first_output_seconds':first-submitted if first is not None else None,
+                'first_visible_seconds':visible-submitted if visible is not None else None,
+                'decode_seconds':decode if final.get('eval_duration') is not None else None,
+                'inference_seconds':finished-start if start is not None else None,
+                'total_seconds':duration,'provenance':{'queue':'measured','first_output':'measured',
+                    'load':'reported' if reported_seconds('load_duration') is not None else 'unavailable',
+                    'prefill':'reported' if reported_seconds('prompt_eval_duration') is not None else 'unavailable',
+                    'decode':'reported' if reported_seconds('eval_duration') is not None else 'unavailable'}}
             self.store.record_usage(dict(id=identifier,run_id=run.get('id'),project_id=run.get('project_id'),
                 provider=provider_id,model=final.get('provider_model') or data['model'],purpose=purpose,
                 input_tokens=prompt if prompt is not None else provider.estimate_tokens(data['messages'],data.get('tools',[])),
-                cached_input_tokens=cached,output_tokens=output if output is not None else (len(text.encode('utf-8'))+2)//3,
-                estimated=estimated,decode_seconds=decode,total_seconds=duration,cancelled=cancel.is_set()))
+                cached_input_tokens=cached,output_tokens=output if output is not None else (len(text.encode('utf-8'))+call_bytes+2)//3,
+                estimated=estimated,decode_seconds=decode,total_seconds=duration,cancelled=cancel.is_set(),
+                phase_timings=phase_timings,token_breakdown=data.get('token_breakdown',{})))
             speed=output/decode if output is not None and decode>0 else None
             if run.get('id'):
                 self.store.event(run['id'],'usage',request_id=identifier,input_tokens=prompt,output_tokens=output,
-                                 tps=speed,estimated=estimated,ttft=first-start if first else None,
+                                 tps=speed,estimated=estimated,ttft=first-submitted if first is not None else None,
+                                 phase_timings=phase_timings,token_breakdown=data.get('token_breakdown',{}),
                                  requested_model=data['model'],actual_model=final.get('provider_model') or data['model'],response_provider=final.get('response_provider'))
 
 def memory_telemetry():

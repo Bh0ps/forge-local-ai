@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "design",
+  "phases": [
+    "implement"
+  ],
+  "intents": [
+    "ui",
+    "build"
+  ],
+  "triggers": [
+    "frontend",
+    "front end",
+    "react",
+    "component",
+    "button",
+    "website",
+    "web app",
+    "dark mode",
+    "page",
+    "form",
+    "dashboard"
+  ],
+  "recommended_tools": [
+    "read_file",
+    "edit_file",
+    "run_command",
+    "preview_inspect"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

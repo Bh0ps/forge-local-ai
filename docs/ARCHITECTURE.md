@@ -37,8 +37,9 @@ Unstarted actions are marked not executed rather than replayed on Resume.
 
 Compaction operates only on completed rounds. The exact current request, settings,
 goal checklist and checkpoints remain independently persisted. The ordinary and
-summary paths use the same Unicode/image/schema budget estimator. Failed summaries
-retry with smaller batches twice, then use a deterministic tool-outcome checkpoint.
+summary paths use the same Unicode/image/schema budget estimator. Each round's
+compaction episode makes at most one model-summary request. Failed summaries and
+further budget reductions use coverage-safe deterministic checkpoints.
 Full messages and tool artifacts remain saved. An unfit continuation pauses with a
 recovery action. No saved effect is executed by the compaction code.
 
@@ -54,3 +55,20 @@ The isolated Playwright browser uses snapshot guards; the optional native-messag
 extension connects only selected tabs. Skills and MCP metadata never grant access.
 Credentials stay in Windows Credential Manager (or an OS keyring), referenced by
 configuration. Raw dictation audio is never persisted.
+
+## Forge 5 execution and Builder
+
+The versioned prompt compiler prepares one bounded context snapshot per model round.
+Tool and skill catalogs cache reviewed metadata, expose lazy discovery/retrieval, and
+reload scope changes between completed rounds. Schema-validated independent reads
+can execute concurrently while invocation results retain deterministic protocol order.
+
+Builder extends existing plans/goals/runs through revisioned briefs, requirements and
+fresh evidence gates. Managed command sessions own process trees and logs; preview
+sessions bind loopback origins to a separate WebView2 profile and validated pane.
+Document inputs and exported artifacts retain scope, provenance and file hashes.
+
+Free cloud specialists remain read-only. Advisory failures are consumed as unavailable;
+required child failures remain blockers. Existing strict goal review is preserved,
+with explicitly configured local fallback for optional Builder outages. Schema 6 adds
+phase timing and token breakdown fields to usage. See [Forge 5](FORGE_5.md).

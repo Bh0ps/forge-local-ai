@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path, PureWindowsPath
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -30,7 +31,9 @@ MAX_SEARCH_BYTES = 12 * 1024 * 1024
 MAX_COMMAND_OUTPUT = 65_536
 MAX_DIFF_CHARS = 12_000
 SKIP_DIRECTORIES = {'.git', 'node_modules', '.venv', 'venv', '__pycache__', '.pytest_cache'}
-MUTATING_TOOLS = frozenset({'write_file', 'edit_file', 'make_directory', 'move_file', 'restore_file'})
+MUTATING_TOOLS = frozenset({'write_file', 'edit_file', 'apply_patch', 'make_directory', 'move_file', 'restore_file'})
+_ROOT_LOCKS = {}
+_ROOT_LOCK_GUARD = threading.Lock()
 
 
 class _WindowsProcessJob:
@@ -125,7 +128,8 @@ class ProjectTools:
         self.data_dir = Path(data_dir).expanduser().resolve()
         if self._inside(self.data_dir, self.root):
             raise ValueError('Backups must be stored outside the selected project.')
-        self._lock = threading.RLock()
+        with _ROOT_LOCK_GUARD:
+            self._lock = _ROOT_LOCKS.setdefault(str(self.root), threading.RLock())
 
     @staticmethod
     def _inside(path, root):
@@ -145,13 +149,25 @@ class ProjectTools:
             _schema('read_file', 'Read a UTF-8 project text file (up to 2 MiB), with numbered-line range and SHA-256. Output is bounded.',
                     {'path': path, 'start_line': {'type': 'integer', 'minimum': 1},
                      'end_line': {'type': 'integer', 'minimum': 1}}, ('path',)),
+            _schema('read_files', 'Read up to eight relevant file ranges in one call; each result includes its SHA-256. Use ranges to keep output small.',
+                    {'files': {'type': 'array', 'minItems': 1, 'maxItems': 8, 'items': {'type': 'object',
+                        'properties': {'path': path, 'start_line': {'type': 'integer', 'minimum': 1},
+                                       'end_line': {'type': 'integer', 'minimum': 1}}, 'required': ['path'], 'additionalProperties': False}}}, ('files',)),
             _schema('search_files', 'Find literal text in UTF-8 project files. Returns bounded matches with line numbers.',
-                    {'query': _string('Literal, case-sensitive text to find.'), 'path': path}, ('query',)),
+                    {'query': _string('Text or regular expression to find.'), 'path': path,
+                     'regex': {'type': 'boolean'}, 'case_sensitive': {'type': 'boolean'}, 'glob': _string('Optional file glob, e.g. *.tsx.')}, ('query',)),
             _schema('write_file', 'Create or replace a UTF-8 project file atomically. Saves an undo backup; read existing files first.',
                     {'path': path, 'content': _string('Complete UTF-8 file content.'), 'expected_sha256': digest}, ('path', 'content')),
             _schema('edit_file', 'Replace exactly one occurrence of old_text. Fails if absent or ambiguous. Saves an undo backup.',
                     {'path': path, 'old_text': _string('Exact existing text; must occur once.'),
                      'new_text': _string('Replacement text.'), 'expected_sha256': digest}, ('path', 'old_text', 'new_text')),
+            _schema('apply_patch', 'Apply related edits as a hash-guarded batch. All changes are validated before writing; failure rolls back committed files. Every file requires its read SHA-256 or missing.',
+                    {'changes': {'type': 'array', 'minItems': 1, 'maxItems': 32, 'items': {'type': 'object',
+                        'properties': {'path': path, 'expected_sha256': digest, 'content': _string('Complete replacement content; use only when needed.'),
+                            'delete': {'type': 'boolean'}, 'edits': {'type': 'array', 'minItems': 1, 'maxItems': 32, 'items': {'type': 'object',
+                                'properties': {'old_text': _string('Exact text occurring once.'), 'new_text': _string('Replacement.')},
+                                'required': ['old_text', 'new_text'], 'additionalProperties': False}}},
+                        'required': ['path', 'expected_sha256'], 'additionalProperties': False}}}, ('changes',)),
             _schema('make_directory', 'Create a directory and any missing parent directories inside the project.',
                     {'path': path}, ('path',)),
             _schema('move_file', 'Move a regular project file to an unused project path. Does not overwrite a destination.',
@@ -175,7 +191,10 @@ class ProjectTools:
                 raise ValueError('Tool arguments must be a JSON object.')
             if name == 'run_command':
                 return {'ok': True, **self.run_command(**args, cancel_event=cancel_event)}
-            with self._lock:
+            if name in MUTATING_TOOLS:
+                with self._lock:
+                    result = getattr(self, name)(**args)
+            else:
                 result = getattr(self, name)(**args)
             return {'ok': True, **result}
         except (OSError, ValueError, TypeError, UnicodeError, RuntimeError, subprocess.SubprocessError) as exc:
@@ -229,7 +248,8 @@ class ProjectTools:
     def _relative(self, path):
         return path.relative_to(self.root).as_posix()
 
-    def _read_bytes(self, path, *, missing=False):
+    def _read_bytes(self, path, *, missing=False, binary=False):
+        maximum=32*1024*1024 if binary else MAX_FILE_BYTES
         path = self._path(str(path))
         try:
             info = path.stat()
@@ -239,8 +259,8 @@ class ProjectTools:
             raise ValueError('File does not exist.')
         if not stat.S_ISREG(info.st_mode):
             raise ValueError('A regular file is required.')
-        if info.st_size > MAX_FILE_BYTES:
-            raise ValueError('File exceeds the 2 MiB text limit.')
+        if info.st_size > maximum:
+            raise ValueError('File exceeds the 32 MiB binary limit.' if binary else 'File exceeds the 2 MiB text limit.')
         if info.st_nlink > 1:
             raise ValueError('Hard-linked files are not available to project tools.')
         flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_NOFOLLOW', 0)
@@ -248,10 +268,10 @@ class ProjectTools:
         with os.fdopen(fd, 'rb') as handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 raise ValueError('A regular file is required.')
-            data = handle.read(MAX_FILE_BYTES + 1)
-        if len(data) > MAX_FILE_BYTES:
-            raise ValueError('File exceeds the 2 MiB text limit.')
-        self._decode(data)
+            data = handle.read(maximum + 1)
+        if len(data) > maximum:
+            raise ValueError('File exceeds the 32 MiB binary limit.' if binary else 'File exceeds the 2 MiB text limit.')
+        if not binary: self._decode(data)
         return data
 
     @staticmethod
@@ -322,10 +342,60 @@ class ProjectTools:
                 'end_line': min(end_line or len(lines), len(lines)), 'total_lines': len(lines),
                 'sha256': _sha(data), 'truncated': len(selected) > MAX_READ_CHARS}
 
-    def search_files(self, query, path='.'):
+    def read_files(self, files):
+        if not isinstance(files, list) or not 1 <= len(files) <= 8:
+            raise ValueError('Read between one and eight file ranges.')
+        from concurrent.futures import ThreadPoolExecutor
+        allowance=max(150,5000//len(files))
+        def read(spec):
+            try:
+                if not isinstance(spec, dict) or set(spec)-{'path', 'start_line', 'end_line'}:
+                    raise ValueError('Invalid file range.')
+                result = self.read_file(**spec)
+                if len(result['content'].encode('utf-8')) > allowance:
+                    result.update(content=result['content'].encode('utf-8')[:allowance].decode('utf-8',errors='ignore'), truncated=True)
+                return {'ok': True, **result}
+            except (OSError, ValueError, TypeError, UnicodeError) as exc:
+                return {'ok': False, 'error': str(exc)[:500]}
+        with ThreadPoolExecutor(max_workers=4, thread_name_prefix='Forge-read') as pool:
+            return {'files': list(pool.map(read, files))}
+
+    def search_files(self, query, path='.', regex=False, case_sensitive=True, glob=None):
         if not isinstance(query, str) or not query or len(query) > 1000 or '\x00' in query:
             raise ValueError('Search query must contain 1–1000 characters.')
+        if type(regex) is not bool or type(case_sensitive) is not bool or glob is not None and (not isinstance(glob, str) or len(glob)>200):
+            raise ValueError('Invalid search options.')
         start = self._path(path)
+        executable = shutil.which('rg')
+        if executable:
+            args = [executable, '--json', '--no-follow', '--max-filesize', str(MAX_FILE_BYTES), '--max-count', '100', '--color', 'never']
+            if not regex: args.append('--fixed-strings')
+            if not case_sensitive: args.append('--ignore-case')
+            if glob: args += ['--glob', glob]
+            for directory in sorted(SKIP_DIRECTORIES): args += ['--glob', '!'+directory+'/**']
+            args += ['--', query, str(start)]
+            try:
+                result = self.run_command(args,timeout=8,_output_limit=1024*1024)
+                if result['exit_code'] not in (0, 1) and not result.get('timed_out'):
+                    raise ValueError('Search failed: '+result['output'][:500])
+                matches=[]; searched=0
+                for line in result['output'].splitlines():
+                    try: packet=json.loads(line)
+                    except ValueError: continue
+                    if packet.get('type')=='begin': searched+=1
+                    if packet.get('type')!='match': continue
+                    data=packet['data']; target=self._path(data['path'].get('text',''))
+                    text=data['lines'].get('text','').rstrip('\r\n')
+                    column=(data.get('submatches') or [{}])[0].get('start',0)
+                    matches.append({'path':self._relative(target),'line':data['line_number'],'text':text[max(0,column-160):max(0,column-160)+600]})
+                    if len(matches)>=MAX_SEARCH_MATCHES: break
+                return {'matches':matches,'files_searched':searched,'truncated':len(matches)>=MAX_SEARCH_MATCHES or result.get('output_truncated',False) or result.get('timed_out',False),'engine':'rg'}
+            except (OSError, subprocess.TimeoutExpired):
+                pass  # Portable fallback remains available if rg cannot start.
+        if regex:
+            raise ValueError('Regex search requires ripgrep; use literal search or install rg.')
+        import fnmatch
+        needle=query if case_sensitive else query.casefold()
         matches, scanned, byte_count, visited = [], 0, 0, 0
         pending = [start]
         truncated = False
@@ -347,6 +417,8 @@ class ProjectTools:
                                 break
                             pending.append(Path(entry.path))
                     continue
+                if glob and not (fnmatch.fnmatch(item.name,glob) or fnmatch.fnmatch(self._relative(item).replace('\\','/'),glob)):
+                    continue
                 data = self._read_bytes(item)
             except (OSError, ValueError):
                 continue
@@ -356,7 +428,7 @@ class ProjectTools:
                 break
             scanned += 1
             for line_number, line in enumerate(self._decode(data).splitlines(), 1):
-                column = line.find(query)
+                column = (line if case_sensitive else line.casefold()).find(needle)
                 if column >= 0:
                     offset = max(0, column - 160)
                     matches.append({'path': self._relative(item), 'line': line_number,
@@ -364,11 +436,15 @@ class ProjectTools:
                     if len(matches) >= MAX_SEARCH_MATCHES:
                         truncated = True
                         break
-        return {'matches': matches, 'files_searched': scanned, 'truncated': truncated}
+        return {'matches': matches, 'files_searched': scanned, 'truncated': truncated, 'engine': 'python'}
 
     @staticmethod
     def _diff(old, new, path):
-        before, after = (old or b'').decode('utf-8'), (new or b'').decode('utf-8')
+        try:
+            if b'\x00' in (old or b'') or b'\x00' in (new or b''): raise UnicodeDecodeError('utf-8',b'\x00',0,1,'binary')
+            before, after = (old or b'').decode('utf-8'), (new or b'').decode('utf-8')
+        except UnicodeDecodeError:
+            return '(Binary artifact changed; inspect its exported preview.)'
         if len(before) + len(after) > 200_000:
             return '(Diff omitted for a large file; use read_file to inspect.)'
         output, count = [], 0
@@ -389,7 +465,7 @@ class ProjectTools:
             if (_sha(old) or 'missing') != expected_sha256.lower():
                 raise ValueError('File changed since it was read. Read it again before editing.')
 
-    def _backup(self, target, old, new):
+    def _backup(self, target, old, new, *, binary=False):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         if self.data_dir.resolve() != self.data_dir or self._inside(self.data_dir.resolve(), self.root):
             raise ValueError('Backup directory no longer resolves to trusted storage.')
@@ -398,7 +474,7 @@ class ProjectTools:
         manifest = self.data_dir / (identifier + '.json')
         metadata = {'version': 1, 'root': str(self.root), 'path': self._relative(target),
                     'existed': old is not None, 'sha256': _sha(old), 'new_sha256': _sha(new),
-                    'created_at': time.time()}
+                    'created_at': time.time(), 'binary': binary}
         with payload.open('xb') as handle:
             handle.write(old or b'')
             handle.flush()
@@ -409,12 +485,12 @@ class ProjectTools:
             os.fsync(handle.fileno())
         return {'backup_id': identifier, 'backup_path': str(payload)}
 
-    def _commit(self, target, old, new):
+    def _commit(self, target, old, new, *, binary=False):
         """Check for intervening edits, stage locally, then atomically replace."""
         self._path(str(target))
         if not target.parent.is_dir():
             raise ValueError('Parent directory does not exist. Use make_directory first.')
-        backup = self._backup(target, old, new)
+        backup = self._backup(target, old, new, binary=True) if binary else self._backup(target,old,new)
         staging = None
         try:
             if new is not None:
@@ -426,7 +502,8 @@ class ProjectTools:
                 if old is not None:
                     os.chmod(staging, stat.S_IMODE(target.stat().st_mode))
             self._path(str(target))
-            if self._read_bytes(target, missing=True) != old:
+            current=self._read_bytes(target,missing=True,binary=True) if binary else self._read_bytes(target,missing=True)
+            if current != old:
                 raise ValueError('File changed while preparing this edit. Read it again before editing.')
             if new is None:
                 if target.exists():
@@ -458,6 +535,15 @@ class ProjectTools:
         self._check_expected(old, expected_sha256)
         return self._commit(target, old, new)
 
+    def write_bytes(self,path,raw,expected_sha256='missing'):
+        """Host-only artifact export with the same path, hash and backup guards."""
+        if not isinstance(raw,bytes) or len(raw)>32*1024*1024:
+            raise ValueError('Binary export must be bytes below 32 MiB.')
+        with self._lock:
+            target=self._path(path); old=self._read_bytes(target,missing=True,binary=True)
+            self._check_expected(old,expected_sha256)
+            return self._commit(target,old,raw,binary=True)
+
     def edit_file(self, path, old_text, new_text, expected_sha256=None):
         if not isinstance(old_text, str) or not old_text:
             raise ValueError('old_text must be nonempty exact text.')
@@ -471,6 +557,54 @@ class ProjectTools:
         if count != 1:
             raise ValueError(f'old_text must match exactly once; found {count} matches.')
         return self._commit(target, old, self._encode(content.replace(old_text, new_text, 1)))
+
+    def apply_patch(self, changes):
+        if not isinstance(changes, list) or not 1 <= len(changes) <= 32:
+            raise ValueError('A patch must contain 1–32 file changes.')
+        prepared=[]; seen=set()
+        for change in changes:
+            if not isinstance(change,dict) or set(change)-{'path','expected_sha256','content','edits','delete'} or 'expected_sha256' not in change:
+                raise ValueError('Every patch file requires path and expected_sha256.')
+            target=self._path(change.get('path'))
+            if target in seen: raise ValueError('A patch may mention each file only once.')
+            seen.add(target)
+            if not target.parent.is_dir(): raise ValueError('Create parent directories before patching.')
+            old=self._read_bytes(target,missing=True); self._check_expected(old,change['expected_sha256'])
+            choices=int('content' in change)+int('edits' in change)+int(change.get('delete') is True)
+            if choices!=1: raise ValueError('Choose exactly one of content, edits, or delete=true for each file.')
+            if change.get('delete') is True:
+                if old is None: raise ValueError('Cannot delete a missing file.')
+                new=None
+            elif 'content' in change: new=self._encode(change['content'])
+            else:
+                if old is None: raise ValueError('Cannot edit a missing file.')
+                content=self._decode(old); edits=change['edits']
+                if not isinstance(edits,list) or not 1<=len(edits)<=32: raise ValueError('Provide 1–32 exact edits.')
+                for edit in edits:
+                    if not isinstance(edit,dict) or set(edit)!={'old_text','new_text'} or not isinstance(edit['old_text'],str) or not edit['old_text'] or not isinstance(edit['new_text'],str):
+                        raise ValueError('Each edit needs nonempty old_text and text new_text.')
+                    if content.count(edit['old_text'])!=1: raise ValueError('Each old_text must occur exactly once.')
+                    content=content.replace(edit['old_text'],edit['new_text'],1)
+                new=self._encode(content)
+            prepared.append((target,old,new))
+        results=[]; committed=[]
+        try:
+            # Final batch check before the first filesystem mutation.
+            for target,old,_ in prepared:
+                if self._read_bytes(target,missing=True)!=old: raise ValueError('A file changed before patch commit.')
+            for target,old,new in prepared:
+                results.append(self._commit(target,old,new)); committed.append((target,old,new))
+        except Exception as exc:
+            failed=[]
+            for target,old,new in reversed(committed):
+                try:
+                    if self._read_bytes(target,missing=True)!=new: raise ValueError('File changed after patch; rollback would overwrite new work.')
+                    self._commit(target,new,old)
+                except Exception:
+                    failed.append(self._relative(target))
+            return {'ok':False,'error':str(exc)[:1000],'rolled_back':not failed,'outcome_unknown':bool(failed),
+                    'inspect_paths':failed,'changes':results}
+        return {'changes':results,'transaction':'validated batch; per-file atomic replacement with guarded rollback'}
 
     def make_directory(self, path):
         target = self._path(path)
@@ -512,7 +646,7 @@ class ProjectTools:
         for item in (manifest, payload):
             if item.resolve() != item or not item.is_file() or item.is_symlink():
                 raise ValueError('Backup is missing or is not trusted.')
-            if item.stat().st_size > MAX_FILE_BYTES:
+            if item.stat().st_size > 32*1024*1024:
                 raise ValueError('Invalid backup size.')
         metadata = json.loads(manifest.read_text(encoding='utf-8'))
         if not isinstance(metadata, dict) or metadata.get('root') != str(self.root) or metadata.get('path') != self._relative(target):
@@ -520,10 +654,12 @@ class ProjectTools:
         restored = payload.read_bytes() if metadata.get('existed') is True else None
         if _sha(restored) != metadata.get('sha256'):
             raise ValueError('Backup integrity check failed.')
-        if restored is not None:
+        binary=metadata.get('binary') is True
+        if not binary and payload.stat().st_size>MAX_FILE_BYTES: raise ValueError('Invalid backup size.')
+        if restored is not None and not binary:
             self._decode(restored)
-        old = self._read_bytes(target, missing=True)
-        result = self._commit(target, old, restored)
+        old = self._read_bytes(target, missing=True,binary=binary)
+        result = self._commit(target, old, restored,binary=True) if binary else self._commit(target,old,restored)
         return {**result, 'restored_backup_id': backup_id}
 
     @staticmethod
@@ -546,7 +682,7 @@ class ProjectTools:
         if process.poll() is None:
             process.kill()
 
-    def run_command(self, argv, cwd='.', timeout=60, cancel_event=None):
+    def run_command(self, argv, cwd='.', timeout=60, cancel_event=None, *, _output_limit=MAX_COMMAND_OUTPUT):
         if not isinstance(argv, list) or not 1 <= len(argv) <= 128 or any(
                 not isinstance(arg, str) or '\x00' in arg or len(arg) > 16_384 for arg in argv):
             raise ValueError('argv must be a list of 1–128 valid command arguments.')
@@ -554,6 +690,8 @@ class ProjectTools:
             raise ValueError('Executable is missing or command arguments are too long.')
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 0.1 <= timeout <= 60:
             raise ValueError('Command timeout must be between 0.1 and 60 seconds.')
+        if type(_output_limit) is not int or not 1<=_output_limit<=1024*1024:
+            raise ValueError('Invalid command output allowance.')
         working = self._path(cwd, directory=True)
         if cancel_event is not None and cancel_event.is_set():
             return {'cancelled': True, 'exit_code': None, 'output': ''}
@@ -574,7 +712,7 @@ class ProjectTools:
                     if not chunk:
                         break
                     byte_count[0] += len(chunk)
-                    output.extend(chunk[:max(0, MAX_COMMAND_OUTPUT - len(output))])
+                    output.extend(chunk[:max(0, _output_limit - len(output))])
             except (OSError, ValueError):
                 pass
 
@@ -613,5 +751,5 @@ class ProjectTools:
             process.stdout.close()
         return {'argv': argv, 'cwd': self._relative(working), 'exit_code': process.returncode,
                 'output': bytes(output).decode('utf-8', errors='replace'),
-                'output_truncated': byte_count[0] > MAX_COMMAND_OUTPUT or reader.is_alive(),
+                'output_truncated': byte_count[0] > _output_limit or reader.is_alive(),
                 'cancelled': cancelled, 'timed_out': timed_out}

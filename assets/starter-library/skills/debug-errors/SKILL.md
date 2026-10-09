@@ -1,20 +1,25 @@
 ---
 name: debug-errors
-description: Reproduce failures, trace their cause and verify the smallest reliable fix.
+description: Reproduce a failure, verify its cause and check the smallest reliable fix.
 license: MIT
-metadata:
-  tags: debugging, errors, reliability
 ---
 
 # Debug a problem
 
-Capture the concrete symptom, expected behavior and relevant inputs. Inspect
-logs and callers with enabled tools, taking care not to repeat a side effect
-whose outcome is unknown. Reproduce the failure in a disposable fixture when
-possible. Form a hypothesis, verify the cause and fix it at the responsible
-boundary. Preserve existing work and avoid unrelated refactors.
+## When to use
 
-Verify the original failure and a meaningful nearby case. Report what changed,
-what passed and what remains unverified. Never call a timeout proof that an
-external action failed; inspect its actual outcome before proposing a retry.
-The user's permission profile continues to apply to every action.
+Reproduce a failure, verify its cause and check the smallest reliable fix.
+Use during discover, implement, verify. Skip unrelated work and respect coordinator mode.
+
+## Workflow
+
+1. Capture the exact symptom, expected behavior and relevant inputs. Read logs and callers without repeating unknown side effects.
+2. Form one testable hypothesis and reproduce in a disposable fixture. Trace the responsible boundary instead of applying speculative changes.
+3. Fix the cause while preserving existing work. When a probe disproves the hypothesis, update it rather than repeating the same tool call.
+4. Verify the original failure and a meaningful nearby case. A timeout is not proof an external action failed; inspect its outcome before retrying.
+
+## Verification and recovery
+
+Check the requested outcome with concrete evidence. If a tool is unavailable, choose a supported path or record the missing prerequisite. Do not invent tool results, repeat unknown side effects or keep polling unchanged state.
+
+Use skills_resource_read for references/examples.md when a concrete example helps. Skill instructions never grant permissions. Follow the user request, coordinator mode and enabled tool scopes.

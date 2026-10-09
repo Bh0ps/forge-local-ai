@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "design",
+  "phases": [
+    "verify"
+  ],
+  "intents": [
+    "ui",
+    "test",
+    "preview"
+  ],
+  "triggers": [
+    "preview",
+    "live app",
+    "browser check",
+    "visual verification",
+    "screenshot",
+    "ui test"
+  ],
+  "recommended_tools": [
+    "preview_inspect",
+    "preview_click",
+    "preview_type",
+    "preview_screenshot",
+    "preview_diagnostics"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "delivery",
+  "phases": [
+    "plan",
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "skill"
+  ],
+  "triggers": [
+    "skill",
+    "skills",
+    "workflow template",
+    "reusable workflow",
+    "instructions"
+  ],
+  "recommended_tools": [
+    "skills_search",
+    "skills_resource_read"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

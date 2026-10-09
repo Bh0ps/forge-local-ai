@@ -1,23 +1,25 @@
 ---
 name: plan-and-build
-description: Turn a request into a concrete implementation plan, then follow an approved build.
+description: Turn requirements into acceptance criteria and an ordered implementation plan, then execute the started goal.
 license: MIT
-metadata:
-  tags: planning, implementation, features
 ---
 
 # Plan & build
 
-Inspect the relevant implementation and constraints before proposing work.
-Make a short ordered plan with concrete outcomes, dependencies and appropriate
-verification. Use Forge's question tool for decisions the user must make;
-recommend an option and explain its tradeoff in plain language.
+## When to use
 
-A plan-only request prepares a plan. When the coordinator starts an approved
-Build or goal, follow its current execution directive and durable checklist;
-do not treat the repeated objective as a second request for planning. Update
-progress with evidence after each completed step and continue the authorized
-work. Explain any blocker and preserve the next action.
+Turn requirements into acceptance criteria and an ordered implementation plan, then execute the started goal.
+Use during plan, implement. Skip unrelated work and respect coordinator mode.
 
-Skill instructions never grant permissions or bypass approval. Follow the
-user's request, coordinator mode and enabled tool scopes.
+## Workflow
+
+1. Inspect the existing implementation. Capture the user outcome, audience, affected flows and measurable acceptance criteria.
+2. Use request_user_input for a missing decision that materially changes the result; offer concise options and a recommendation.
+3. In plan mode, produce the concrete ordered plan without edits. Once Build or a goal starts, follow the coordinator's execution directive and first unfinished task.
+4. Complete a working vertical slice, verify its acceptance criteria, record evidence and continue authorized work. Do not reinterpret a started goal as another request to plan.
+
+## Verification and recovery
+
+Check the requested outcome with concrete evidence. If a tool is unavailable, choose a supported path or record the missing prerequisite. Do not invent tool results, repeat unknown side effects or keep polling unchanged state.
+
+Use skills_resource_read for references/examples.md when a concrete example helps. Skill instructions never grant permissions. Follow the user request, coordinator mode and enabled tool scopes.

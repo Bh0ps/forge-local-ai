@@ -81,7 +81,8 @@ def test_cloud_helper_inherits_project_worktree_tool_and_permission_ceiling(env,
     workspace=env.service.store.create_project('Selected worktree',str(workspace_root))
     run=parent(env,project_id=project['id'],workspace_project_id=workspace['id'],permission_profile='always_ask',
         permission_ceiling='always_ask',agent_tools=['read_file'])
-    child=env.service.agent_start({'agent_id':'openrouter-researcher','parent_id':run['id'],'text':'Read evidence.txt.'})
+    child=env.service.agent_start({'agent_id':'openrouter-researcher','parent_id':run['id'],'text':'Read evidence.txt.',
+        'cloud_scope':{'files':['evidence.txt']}})
     stored=env.service.store.run(child['id'])
     assert stored['project_id']==project['id'] and stored['workspace_project_id']==workspace['id']
     assert stored['permission_ceiling']=='always_ask' and stored['agent_tools']==['read_file']

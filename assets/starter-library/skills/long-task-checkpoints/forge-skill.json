@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "version": "2.0.1",
+  "bundle": "build",
+  "phases": [
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "continue",
+    "build"
+  ],
+  "triggers": [
+    "goal",
+    "todo",
+    "to-do",
+    "checklist",
+    "long task",
+    "continue",
+    "resume",
+    "step by step"
+  ],
+  "recommended_tools": [
+    "goal_read",
+    "goal_task_update",
+    "artifact_read"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

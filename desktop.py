@@ -57,6 +57,8 @@ class Bridge:
         if integrations and not getattr(integrations.browser, 'native', None):
             from native_browser import NativeBrowser
             integrations.browser.native = NativeBrowser(home, ui_dispatch=self._native)
+        if hasattr(self._service, 'get_builder'):
+            self._service.get_builder().previews.attach_browser(self._native)
         if self._lifecycle is None:
             self._lifecycle = HostLifecycle(self._service, self._pairing)
         return self._service
@@ -69,6 +71,18 @@ class Bridge:
             if not isinstance(data, dict):
                 raise ValueError('Expected an object')
             service = self._ensure_service()
+            if action == 'artifact_save_as':
+                # Only an explicit user download opens this dialog. Agent tools
+                # cannot choose arbitrary filesystem destinations.
+                import webview
+                artifact = service.get_builder().documents.download(data)
+                destination = self._window.create_file_dialog(webview.FileDialog.SAVE, save_filename=artifact['name'])
+                if not destination:
+                    return {'cancelled': True}
+                target = Path(destination[0] if isinstance(destination, (tuple, list)) else destination)
+                raw = base64.b64decode(artifact['content_base64'], validate=True)
+                target.write_bytes(raw)
+                return {'ok': True, 'path': str(target), 'sha256': artifact['sha256']}
             if action.startswith('dictation_'):
                 state = service.host_dictation.status()['state']
                 sync = (action in ('dictation_start', 'dictation_upload') and
@@ -360,6 +374,8 @@ def _tray(api):
 
 
 def main():
+    if '--smoke-test' in sys.argv and not os.getenv('FORGE_DATA_DIR'):
+        raise ValueError('Native smoke requires an explicit disposable FORGE_DATA_DIR.')
     if '--forge-update' in sys.argv:
         import argparse
         import subprocess
@@ -458,16 +474,16 @@ def main():
                     while api._window.evaluate_js("!!document.querySelector('dialog[open]')") and time.monotonic() < deadline:
                         time.sleep(.05)
                     starters = [skill for skill in api.call('skills')['skills'] if skill.get('builtin')]
-                    if len(starters) != 10 or not all(skill['enabled'] and skill['automatic'] for skill in starters):
+                    if len(starters) != 24 or not all(skill['enabled'] and skill['automatic'] for skill in starters):
                         raise ValueError('The packaged starter library was not prepared correctly.')
                     opened = api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('nav[aria-label=\"Workspace navigation\"] button')].find(e=>e.textContent.trim()==='Library');if(button){button.click();return true;}return false;})()")
                     if not opened: raise ValueError('The Library navigation is missing.')
                     deadline = time.monotonic() + 10
                     cards = 0
-                    while cards < 12 and time.monotonic() < deadline:
+                    while cards < 24 and time.monotonic() < deadline:
                         time.sleep(.05)
                         cards = api._window.evaluate_js("document.querySelectorAll('.library-card').length")
-                    if cards < 12: raise ValueError('The packaged Discover library did not render.')
+                    if cards < 24: raise ValueError('The packaged Discover library did not render.')
                     result['library'] = {'starter_skills': len(starters), 'discover_cards': cards, 'rendered': True}
                     api._window.evaluate_js("document.querySelector('.new-chat').click()")
                     result.update(hud=api.mode('hud'), peek=api.mode('hud', True), full=api.mode('full'),
@@ -554,6 +570,69 @@ def main():
                         finally:
                             fixture.shutdown()
                             fixture.server_close()
+                        # Exercise the separately owned preview controller, not
+                        # merely the research browser's shared DOM tools.
+                        manager = service.get_builder()
+                        project = service.create_project({'name': 'Disposable preview fixture', 'git': False})
+                        brief = manager.save({'project_id': project['id'], 'title': 'Native preview fixture',
+                            'objective': 'Verify the owned WebView2 preview', 'directory': 'site',
+                            'requirements': [{'text': 'Edit the local fixture', 'acceptance': 'A click updates visible text.'}]})
+                        from project_tools import ProjectTools
+                        files = ProjectTools(project['path'], service.store.home / 'backups')
+                        files.make_directory('site')
+                        files.write_file('site/index.html', '''<!doctype html><meta charset="utf-8"><title>Forge preview fixture</title>
+                        <input placeholder="Preview name"><button onclick="document.querySelector('#result').innerText=document.querySelector('input').value">Apply preview</button>
+                        <p id="result">Before</p><script>console.error('FORGE_PREVIEW_DIAGNOSTIC');fetch('/missing-diagnostic').catch(()=>{});</script>''', 'missing')
+                        preview = manager.dispatch('preview_start', {'builder_id': brief['id'], 'mode': 'static'})
+                        try:
+                            opened = api._window.evaluate_js("(()=>{document.querySelector('button[aria-label=\"Close workspace panel\"]')?.click();const b=[...document.querySelectorAll('nav[aria-label=\"Workspace navigation\"] button')].find(e=>e.textContent.trim()==='Builder');if(b){b.click();return true;}return false;})()")
+                            if not opened: raise ValueError('Builder navigation is missing.')
+                            deadline = time.monotonic()+10
+                            while not api._window.evaluate_js("!!document.querySelector('nav[aria-label=\"Builder sections\"]')") and time.monotonic()<deadline:
+                                time.sleep(.05)
+                            api._window.evaluate_js("(()=>{const b=[...document.querySelectorAll('nav[aria-label=\"Builder sections\"] button')].find(e=>e.textContent.trim()==='Preview');b?.click();document.querySelector('button[aria-label=\"Collapse sidebar\"]')?.click();return true;})()")
+                            deadline = time.monotonic()+10
+                            while not api._window.evaluate_js("!!document.getElementById('forge-preview-panel')") and time.monotonic()<deadline:
+                                time.sleep(.05)
+                            # The actual frontend sizes and binds the child to
+                            # host-inspected viewport bounds.
+                            deadline = time.monotonic()+20
+                            while (not manager.previews.browser.status().get('visible') or manager.previews.browser.status().get('loading')) and time.monotonic()<deadline:
+                                time.sleep(.1)
+                            preview_run = {'id': 'preview-native-smoke', 'project_id': project['id'], 'settings': service.store.get_settings()}
+                            def preview_tool(name, arguments):
+                                outcome = manager.execute(preview_run, name, {'id': preview['id'], **arguments}, cancel)
+                                if outcome.get('ok') is False: raise ValueError(outcome.get('error', 'Preview fixture failed.'))
+                                return outcome
+                            inspected = preview_tool('preview_inspect', {})
+                            target = next(t for t in inspected['targets'] if t['tag']=='input')
+                            preview_tool('preview_type', {'snapshot_id': inspected['snapshot_id'], 'selector': target['selector'], 'text': 'Isolated preview works'})
+                            inspected = preview_tool('preview_inspect', {})
+                            target = next(t for t in inspected['targets'] if t['tag']=='button')
+                            arguments = {'id': preview['id'], 'snapshot_id': inspected['snapshot_id'], 'selector': target['selector']}
+                            rejected = manager.execute({**preview_run,'id':'other-preview-run'}, 'preview_click', arguments, cancel)
+                            if not rejected.get('not_executed'): raise ValueError('Preview accepted another run snapshot.')
+                            preview_tool('preview_click', arguments)
+                            inspected = preview_tool('preview_inspect', {})
+                            if 'Isolated preview works' not in inspected['text']: raise ValueError('Preview click did not update the fixture.')
+                            viewport = preview_tool('preview_viewport', {'width':240,'height':240})
+                            diagnostics = preview_tool('preview_diagnostics', {})
+                            capture = preview_tool('preview_screenshot', {})
+                            controller = manager.previews.browser
+                            research_profile = browser.native.view.control.CreationProperties.UserDataFolder
+                            preview_profile = controller.view.control.CreationProperties.UserDataFolder
+                            exposed = controller.view.evaluate('typeof window.pywebview')
+                            captured = any('FORGE_PREVIEW_DIAGNOSTIC' in item.get('message','') for item in diagnostics['entries'])
+                            if exposed!='undefined' or not captured or str(research_profile)==str(preview_profile):
+                                raise ValueError('Preview profile, bridge isolation or diagnostics failed.')
+                            result['native_preview'] = {'engine':'WebView2','separate_controller':controller is not browser.native,
+                                'separate_profile':str(research_profile)!=str(preview_profile), 'bridge_exposed':exposed,
+                                'fixture_updated':True,'snapshot_guarded':True,'diagnostics_captured':captured,
+                                'viewport_verified':viewport.get('width')==240 and viewport.get('height')==240,
+                                'screenshot_bytes':Path(capture['artifact']).stat().st_size}
+                        finally:
+                            manager.previews.stop(preview['id'])
+                        result['native_preview']['stopped'] = manager.previews.status(preview['id'])['status']=='stopped' and preview['id'] not in manager.previews.active
                 except Exception as exc:
                     result['error'] = str(exc)
                 finally:

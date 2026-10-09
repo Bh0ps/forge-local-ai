@@ -1,0 +1,13 @@
+proxy_tools 0.1.0
+
+The published package metadata says MIT. Its distributed source identifies
+the extracted Werkzeug proxy implementation as BSD and attributes Armin
+Ronacher (2013), adapted by Jonathan Tushman (2014). The upstream LICENSE.txt
+contains two BSD redistribution conditions and retains both copyright notices. Forge includes that
+complete upstream text without substituting an MIT template.
+
+The version 0.1.0 PyPI source archive was SHA256 verified, and its
+proxy_tools/__init__.py and setup.py match upstream commit
+db43f1e35d4f90a65c5a4d56d9e9af88212ec6e6 byte for byte.
+
+Source: https://github.com/jtushman/proxy_tools/tree/db43f1e35d4f90a65c5a4d56d9e9af88212ec6e6

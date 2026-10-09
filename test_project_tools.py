@@ -29,7 +29,7 @@ def call(project, name, **args):
 def test_schemas_have_unique_names_and_no_freeform_shell():
     schemas = ProjectTools.schemas()
     names = [item['function']['name'] for item in schemas]
-    assert len(set(names)) == len(names) == 9
+    assert len(set(names)) == len(names) == 11
     command = next(item['function'] for item in schemas if item['function']['name'] == 'run_command')
     assert command['parameters']['required'] == ['argv']
     assert command['parameters']['properties']['argv']['type'] == 'array'

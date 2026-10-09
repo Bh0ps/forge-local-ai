@@ -1,8 +1,21 @@
 <p align="center"><img src="assets/forge.svg" width="96" alt="Forge"></p>
 
-# Forge 4.2.3
+# Forge 5.0.2
 
 **A local AI workspace for coding, research and computer tools. Open source under [MIT](LICENSE).**
+
+Forge 5 adds an integrated web-app Builder, 24 workflow skills, task-aware tool discovery,
+managed command/preview sessions, document inputs and verified exports. A versioned
+prompt compiler and coverage-safe checkpoints improve local execution; optional
+free cloud specialists advise while the local agent applies changes. Adaptive
+profiles are explicitly approved and preserve model/context locks.
+
+[Forge 5.0.2 guide](docs/FORGE_502.md) covers the compact composer, guided brainstorming and native Telegram conversations.
+[Forge 5.0.1 guide](docs/FORGE_501.md) covers guided task execution, restart-safe drafts and visible goal guidance.
+
+[Forge 5 guide](docs/FORGE_5.md) describes workflows, verification, migration,
+performance measurements, and release limits. Speed and task-quality targets require
+matched live evaluation; compatibility tests alone do not establish those gains.
 
 Forge is the next version of Sidekick. It combines a Windows desktop workspace,
 an always-on-top HUD and an authenticated local browser interface around one
@@ -19,7 +32,7 @@ The 4.2.1 correction makes Build start a tracked goal with clear implementation
 instructions, adds mid-run steering and selectable questions, and cleans up
 active goals and the Memory layout. Desktop launches are maximized.
 
-The 4.2.2 library adds ten ready-to-use, toggleable skills and a searchable
+The 4.2.2 library originally added ten ready-to-use, toggleable skills and a searchable
 Discover collection of portable skills and plugins. Source, license and setup
 details stay visible during review; the starter collection works offline.
 
@@ -59,6 +72,21 @@ configured. Existing installations and local state are retained for rollback.
   and the slider cover 2K–256K, initially 32K.
 - Chat menus support moving, archiving and deleting; project removal preserves
   folders and moves chats to Unassigned. Both menus support right-click.
+
+## A look inside
+
+Screenshots from a running 5.0.2 interface with disposable demonstration data.
+They show the UI, not a claim of live model performance.
+
+![Guided conversation and docked skills and notes in dark mode](docs/images/forge-5.0.2-context-dark.png)
+
+![Builder brief in light mode](docs/images/forge-5.0.2-builder-light.png)
+
+<details><summary>Compact composer and slash Builder</summary>
+
+![Compact composer with the Builder command](docs/images/forge-5.0.2-composer-compact.png)
+
+</details>
 
 ## Agents and tools
 

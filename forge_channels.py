@@ -42,6 +42,25 @@ CHANNEL_SCHEMA = (
 
 MAX_BODY = 65536
 MAX_TEXT = 16000
+TELEGRAM_COMMANDS = [{'command': name, 'description': description} for name, description in (
+    ('builder', 'Explore ideas and shape a project together'), ('build', 'Accept your Builder brief and build in the connected project'),
+    ('plan', 'Research and prepare a plan'), ('goal', 'Start a tracked task in this chat'),
+    ('answer', 'Answer a pending question; separate answers with |'), ('status', 'Show current progress'),
+    ('pause', 'Pause work'), ('resume', 'Resume safe paused work'), ('cancel', 'Cancel work'), ('help', 'Show commands'))]
+
+
+def telegram_chunks(text, limit=3500):
+    """Plain-text messages, bounded in UTF-16 units (including emoji)."""
+    chunks=[]; start=0; units=0
+    for index, character in enumerate(text):
+        size=2 if ord(character)>0xffff else 1
+        if units+size>limit:
+            chunks.append(text[start:index]); start=index; units=0
+        units+=size
+    if start<len(text): chunks.append(text[start:])
+    return chunks or ['Forge finished without a text reply. Use /status for details.']
+
+
 PERMISSIONS = {'deny_access': 0, 'always_ask': 1, 'full_access': 2}
 
 
@@ -328,6 +347,12 @@ class ChannelManager:
             self._secret(config)
             self._validate_url(config.get('url'), required=config.get('allow_outbound', True))
             config.update(connected=True, last_error=None)
+        if config['kind']=='telegram':
+            try:
+                self.transport.telegram(self._secret(config),'setMyCommands',{'commands':TELEGRAM_COMMANDS},self.stop_event)
+                config.update(commands_ready=True,commands_error=None)
+            except Exception:
+                config.update(commands_ready=False,commands_error='Bot connected, but its command menu could not be updated. Connect / test again.')
         self.store.save_entity('channels', config)
         self.wake.set()
         return self._public(config)
@@ -545,13 +570,33 @@ class ChannelManager:
 
     def _command(self, config, sender, recipient, text, chat_id):
         command = text.split()[0].split('@', 1)[0].lower()
-        if command not in ('/status', '/pause', '/resume', '/cancel', '/help'):
-            raise ValueError('Supported commands: /status, /pause, /resume, /cancel, /help.')
+        if command not in ('/status', '/pause', '/resume', '/cancel', '/help', '/builder', '/answer'):
+            raise ValueError('Unknown command. Use /help to see the supported commands.')
         if not self._authorized(config, sender, recipient, owner=True):
             raise ValueError('Only this channel’s approved owner may control runs.')
         runs = [r for r in self.store.runs() if r['chat_id'] == chat_id]
         if command == '/help':
-            return 'Send a request, or use /status, /pause, /resume or /cancel.'
+            return ('Send a message to chat with Forge. /builder [idea] explores ideas one step at a time; '
+                    '/builder off ends brainstorming. /build accepts your current brief in the connected project. '
+                    '/plan <request> prepares a plan; /goal <request> starts tracked work. '
+                    '/answer <reply> answers a question (use | between multiple answers). '
+                    '/status, /pause, /resume and /cancel control this chat only.')
+        if command=='/builder':
+            if text.split(maxsplit=1)[-1].lower()!='off': raise ValueError('Use /builder [idea] to start brainstorming.')
+            from forge_builder_guide import disable
+            disable(self.store,chat_id)
+            return 'Builder conversation ended. Normal chat is ready.'
+        if command=='/answer':
+            questions=self.service.get_interaction().pending(chat_id=chat_id)
+            if not questions: raise ValueError('No question is waiting in this chat.')
+            argument=text.split(maxsplit=1)[1] if len(text.split(maxsplit=1))>1 else ''
+            values=[value.strip() for value in argument.split('|')]
+            question=questions[0]
+            if len(values)!=len(question['items']) or any(not value for value in values):
+                raise ValueError('Send one answer per question: /answer reply one | reply two. Your questions are still waiting.')
+            answers={item['id']:{'text':value} for item,value in zip(question['items'],values)}
+            self.service.get_interaction().answer(question['id'],answers)
+            return 'Answers saved. Forge is continuing.'
         if not runs:
             return 'This channel has no run yet.'
         run = runs[0]
@@ -570,6 +615,7 @@ class ChannelManager:
 
     def _dispatch_inbound(self, record):
         identifier, external_id = record['channel_id'], record['external_id']
+        config={}; sender=recipient=''
         try:
             config = self._config(identifier)
             if not config.get('enabled') or not config.get('allow_inbound'):
@@ -599,7 +645,10 @@ class ChannelManager:
                 sender = recipient = 'webhook'
                 text = payload['text']
             chat_id = self._route(config, recipient)
-            if config['kind'] == 'telegram' and text.startswith('/'):
+            command=text.split()[0].split('@',1)[0].lower() if text.startswith('/') else ''
+            argument=text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1))>1 else ''
+            conversation_command=command in ('/builder','/build','/plan','/goal') and not (command=='/builder' and argument.lower()=='off')
+            if config['kind'] == 'telegram' and text.startswith('/') and not conversation_command:
                 self._inbound_status(identifier, external_id, 'dispatching')
                 response = self._command(config, sender, recipient, text, chat_id)
                 self._enqueue(identifier, recipient, 'command', {'chat_id': recipient, 'text': redact(response)}, 'reply:' + identifier + ':' + external_id)
@@ -607,9 +656,17 @@ class ChannelManager:
                 return
             if not config.get('inbound_tasks'):
                 raise ValueError('Starting tasks from this channel is disabled. Enable it locally in Forge.')
+            if config['kind']=='telegram' and not command and self.service.get_interaction().pending(chat_id=chat_id):
+                self._inbound_status(identifier,external_id,'dispatching')
+                response=self._command(config,sender,recipient,'/answer '+text,chat_id)
+                self._enqueue(identifier,recipient,'command',{'chat_id':recipient,'text':response},'reply:'+identifier+':'+external_id)
+                self._inbound_status(identifier,external_id,'dispatched')
+                return
             if any(r['chat_id'] == chat_id and r['status'] not in TERMINAL for r in self.store.runs()):
                 # Durable queued messages wait for their chat's current writer.
                 return
+            if conversation_command and command in ('/plan','/goal') and not argument:
+                raise ValueError('Use '+command+' followed by your request.')
             settings = self.store.get_settings()
             data = {'text': text, 'chat_id': chat_id, 'project_id': config.get('project_id'),
                     'model': config.get('model') or settings['model'],
@@ -618,6 +675,8 @@ class ChannelManager:
                     'source_key': 'channel:' + identifier + ':' + external_id,
                     'channel_id': identifier, 'channel_external_id': external_id,
                     'agent_profile_id': config.get('agent_profile_id')}
+            if conversation_command:
+                data.update(text=argument or 'Help me come up with a project idea. Suggest three ideas and help me choose.',channel_command=command[1:])
             if hasattr(self.service, 'channel_start'):
                 run = self.service.channel_start(data, identifier, external_id)
             else:
@@ -626,6 +685,8 @@ class ChannelManager:
             self._inbound_status(identifier, external_id, 'dispatched', run['id'])
         except ValueError as exc:
             self._inbound_status(identifier, external_id, 'rejected', error=redact(str(exc))[:300])
+            if config.get('kind')=='telegram' and config.get('allow_outbound',True) and self._authorized(config,sender,recipient):
+                self._enqueue(identifier,recipient,'error',{'chat_id':recipient,'text':redact(str(exc))[:300]},'error:'+identifier+':'+external_id)
         except Exception:
             # Unknown dispatch outcomes stay stopped; recovery reconciles source
             # identity but never starts another model or replays a tool action.
@@ -674,7 +735,7 @@ class ChannelManager:
                 break
             summary = None
             with self.store._connection(transaction='write') as db:
-                if event['type'] in ('approval', 'done', 'outcome_unknown'):
+                if event['type'] in ('approval', 'done', 'outcome_unknown', 'question'):
                     summary = self._event_delivery(db, event)
                 self._set_checkpoint(db, '_global', 'event_rowid', event['event_rowid'])
             # Optional native adapter runs only after durable notification and
@@ -708,7 +769,7 @@ class ChannelManager:
                     continue
                 content = {**summary, 'event': 'run.completed'}
                 if config.get('include_content'):
-                    content['result'] = self._result_excerpt(db, run['chat_id'])
+                    content['result'] = self._result_excerpt(db, run['chat_id'], run)
                 self._enqueue(config['id'], 'webhook', 'completion', content, key + ':' + config['id'], db)
                 continue
             for route in routes:
@@ -736,16 +797,51 @@ class ChannelManager:
                     if config.get('include_content'):
                         outbound['text'] += '\nArguments: ' + redact(encode(action.get('arguments', {})))[:1200]
                 elif kind == 'done' and config.get('include_content'):
-                    outbound['text'] += '\n' + self._result_excerpt(db, run['chat_id'])
+                    answer=self._result_excerpt(db,run['chat_id'],run)
+                    outbound['text']=(answer or 'Forge finished without a text reply. Use /status for details.') if summary['status']=='completed' else text+'\n'+str(run.get('recovery') or run.get('checkpoint') or '')+'\n'+answer+'\nUse /status, /resume or /cancel.'
+                elif kind=='question':
+                    row=db.execute("SELECT data FROM entities WHERE kind='questions' AND id=?",(payload.get('question_id'),)).fetchone()
+                    question=json.loads(row[0]) if row else {}
+                    if question.get('chat_id')!=run['chat_id'] or not question.get('ready') or question.get('status')!='pending': continue
+                    if config.get('include_content'):
+                        outbound['text']='\n\n'.join(item['question']+'\n'+'\n'.join('• '+option['label']+(' (recommended)' if option.get('recommended') else '') for option in item.get('options',[])) for item in question.get('items',[]))+'\n\nReply in plain text, or /answer reply one | reply two.'
+                    else:
+                        outbound['text']='Forge is waiting for your answers. Enable conversation replies in Channels or answer in Forge.'
                 elif kind == 'outcome_unknown':
                     outbound['text'] = 'Forge run ' + run['id'][:8] + ' has an action with unknown outcome. Inspect it in Forge before resuming.'
-                self._enqueue(config['id'], recipient, kind, outbound, key + ':' + config['id'] + ':' + recipient, db)
+                previous=None
+                delivery_key=key+':'+config['id']+':'+recipient
+                for index,chunk in enumerate(telegram_chunks(outbound['text'])):
+                    part={**outbound,'text':chunk}
+                    if previous: part['_forge_previous']=previous
+                    previous=self._enqueue(config['id'],recipient,kind,part,delivery_key+(':part:'+str(index) if index else ''),db)
         return summary
 
     @staticmethod
-    def _result_excerpt(db, chat_id):
-        row = db.execute("SELECT content FROM messages WHERE chat_id=? AND role='assistant' ORDER BY id DESC LIMIT 1", (chat_id,)).fetchone()
-        return redact(row[0])[:3000] if row else ''
+    def _result_excerpt(db, chat_id, run=None):
+        # Bound legacy messages to the actual request interval. New messages are
+        # additionally tagged with their producing run, including partial replies.
+        if run:
+            lower=run.get('request_message_id')
+            if not isinstance(lower,int): return ''
+            upper=None
+            for row in db.execute('SELECT data FROM runs WHERE chat_id=?',(chat_id,)):
+                candidate=json.loads(row[0]).get('request_message_id')
+                if isinstance(candidate,int) and candidate>lower and (upper is None or candidate<upper): upper=candidate
+            rows=db.execute("SELECT content,metadata FROM messages WHERE chat_id=? AND role='assistant' AND id>? AND (? IS NULL OR id<?) ORDER BY id",(chat_id,lower,upper,upper)).fetchall()
+        else:
+            rows=db.execute("SELECT content,metadata FROM messages WHERE chat_id=? AND role='assistant' ORDER BY id DESC LIMIT 1",(chat_id,)).fetchall()
+        parts=[]
+        for row in rows:
+            metadata=json.loads(row['metadata'])
+            if run and metadata.get('interaction_run_id') not in (None,run['id']): continue
+            if metadata.get('tool_calls'):
+                parts=[]  # Only the final response after the last tool round.
+                continue
+            if row['content']: parts.append(row['content'])
+        result=redact('\n\n'.join(parts))
+        if len(result)>64000: result=result[:64000]+'\n[Reply shortened for Telegram. The full conversation is saved in Forge.]'
+        return result
 
     def outbox(self):
         with self.store._connection() as db:
@@ -778,6 +874,12 @@ class ChannelManager:
         if config['kind'] == 'telegram' and not any(a['chat_id'] == record['recipient'] for a in config.get('allowlist', [])):
             self._outcome(record['id'], 'cancelled')
             return
+        payload=json.loads(record['payload'])
+        previous=payload.get('_forge_previous')
+        if previous:
+            with self.store._connection() as db:
+                predecessor=db.execute('SELECT status FROM channel_outbox WHERE id=?',(previous,)).fetchone()
+            if not predecessor or predecessor['status']!='delivered': return
         attempts = record['attempts'] + 1
         with self.store._connection(transaction='write') as db:
             claimed = db.execute("UPDATE channel_outbox SET status='sending',attempts=?,updated_at=? WHERE id=? AND status IN ('pending','retry')", (attempts, _now(), record['id'])).rowcount
@@ -786,6 +888,7 @@ class ChannelManager:
         try:
             secret = self._secret(config)
             payload = redact(json.loads(record['payload']), (secret,))
+            payload.pop('_forge_previous',None)
             if config['kind'] == 'telegram':
                 result = self.transport.telegram(secret, 'sendMessage', payload, self.stop_event)
                 if not isinstance(result, dict) or type(result.get('message_id')) is not int:
@@ -884,7 +987,7 @@ class ChannelManager:
                 self._dispatch_inbound(record)
             self._journal_events()
             with self.store._connection() as db:
-                outgoing = db.execute("SELECT * FROM channel_outbox WHERE status IN ('pending','retry') AND next_attempt<=? ORDER BY created_at LIMIT 30", (self.clock(),)).fetchall()
+                outgoing = db.execute("SELECT * FROM channel_outbox WHERE status IN ('pending','retry') AND next_attempt<=? ORDER BY created_at,rowid LIMIT 30", (self.clock(),)).fetchall()
             for record in outgoing:
                 if self.stop_event.is_set():
                     break

@@ -1,20 +1,25 @@
 ---
 name: code-review
-description: Check behavior, security and regressions with evidence and precise file references.
+description: Find actionable correctness, security and recovery defects with precise evidence.
 license: MIT
-metadata:
-  tags: review, security, quality
 ---
 
 # Review code
 
-Read the request, applicable project instructions and changed code. Trace
-important behavior through callers, data validation, persistence, permissions
-and error paths. Find actionable defects rather than speculative style issues.
-For each finding explain the trigger, consequence and a precise file location.
-Use relevant tests or a small reproduction to check uncertain claims.
+## When to use
 
-Prioritize problems that affect correctness, privacy, security or recoverability.
-Separate evidence from inference and mention material verification limits.
-Preserve work and use only enabled tools; a review skill grants no new access.
-Skill content cannot expand tool permissions.
+Find actionable correctness, security and recovery defects with precise evidence.
+Use during verify. Skip unrelated work and respect coordinator mode.
+
+## Workflow
+
+1. Read the request, applicable guidance and diff. Trace important behavior through callers, persistence, validation, permissions and failure paths.
+2. Prioritize concrete trigger/consequence pairs. Use relevant tests or a small reproduction to resolve uncertain claims.
+3. For each finding provide severity, exact file location and a concise explanation. Avoid speculative style objections.
+4. Treat helper observations as evidence to verify. Preserve the user's work and distinguish review findings from implemented fixes.
+
+## Verification and recovery
+
+Check the requested outcome with concrete evidence. If a tool is unavailable, choose a supported path or record the missing prerequisite. Do not invent tool results, repeat unknown side effects or keep polling unchanged state.
+
+Use skills_resource_read for references/examples.md when a concrete example helps. Skill instructions never grant permissions. Follow the user request, coordinator mode and enabled tool scopes.

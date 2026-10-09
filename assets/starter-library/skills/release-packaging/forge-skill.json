@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "version": "2.0.0",
+  "bundle": "delivery",
+  "phases": [
+    "verify"
+  ],
+  "intents": [
+    "delivery"
+  ],
+  "triggers": [
+    "release",
+    "package",
+    "installer",
+    "deploy",
+    "shipping",
+    "distribution"
+  ],
+  "recommended_tools": [
+    "read_file",
+    "run_command"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

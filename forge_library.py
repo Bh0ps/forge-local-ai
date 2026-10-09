@@ -11,25 +11,10 @@ from pathlib import Path
 import re
 import tempfile
 
-LIBRARY_VERSION = "1.0.0"
+LIBRARY_VERSION = "2.0.1"
 ASSET_ROOT = Path(__file__).resolve().parent / "assets" / "starter-library"
-STARTER_SKILLS = (
-    {"id": "project-discovery", "name": "Explore a project", "description": "Find the entry points, project instructions and architecture before making changes.", "category": "Coding", "tags": ["architecture", "exploration", "onboarding"], "triggers": ["explore", "architecture", "codebase", "entry point", "understand this project", "project structure"]},
-    {"id": "plan-and-build", "name": "Plan & build", "description": "Turn a request into a concrete implementation plan, then follow an approved build.", "category": "Planning", "tags": ["planning", "implementation", "features"], "triggers": ["plan", "build", "implement", "feature", "create", "develop"]},
-    {"id": "debug-errors", "name": "Debug a problem", "description": "Reproduce failures, trace their cause and verify the smallest reliable fix.", "category": "Coding", "tags": ["debugging", "errors", "reliability"], "triggers": ["debug", "bug", "error", "crash", "failure", "broken", "not working", "doesn't work", "does not work", "fix"]},
-    {"id": "code-review", "name": "Review code", "description": "Check behavior, security and regressions with evidence and precise file references.", "category": "Coding", "tags": ["review", "security", "quality"], "triggers": ["review", "audit", "security", "regression", "vulnerability", "check this code"]},
-    {"id": "testing", "name": "Test & verify", "description": "Choose meaningful checks for the change and explain what the results prove.", "category": "Coding", "tags": ["testing", "validation", "quality"], "triggers": ["test", "tests", "verify", "validation", "coverage", "pytest", "vitest"]},
-    {"id": "research", "name": "Research with sources", "description": "Compare primary sources, preserve citations and separate facts from uncertainty.", "category": "Research", "tags": ["research", "citations", "sources"], "triggers": ["research", "look up", "search", "latest", "compare", "sources", "citation"]},
-    {"id": "browser-research", "name": "Use the browser", "description": "Read and interact with connected pages using fresh snapshots and explicit targets.", "category": "Research", "tags": ["browser", "web", "computer use"], "triggers": ["browser", "webpage", "website", "web page", "connected tab", "navigate", "screenshot"]},
-    {"id": "git-workflow", "name": "Git & worktrees", "description": "Inspect changes, preserve existing work and prepare reviewable Git operations.", "category": "Workflow", "tags": ["git", "worktrees", "pull requests"], "triggers": ["git", "commit", "branch", "worktree", "pull request", "merge", "github"]},
-    {"id": "documentation", "name": "Write documentation", "description": "Keep setup, usage and technical notes accurate, concise and easy to follow.", "category": "Writing", "tags": ["documentation", "readme", "writing"], "triggers": ["documentation", "document", "readme", "guide", "release notes", "changelog", "explain"]},
-    {"id": "long-task-checkpoints", "name": "Stay on track", "description": "Use durable goal checklists and evidence to continue long tasks without repeating work.", "category": "Planning", "tags": ["goals", "checklists", "continuity"], "triggers": ["goal", "todo", "to-do", "checklist", "long task", "continue", "resume", "step by step"]},
-)
+from forge_skill_catalog import STARTER_SKILLS, STARTER_BUNDLES
 STARTER_BY_ID = {item["id"]: item for item in STARTER_SKILLS}
-STARTER_BUNDLES = (
-    {"id": "research", "name": "Research essentials", "description": "A portable research workflow with source checking and browser guidance.", "category": "Research", "tags": ["research", "browser", "citations"], "skills": ["research", "browser-research"]},
-    {"id": "review", "name": "Code quality", "description": "A portable review workflow with debugging and meaningful verification.", "category": "Coding", "tags": ["review", "debugging", "testing"], "skills": ["code-review", "debug-errors", "testing"]},
-)
 
 # Reviewed portable portions of official catalogs. These are an offline
 # discovery snapshot, not redistributed third-party packages. Remote refresh
@@ -138,6 +123,7 @@ def reconcile_starters(root, config):
     root = Path(root).resolve()
     state = config.setdefault("library", {"version": LIBRARY_VERSION, "files": {}})
     owned = state.setdefault("files", {})
+    resources = state.setdefault("resources", {})
     selections = config.setdefault("skills", {})
     changed = False
     errors = []
@@ -175,6 +161,31 @@ def reconcile_starters(root, config):
                 if not license_path.exists() and not is_link(license_path):
                     atomic_bytes(license_path, (ASSET_ROOT / "LICENSE").read_bytes())
                     changed = True
+                # Upgrade owned resource files independently; preserve edits and
+                # deletions exactly as for SKILL.md. Never follow package links.
+                for source in (ASSET_ROOT / "skills" / identity).rglob("*"):
+                    if not source.is_file() or source.name == "SKILL.md" or is_link(source):
+                        continue
+                    resource = source.relative_to(ASSET_ROOT / "skills" / identity)
+                    destination = folder / resource
+                    safe_directory(destination.parent, root)
+                    if is_link(destination):
+                        continue
+                    resource_key = identity + "/" + resource.as_posix()
+                    expected_resource = source.read_bytes()
+                    resource_digest = hashlib.sha256(expected_resource).hexdigest()
+                    previous_resource = resources.get(resource_key)
+                    if not destination.exists() and previous_resource is None:
+                        atomic_bytes(destination, expected_resource)
+                        changed = True
+                    elif destination.is_file() and previous_resource and file_digest(destination) == previous_resource.get("sha256") and previous_resource.get("sha256") != resource_digest:
+                        atomic_bytes(destination, expected_resource)
+                        changed = True
+                    if previous_resource is None or destination.is_file() and file_digest(destination) == resource_digest:
+                        record_resource = {"sha256": resource_digest}
+                        if resources.get(resource_key) != record_resource:
+                            resources[resource_key] = record_resource
+                            changed = True
         except (OSError, ValueError) as exc:
             errors.append({"source_id": "forge-starter", "skill_id": identity,
                            "error": "Starter skill could not be prepared (" + type(exc).__name__ + ")."})
@@ -184,46 +195,138 @@ def reconcile_starters(root, config):
     return changed, errors
 
 
-def starter_metadata(path, root):
+def starter_metadata(path, root, index=None, digest=None):
     path, root = Path(path).resolve(), Path(root).resolve()
     for item in STARTER_SKILLS:
         if path == root / "skills" / "forge-starter" / item["id"] / "SKILL.md":
             expected = ASSET_ROOT / "skills" / item["id"] / "SKILL.md"
             return {**item, "library_id": item["id"], "builtin": True, "source": "builtin:skill/" + item["id"],
                     "license": "MIT", "version": LIBRARY_VERSION,
-                    "modified": not expected.is_file() or file_digest(path) != file_digest(expected)}
+                    "modified": not expected.is_file() or ((digest or index.file_digest(path)) != index.file_digest(expected) if index else file_digest(path) != file_digest(expected))}
     return None
 
 
-def relevance_score(skill, query):
-    query = str(query or "").casefold()[:24000]
-    if not query.strip():
-        return 0
-    terms = skill.get("triggers") or skill.get("tags") or []
-    if isinstance(terms, str):
-        terms = [terms]
-    terms = [str(term).casefold().strip() for term in terms if str(term).strip()][:50]
-    # An imported automatic skill without tags can still match its readable name.
-    if not terms:
-        terms = [str(skill.get("name", "")).casefold()]
+def _words(query):
+    text = str(query or "").casefold()[:24000]
+    aliases = {"verifying":"verify", "verified":"verify", "verification":"verify", "validation":"verify",
+               "testing":"test", "tests":"test", "implementation":"implement", "implementing":"implement",
+               "building":"build", "features":"feature", "improvements":"improve", "optimization":"optimize",
+               "debugging":"debug", "instructions":"instruction", "skills":"skill"}
+    return " ".join(aliases.get(word, word) for word in re.findall(r"[\w'-]+", text))
+
+
+def _mentions(text, term):
+    return bool(re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text)) and not bool(re.search(
+        r"(?:do not|don't|without|no)\s+(?:use |run |need |want |any )?" + re.escape(term) + r"(?!\w)", text))
+
+
+def task_context(query, context=None):
+    context = dict(context or {})
+    text = _words(query)
+    groups = {
+        "plan": "plan requirements specification planner",
+        "build": "add build implement create develop make improve overhaul feature",
+        "architecture": "architecture framework stack scaffold",
+        "debug": "fix debug bug error crash broken failure regression",
+        "ui": "frontend react component button website webpage dashboard form layout page mobile responsive dark mode interface",
+        "design": "design visual typography palette beautiful polished vibe layout dark mode",
+        "backend": "backend api endpoint server fastapi flask express service",
+        "data": "database sqlite schema migration storage persist csv tsv dataset spreadsheet",
+        "analysis": "analyze analysis chart dataset",
+        "integration": "oauth auth authentication integration mcp credentials login sign-in",
+        "test": "test verify check coverage acceptance preview",
+        "preview": "preview",
+        "accessibility": "accessibility accessible keyboard contrast screen reader responsive overflow",
+        "performance": "performance latency inference slow responsiveness throughput speed benchmark optimize efficiency",
+        "research": "research latest compare sources citation look up",
+        "browser": "browser webpage connected tab navigate screenshot",
+        "review": "review audit security vulnerability",
+        "continue": "continue resume goal todo checklist",
+        "writing": "documentation document readme guide changelog explain",
+        "git": "git commit branch worktree merge github pull request",
+        "delivery": "release package installer deploy distribution shipping",
+        "skill": "skill reusable workflow instruction",
+        "delegate": "delegate specialist helper parallel openrouter hybrid",
+    }
+    intents = set(context.get("intents") or [])
+    for identity, terms in groups.items():
+        if any(_mentions(text, term) for term in terms.split()):
+            intents.add(identity)
+    # Workflow phase is explicit when supplied by the coordinator. Tool results
+    # can inform routing, but cannot supply instructions or permission grants.
+    phase = context.get("phase")
+    if phase not in {"discover", "plan", "implement", "verify", "research"}:
+        phase = "plan" if "plan" in intents else "verify" if "test" in intents and "build" not in intents and "debug" not in intents else "research" if "research" in intents else "implement"
+    outcomes = context.get("outcomes") or []
+    if isinstance(outcomes, list):
+        for outcome in outcomes[-6:]:
+            if not isinstance(outcome, dict):
+                continue
+            if outcome.get("ok") is False or outcome.get("status") in ("failed", "error"):
+                intents.add("debug")
+            if outcome.get("name") in ("write_file", "edit_file") and outcome.get("ok") is not False and phase == "verify":
+                intents.add("test")
+    project_type = context.get("project_type", "")
+    if intents & {"build", "debug", "test", "design", "preview"}:
+        if project_type in ("frontend", "web", "react", "vite"):
+            intents.add("ui")
+        elif project_type in ("python", "backend"):
+            intents.add("backend")
+    return {**context, "phase": phase, "intents": intents, "_routing_resolved": True, "_query_words": text}
+
+
+def relevance_score(skill, query, context=None):
+    text = context["_query_words"] if context and context.get("_routing_resolved") else _words(query)
+    terms = skill.get("triggers") or skill.get("tags") or [skill.get("name", "")]
+    terms = [terms] if isinstance(terms, str) else terms
     score = 0
-    for term in terms:
-        if re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", query):
-            score += 2 if " " in term else 1
+    for term in terms[:50]:
+        term = _words(term)
+        if term and _mentions(text, term):
+            score += 3 if " " in term else 2
+    for excluded in skill.get("exclude_triggers", []):
+        if _words(excluded) in text:
+            return 0
+    routing = context if context and context.get("_routing_resolved") else task_context(query, context)
+    matches = set(skill.get("intents", [])) & routing["intents"]
+    specialized = set(skill.get("intents", [])) - {"build", "plan", "continue", "test"}
+    foundations = {"project-discovery", "plan-and-build", "long-task-checkpoints", "efficient-tools", "architecture-frameworks", "testing"}
+    if specialized and not specialized & matches and skill.get("library_id", skill.get("id")) not in foundations:
+        matches -= {"build", "continue", "test"}
+    phase_match = routing["phase"] in skill.get("phases", [])
+    if skill.get("builtin") or skill.get("intents"):
+        score += len(matches) * 3
+        if score and phase_match:
+            score += 5
+        elif score and skill.get("phases"):
+            score = max(1, score - 4)
     return score
 
 
-def select_skills(skills, explicit=None, query=""):
-    """Explicit selection first, at most three relevant automatic skills."""
-    if isinstance(explicit, str):
-        explicit = [explicit]
-    explicit = {str(value).casefold() for value in (explicit or [])}
+def select_skills(skills, explicit=None, query="", context=None):
+    """Stable explicit choices first, then three available relevant workflows."""
+    explicit = [explicit] if isinstance(explicit, str) else list(explicit or [])
+    explicit = [str(value).casefold() for value in explicit]
+    routing = task_context(query, context)
+    tools = set(routing["available_tools"]) if "available_tools" in routing else None
     available = [skill for skill in skills if skill.get("enabled")]
-    chosen = [skill for skill in available if any(str(skill.get(key, "")).casefold() in explicit
-                                                 for key in ("id", "name", "library_id"))][:12]
-    chosen_ids = {skill["id"] for skill in chosen}
-    automatic = [(relevance_score(skill, query), skill) for skill in available
-                 if skill.get("automatic") and skill["id"] not in chosen_ids]
-    automatic.sort(key=lambda pair: (-pair[0], str(pair[1].get("name", ""))))
-    chosen.extend(skill for score, skill in automatic[:3] if score > 0)
+    chosen, seen = [], set()
+    for reference in explicit:
+        for skill in available:
+            if skill["id"] not in seen and reference in [str(skill.get(key, "")).casefold() for key in ("id", "name", "library_id")]:
+                chosen.append(dict(skill, selection_reason="Explicitly selected", selection_score=100))
+                seen.add(skill["id"])
+    automatic = []
+    for skill in available:
+        if not skill.get("automatic") or skill["id"] in seen or skill.get("manifest_error"):
+            continue
+        if tools is not None and set(skill.get("requires_tools", [])) - tools:
+            continue
+        score = relevance_score(skill, query, routing)
+        if score:
+            matches = sorted(set(skill.get("intents", [])) & routing["intents"])
+            reason = "Matches " + (", ".join(matches) if matches else "task wording") + " during " + routing["phase"]
+            automatic.append((score, dict(skill, selection_reason=reason, selection_score=score)))
+    automatic.sort(key=lambda pair: (-pair[0], str(pair[1].get("library_id") or pair[1]["id"])))
+    chosen.extend(skill for _, skill in automatic[:3])
     return chosen[:12]

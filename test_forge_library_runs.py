@@ -54,7 +54,7 @@ def test_turning_off_explicit_skill_removes_it_before_next_round(tmp_path):
         svc.shutdown()
 
 
-def test_large_explicit_skill_has_bounded_unicode_excerpt_and_retrieval_id(tmp_path):
+def test_large_explicit_skill_has_bounded_complete_recipe_retrieval_card(tmp_path):
     svc=service(tmp_path,Engine())
     try:
         skill=install_rule(svc,tmp_path)
@@ -63,29 +63,30 @@ def test_large_explicit_skill_has_bounded_unicode_excerpt_and_retrieval_id(tmp_p
         run=svc.jobs.start({'text':'Use my selected investigation rules.','skills':[skill['id']],'context':8192})
         assert finished(svc,run)['status']=='completed'
         text=svc.store.run(run['id'])['skill_instructions']
-        assert 'Keep evidence exact.' in text and '漢字🌍' in text
+        assert 'Read the complete recipe' in text
+        assert 'Keep evidence exact.' not in text and '漢字🌍' not in text
         assert len(text.encode())<=4096
-        assert 'skills_read with id '+skill['id'] in text
+        assert 'skills_read id '+skill['id'] in text
+        recipe=svc.integrations.read_skill(skill['id'])
+        assert 'Keep evidence exact.' in recipe['text'] and '漢字🌍' in recipe['text']
         assert skill['id'] in svc.store.run(run['id'])['active_skills']
     finally:
         svc.shutdown()
 
 
 def test_selection_uses_current_request_and_goal_objective(tmp_path,monkeypatch):
-    svc=service(tmp_path,Engine([{'tool_calls':[call('goal_update',{
-        'tasks':[{'text':'Investigate the fixture regression.','status':'completed','evidence':['Fixture verified.']}],
-        'checkpoint':'Fixture verified.','next_action':'Complete.'})]},{'content':'Finished.'}]))
+    svc=service(tmp_path)
     captured=[]
     try:
         original=svc.integrations.active_skill_instructions
-        def select(project,explicit,query=''):
+        def select(project,explicit,query='',context=None):
             captured.append(query)
-            return original(project,explicit,query=query)
+            return original(project,explicit,query=query,context=context)
         monkeypatch.setattr(svc.integrations,'active_skill_instructions',select)
         goal=svc.goal_create({'text':'Investigate the fixture regression.'})
+        svc.jobs._launch=lambda run:None
         run=svc.jobs.start({'text':'Continue the saved checkpoint.','goal_id':goal['id']})
-        result=finished(svc,run)
-        assert result['status']=='completed',result
+        svc.jobs._skill_guidance(svc.store.run(run['id']))
         assert captured and 'Continue the saved checkpoint.' in captured[0]
         assert 'Investigate the fixture regression.' in captured[0]
     finally:

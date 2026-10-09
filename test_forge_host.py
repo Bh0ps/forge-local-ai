@@ -53,6 +53,7 @@ def pair(client, authority):
     code = authority.issue()['code']
     response = client.post('/api/v1/pair', json={'code': code})
     assert response.status_code == 200
+    client.headers['X-Forge-Client-Proof'] = response.json()['client_proof']
     return response
 
 
@@ -104,7 +105,8 @@ def test_host_origin_and_content_guards(browser):
     assert client.get('/').status_code == 200
     assert client.get('/bundle.js').status_code == 200
     assert client.get('/%2e%2e/test_forge_host.py').status_code == 404
-    assert client.get('/api/v1/health').json()['app'] == 'Forge'
+    health = client.get('/api/v1/health').json()
+    assert health['app'] == 'Forge' and health['version'] == '5.0.2'
 
 
 def test_cursor_events_json_and_sse(browser):

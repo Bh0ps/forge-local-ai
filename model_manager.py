@@ -63,7 +63,7 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
         response.headers['X-Frame-Options'] = 'DENY'
         response.headers['Cache-Control'] = 'no-store' if request.url.path.startswith('/api/') else 'no-cache'
         response.headers['Content-Security-Policy'] = (
-            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "default-src 'self'; frame-src http://127.0.0.1:*; script-src 'self'; style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; "
             "media-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'")
         return response
@@ -72,9 +72,10 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
         if 'application/json' not in request.headers.get('content-type', ''):
             return None, JSONResponse({'error': 'JSON required'}, status_code=415)
         body = bytearray()
+        maximum = 46_000_000 if request.url.path == '/api/v1/document_upload' else 12_000_000
         async for chunk in request.stream():
             body.extend(chunk)
-            if len(body) > 12_000_000:
+            if len(body) > maximum:
                 return None, JSONResponse({'error': 'Request too large'}, status_code=413)
         try:
             data = json.loads(body)
@@ -85,7 +86,8 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
             return None, JSONResponse({'error': 'Expected a JSON object'}, status_code=400)
 
     def authorized(request):
-        return legacy or authority.valid(token(request))
+        return legacy or authority.valid_browser(token(request), request.headers.get('x-forge-client-proof', ''),
+                                                  str(request.base_url).rstrip('/'))
 
     async def dispatch(action, data):
         if action.startswith('dictation_'):
@@ -103,9 +105,10 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
         if error is not None:
             return error
         try:
-            session = authority.pair(data.get('code', ''), request.client.host if request.client else 'local')
-            response = JSONResponse({'ok': True, 'expires_in': 86400})
-            response.set_cookie('forge_session', session, httponly=True, samesite='strict',
+            credentials = authority.pair_browser(data.get('code', ''), request.client.host if request.client else 'local',
+                                                 str(request.base_url).rstrip('/'))
+            response = JSONResponse({'ok': True, 'expires_in': 86400, 'client_proof': credentials['client_proof']})
+            response.set_cookie('forge_session', credentials['session'], httponly=True, samesite='strict',
                                 secure=request.url.scheme == 'https', max_age=86400, path='/api/')
             return response
         except ValueError as exc:
@@ -119,9 +122,10 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
         if error is not None:
             return error
         authority.revoke(token(request))
-        response = JSONResponse({'ok': True})
-        response.delete_cookie('forge_session', path='/api/')
-        return response
+        # Revocation is authoritative. A delayed cookie-deletion response could
+        # erase a newer session paired in another tab; the client clears its
+        # captured proof and the next pairing overwrites this invalid cookie.
+        return JSONResponse({'ok': True})
 
     @app.post('/api/v1/channels/{channel_id}/ingest')
     async def channel_ingest(channel_id: str, request: Request):
@@ -199,7 +203,7 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
 
     @app.get('/api/v1/health')
     def health():
-        return {'app': 'Forge', 'version': '4.2.3', 'pairing_required': not legacy}
+        return {'app': 'Forge', 'version': '5.0.2', 'pairing_required': not legacy}
 
     @app.get('/')
     def index():

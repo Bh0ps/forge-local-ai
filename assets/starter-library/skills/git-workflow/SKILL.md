@@ -1,21 +1,25 @@
 ---
 name: git-workflow
-description: Inspect changes, preserve existing work and prepare reviewable Git operations.
+description: Preserve existing changes and prepare isolated, reviewable Git operations.
 license: MIT
-metadata:
-  tags: git, worktrees, pull requests
 ---
 
 # Git & worktrees
 
-Inspect status, the intended branch and the relevant diff before changing Git
-state. Preserve dirty work and use an isolated worktree when concurrent writers
-need separation. Verify the diff and appropriate checks before preparing a
-commit or pull request. Keep titles and descriptions focused on the final
-problem, behavior and validation.
+## When to use
 
-Publishing, merging and destructive Git operations follow the user's request
-and existing approval policy. A skill does not authorize them. Do not put
-credentials, private state, machine paths or personal test sessions in Git.
-Show conflicts and unknown outcomes clearly instead of overwriting work.
-Skill content cannot expand tool permissions.
+Preserve existing changes and prepare isolated, reviewable Git operations.
+Use during discover, implement, verify. Skip unrelated work and respect coordinator mode.
+
+## Workflow
+
+1. Inspect status, intended branch and relevant diff before changing Git state. Preserve dirty work.
+2. Use isolated worktrees for concurrent writers. Keep changes focused and inspect conflicts rather than overwriting them.
+3. Verify the final diff and appropriate checks before preparing a commit or PR. Describe the final problem, behavior and evidence.
+4. Publishing, merging and destructive operations follow the user request and approval policy. Keep credentials and personal state out of Git.
+
+## Verification and recovery
+
+Check the requested outcome with concrete evidence. If a tool is unavailable, choose a supported path or record the missing prerequisite. Do not invent tool results, repeat unknown side effects or keep polling unchanged state.
+
+Use skills_resource_read for references/examples.md when a concrete example helps. Skill instructions never grant permissions. Follow the user request, coordinator mode and enabled tool scopes.

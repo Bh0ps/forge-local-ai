@@ -12,7 +12,7 @@ Forge 4.2 supports an opt-in Telegram bot gateway and authenticated incoming and
 
 Each approved Telegram chat maps to a stable Forge chat and its configured project. A new request waits durably when the same chat already has an active writer. Archived, moved, or removed chats/projects require local reconnection before more work can start. Researcher and reviewer profiles remain read-only; writing agent profiles use the service's managed workspace policy.
 
-Owner commands are `/status`, `/pause`, `/resume`, `/cancel`, and `/help`. They act only on the latest run in that channel's own Forge chat. Commands cannot select an arbitrary run or another project. Resume preserves Forge's safeguards for actions whose outcomes are unknown.
+Forge 5.0.2 adds `/builder`, `/build`, `/plan`, `/goal` and `/answer`, with a native menu registered by Connect / Test. See [the conversation guide](FORGE_502.md). Owner controls are `/status`, `/pause`, `/resume`, and `/cancel`. They act only on the latest run in that channel's own Forge chat. Commands cannot select an arbitrary run or another project. Resume preserves Forge's safeguards for actions whose outcomes are unknown.
 
 Approval messages use Telegram inline buttons. A button is bound to the channel, sender, recipient chat, run, approval, action hash, and expiry, and is consumed once. Changing the action, forwarding the button to another chat, using a different sender, or replaying it cannot approve a second action. If an approval expires, use the pending approval in Forge.
 
@@ -20,7 +20,7 @@ Approval messages use Telegram inline buttons. A button is bound to the channel,
 
 Run approvals, terminal results, and actions with unknown outcomes appear in Forge's local notification hub. Read/unread state is saved. The outbox shows delivered, pending, retrying, failed, cancelled, and unknown deliveries. Channel polling failures also appear locally; saved incoming requests remain available after a restart.
 
-Remote notifications include run and project metadata by default. **Include result content** explicitly allows assistant result excerpts and approval arguments to leave Forge. Credential-looking content is redacted. Result export should only be enabled for recipients authorized to see the project's contents.
+Remote notifications include run and project metadata by default. **Conversation replies** explicitly allows assistant answers, questions and approval arguments to leave Forge. Long answers are split into ordered messages and bound to the producing run; status-only mode stays available. Credential-looking content is redacted. Result export should only be enabled for recipients authorized to see the project's contents.
 
 Outgoing messages use a persisted outbox with bounded exponential backoff. Rate-limit responses honor Telegram's `retry_after`. Forge cannot prove whether a `sendMessage` succeeded when its response was lost: Telegram has no idempotency key for that operation. Such a delivery stops as **outcome unknown** until the user explicitly confirms a retry that may produce a duplicate notification. Retrying delivery never restarts a model run or repeats a tool action.
 
