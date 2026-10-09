@@ -59,12 +59,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Forge-unsigned-development-preview
-          path: C:/ForgeCI/release/*
+          path: C:/ForgeCI/release/Forge-*-Setup.exe
           if-no-files-found: error
           retention-days: 14
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: always()
-        with:
-          name: Forge-native-smoke-report
-          path: C:/ForgeCI/native-smoke/native-smoke.json
-          if-no-files-found: ignore

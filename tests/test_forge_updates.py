@@ -287,7 +287,7 @@ def test_helper_does_not_close_a_live_coordinator(setup, monkeypatch):
 
 @pytest.mark.parametrize('entry', ['../escape.exe', 'C:/escape.exe', 'a\\escape.exe', 'plugins/run.exe', 'CON.txt'])
 def test_signed_portable_validation_rejects_malicious_paths(tmp_path, monkeypatch, entry):
-    source = Path(__file__).parent / 'scripts/release_build.py'
+    source = Path(__file__).resolve().parents[1] / 'scripts/release_build.py'
     spec = importlib.util.spec_from_file_location('release_fixture', source)
     module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
     monkeypatch.setattr(module, 'require_trust', lambda *args: None)
@@ -300,7 +300,7 @@ def test_signed_portable_validation_rejects_malicious_paths(tmp_path, monkeypatc
 def test_publication_and_pr_workflows_keep_credentials_separate():
     import re
     import yaml
-    root = Path(__file__).parent / '.github/workflows'
+    root = Path(__file__).resolve().parents[1] / '.github/workflows'
     ci = yaml.load((root / 'windows-ci.yml').read_text(), Loader=yaml.BaseLoader)
     signed = yaml.load((root / 'signed-release.yml').read_text(), Loader=yaml.BaseLoader)
     assert ci['permissions'] == {'contents':'read'}

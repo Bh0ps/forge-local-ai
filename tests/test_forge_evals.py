@@ -232,7 +232,7 @@ def test_baseline_and_candidate_serialize_identical_wire_false_without_source_ed
     import httpx
     import inference_stream
     from core import Core
-    baseline_path=Path(__file__).parent.parent/'forge-5.0-baseline/core.py'
+    baseline_path=Path(__file__).resolve().parents[2]/'forge-5.0-baseline/core.py'
     if not baseline_path.is_file(): pytest.skip('Original baseline checkout is unavailable.')
     before=hashlib.sha256(baseline_path.read_bytes()).hexdigest()
     spec=importlib.util.spec_from_file_location('evaluation_original_core',baseline_path); baseline_module=importlib.util.module_from_spec(spec); spec.loader.exec_module(baseline_module)
@@ -508,7 +508,7 @@ def test_runtime_pause_is_measured_but_actual_wire_control_failure_stays_invalid
 def test_successful_worker_controls_and_effects_match_preserved_harness_with_native_discovery(tmp_path,monkeypatch):
     import core,forge_evals,importlib.util,sqlite3
     from test_forge_core import Engine,call
-    previous=Path(__file__).parent.parent/'forge-5.0-evaluation-matched/classification-repair/raw-harness/forge_evals.py'
+    previous=Path(__file__).resolve().parents[2]/'forge-5.0-evaluation-matched/classification-repair/raw-harness/forge_evals.py'
     if not previous.is_file(): pytest.skip('Preserved old evaluator is unavailable.')
     spec=importlib.util.spec_from_file_location('evaluation_before_classification_repair',previous); old=importlib.util.module_from_spec(spec); spec.loader.exec_module(old)
     task=next(row for row in load_suite()['tasks'] if row['id']=='api-pagination')

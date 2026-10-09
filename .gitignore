@@ -69,3 +69,22 @@ models/
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Private development guidance, historical notes and local evidence
+/AGENTS.md
+/CLAUDE.md
+/docs/**/*.md
+/CHANGELOG.md
+/QUICKSTART.md
+/assets/evaluations/README.md
+/assets/sidekick.ico
+/assets/sidekick.png
+/assets/sidekick.svg
+/docker-compose.yml
+/frontend/test_models.py
+/evidence/
+/validation/
+/receipts/
+/internal/
+*.receipt.json
+*.evidence.json

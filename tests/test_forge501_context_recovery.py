@@ -70,7 +70,7 @@ def staged_recovery(tmp_path, monkeypatch, *, oversized=False,task_text=None):
         artifacts.append(artifact);results.append(('read_file',args,{'artifact':artifact,'result':result}))
     schemas=svc.jobs.registry.schemas(run,['tools'],all_tools=True)
     svc.jobs._check_verification(run,results,{s['function']['name']:s for s in schemas})
-    recipe=(Path(__file__).parent/'assets/starter-library/skills/plan-and-build/SKILL.md').read_text(encoding='utf-8')
+    recipe=(Path(__file__).resolve().parents[1]/'assets/starter-library/skills/plan-and-build/SKILL.md').read_text(encoding='utf-8')
     # Pin a complete existing recipe, avoiding unrelated library installation
     # differences while exercising the production context/budget path.
     def skills(current,schemas):

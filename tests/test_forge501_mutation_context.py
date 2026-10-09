@@ -228,7 +228,7 @@ def test_captured_todo_write_reaches_next_verification_inference_at_8k(tmp_path,
             assert (root/'app.js').read_text(encoding='utf-8')==CAPTURED_TODO_WRITE
             return {'passed':True,'oracle_verified':True,'checks':[{'requirement':label,'passed':True} for label in factory(run)['expected_checks']]}
         monkeypatch.setattr(svc.jobs.registry,'execute',checked)
-        recipe=(Path(__file__).parent/'assets/starter-library/skills/plan-and-build/SKILL.md').read_text(encoding='utf-8')
+        recipe=(Path(__file__).resolve().parents[1]/'assets/starter-library/skills/plan-and-build/SKILL.md').read_text(encoding='utf-8')
         guidance='Source: skill captured-plan (Plan & build)\n'+recipe+'\n'+(
             'Supporting workflow: Build the frontend. Read its complete recipe with skills_read before using it.\n'
             'Supporting workflow: Make UI responsive and accessible. Read its complete recipe with skills_read before using it.\n')

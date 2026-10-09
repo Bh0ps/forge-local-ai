@@ -29,7 +29,7 @@ def messaging(tmp_path):
     manifest.write_text(json.dumps({'name':'org.forge.browser','type':'stdio','allowed_origins':[ORIGIN], 'path':'fixture.exe'}))
     children = []
     def start(origin=ORIGIN):
-        child = subprocess.Popen([sys.executable, str(Path(__file__).parent/'browser_native_host.py'), origin],
+        child = subprocess.Popen([sys.executable, str(Path(__file__).resolve().parents[1]/'browser_native_host.py'), origin],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={**os.environ,'FORGE_HOME':str(tmp_path)})
         children.append(child); return child
     yield bridge, start

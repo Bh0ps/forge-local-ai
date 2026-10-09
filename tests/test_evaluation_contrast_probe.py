@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-PROBE_PATH = Path(__file__).parent / 'assets/evaluations/contrast_probe.py'
+PROBE_PATH = Path(__file__).resolve().parents[1] / 'assets/evaluations/contrast_probe.py'
 spec = importlib.util.spec_from_file_location('evaluation_contrast_probe', PROBE_PATH)
 probe = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(probe)

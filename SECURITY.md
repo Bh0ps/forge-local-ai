@@ -12,8 +12,7 @@ unattended. Do not expose the local API directly to the internet.
 
 Automatic Windows updates require exact repository, hash, version and trusted
 timestamped publisher validation. The current unsigned preview cannot enable
-automatic installation. See [update recovery](docs/UPDATES.md) and
-[signing setup](docs/SIGNING.md). Checksums and provenance alone are not publisher
+automatic installation. Checksums and provenance alone are not publisher
 authentication.
 
 Report a vulnerability through the repository's

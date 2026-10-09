@@ -20,7 +20,7 @@ def fallback_source(tmp_path, requirement):
     root.mkdir()
     (root / 'requirements-dev.txt').write_text(requirement + '\n', encoding='utf-8')
     (root / 'requirements-integrations.txt').write_text('', encoding='utf-8')
-    shutil.copytree(Path(__file__).parent / 'assets/third-party-licenses', root / 'assets/third-party-licenses')
+    shutil.copytree(Path(__file__).resolve().parents[1] / 'assets/third-party-licenses', root / 'assets/third-party-licenses')
     return root
 
 

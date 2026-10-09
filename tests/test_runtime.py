@@ -231,7 +231,7 @@ def test_unknown_job_id_cannot_drain_another_jobs_output():
 def bridge_class():
     # Load only the actual Bridge definition. No desktop import, mutex,
     # logging setup, WebView2 import, or native startup occurs in these tests.
-    source = Path(__file__).with_name('desktop.py')
+    source = Path(__file__).resolve().parents[1] / 'desktop.py'
     tree = ast.parse(source.read_text(encoding='utf-8'), filename=str(source))
     definition = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Bridge')
     namespace = {'Core': FakeCore, 'Jobs': Jobs, 'threading': threading,
