@@ -1,10 +1,11 @@
-"""Rasterize the code-native smiling spark into the matching Windows icon.
+"""Generate the app and browser icons from the code-native Forge monogram.
 
 The SVG is the source of truth. No external renderer, fonts or assets are needed.
 Only the small SVG vocabulary used by this mark is accepted.
 """
 from pathlib import Path
 import re
+import shutil
 import xml.etree.ElementTree as ET
 from PIL import Image, ImageDraw
 
@@ -57,3 +58,7 @@ for element in ET.parse(root / 'assets/forge.svg').getroot():
 image = canvas.resize((256, 256), Image.Resampling.LANCZOS)
 image.save(root / 'assets/forge.png')
 image.save(root / 'assets/forge.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])
+shutil.copyfile(root / 'assets/forge.svg', root / 'frontend/public/forge.svg')
+for size in (16, 32, 48, 128):
+    icon = canvas.resize((size, size), Image.Resampling.LANCZOS)
+    icon.save(root / f'browser-extension/icons/forge-{size}.png')

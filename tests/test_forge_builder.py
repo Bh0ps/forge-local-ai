@@ -693,8 +693,9 @@ def test_builder_rendered_browser_and_real_static_preview(builder, tmp_path):
                 route.fulfill(status=200, content_type='application/json', body=json.dumps(value))
             page.route('**/api/v1/*', respond)
             page.goto(f'http://127.0.0.1:{server.server_port}/')
+            page.get_by_role('button', name='Task details and recovery', exact=True).click()
             page.get_by_text('Repair failed checks', exact=True).wait_for()
-            page.wait_for_function("()=>!document.querySelector('.task-status button')?.disabled")
+            page.wait_for_function("()=>document.querySelector('.compact-run-controls [aria-label=Resume]')?.disabled===false")
             for theme in ('light', 'dark'):
                 page.evaluate('(theme)=>document.documentElement.dataset.theme=theme', theme)
                 for width in (1440, 768, 390):
@@ -894,16 +895,18 @@ def test_production_inline_resume_uses_real_context_and_unknown_action_state(tmp
                     route.fulfill(status=400, content_type='application/json', body=json.dumps({'error': str(exc)}))
             page.route('**/api/v1/*', respond)
             page.goto(f'http://127.0.0.1:{server.server_port}/')
-            status = page.get_by_role('region', name='Task status')
+            status = page.locator('.compact-run-controls')
+            status.get_by_role('button', name='Task details and recovery', exact=True).click()
             status.get_by_text(reason, exact=True).first.wait_for()
             resume = status.get_by_role('button', name='Resume', exact=True)
-            page.wait_for_function("()=>!document.querySelector('.task-status button')?.disabled")
+            page.wait_for_function("()=>document.querySelector('.compact-run-controls [aria-label=Resume]')?.disabled===false")
             page.screenshot(path=str(tmp_path / 'inline-context-recovery.png'), full_page=True)
             # Change the actual saved context through the API, then use the real
             # coordinator Resume path. Inference is disabled by the launch stub.
             assert page.evaluate("async()=>{const r=await fetch('/api/v1/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({context:16384})});return r.ok;}")
             resume.click()
-            page.wait_for_function("()=>document.querySelector('.task-status .badge')?.textContent==='queued'")
+            status.get_by_role('button', name='Pause run', exact=True).wait_for()
+            assert svc.store.run(run['id'])['status'] == 'queued'
             assert launches == [run['id']]
             assert svc.store.run(run['id'])['settings']['context'] == 16384
             assert not svc.core.requests
@@ -921,13 +924,14 @@ def test_production_inline_resume_uses_real_context_and_unknown_action_state(tmp
             page.get_by_role('textbox', name='Inspection evidence').fill('Inspected the disposable fixture; the write did not execute.')
             page.screenshot(path=str(tmp_path / 'inline-unknown-action-inspection.png'), full_page=True)
             page.get_by_role('button', name='Verified not executed', exact=True).click()
-            page.wait_for_function("()=>!document.querySelector('.task-status button')?.disabled")
+            page.wait_for_function("()=>document.querySelector('.compact-run-controls [aria-label=Resume]')?.disabled===false")
             assert not svc.store.unknown_actions(run['id'])
             with svc.store._connection() as db:
                 saved = json.loads(db.execute('SELECT result FROM invocations WHERE id=?', (identifier,)).fetchone()[0])
             assert saved['replay'] is False and saved['outcome'] == 'not_executed'
             resume.click()
-            page.wait_for_function("()=>document.querySelector('.task-status .badge')?.textContent==='queued'")
+            status.get_by_role('button', name='Pause run', exact=True).wait_for()
+            assert svc.store.run(run['id'])['status'] == 'queued'
             assert launches == [run['id'], run['id']]
             assert not svc.core.requests
             assert not errors
@@ -936,3 +940,134 @@ def test_production_inline_resume_uses_real_context_and_unknown_action_state(tmp
         server.shutdown()
         server.server_close()
         svc.shutdown()
+
+
+@pytest.mark.parametrize('unrelated_brief', [False, True])
+def test_production_project_preview_opens_without_creating_a_builder(tmp_path, unrelated_brief):
+    """A plan/goal preview binds the real pane even without a Builder brief."""
+    import functools
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    import os
+    import threading
+    playwright = pytest.importorskip('playwright.sync_api')
+    executable = os.environ.get('FORGE_TEST_BROWSER') or str(
+        Path(os.environ.get('PROGRAMFILES', 'C:/Program Files')) / 'Google/Chrome/Application/chrome.exe')
+    if not Path(executable).is_file() or not Path('frontend/dist/index.html').is_file():
+        pytest.skip('Production frontend and a test browser executable are required.')
+    folder = tmp_path / 'project'
+    folder.mkdir()
+    (folder / 'index.html').write_text('<!doctype html><title>Standalone fixture</title><h1>Local app</h1>', encoding='utf-8')
+    store = ForgeStore(tmp_path / 'state')
+    project = store.create_project('Standalone demo', str(folder))
+    manager = BuilderManager(SimpleNamespace(store=store))
+    projects = [project]
+    other = None
+    if unrelated_brief:
+        other_folder = tmp_path / 'unrelated'
+        other_folder.mkdir()
+        other_project = store.create_project('Other demo', str(other_folder))
+        projects.append(other_project)
+        other = manager.save({'project_id': other_project['id'], 'title': 'Unrelated saved brief',
+            'objective': 'Keep this brief unchanged.', 'requirements': [{'text': 'Retain the brief', 'acceptance': 'It stays unchanged.'}]})
+    drafts = __import__('forge_drafts', fromlist=['DraftManager']).DraftManager(store)
+    preview = manager.previews.start({'project_id': project['id'], 'cwd': '.', 'mode': 'static'})
+    assert preview['status'] == 'ready' and not preview.get('builder_id')
+    shows, reloads, errors = [], [], []
+    native_state = {'available': True, 'preview_id': preview['id'],
+                    'project_id': 'unavailable-project' if unrelated_brief else project['id'], 'builder_id': None}
+
+    class QuietHandler(SimpleHTTPRequestHandler):
+        def log_message(self, *_args): pass
+    server = ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(
+        QuietHandler, directory=str(Path('frontend/dist').resolve())))
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with playwright.sync_playwright() as engine:
+            browser = engine.chromium.launch(executable_path=executable, headless=True)
+            page = browser.new_page(viewport={'width': 1440, 'height': 1050})
+            page.set_default_timeout(8000)
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            page.add_init_script("""window.pywebview={api:{call:async(action,data={})=>{
+                const response=await fetch('/api/v1/'+action,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+                return response.json();}}};""")
+            def respond(route):
+                action = route.request.url.rsplit('/', 1)[-1]
+                data = route.request.post_data_json or {}
+                if action == 'bootstrap':
+                    value = {'settings': {'model': 'fixture', 'theme': 'light'}, 'projects': projects,
+                             'chats': [], 'runs': [], 'capabilities': {}}
+                elif action == 'preview_browser_status':
+                    value = dict(native_state)
+                elif action == 'preview_browser_show':
+                    shows.append(data)
+                    value = {'ok': True, 'visible': True}
+                elif action == 'preview_browser_reload':
+                    reloads.append(data)
+                    value = {'ok': True}
+                elif action == 'preview_browser_hide':
+                    value = {'ok': True}
+                elif action in ('draft_get', 'draft_save', 'draft_clear'):
+                    value = drafts.dispatch(action, data)
+                elif action.startswith(('builder_', 'preview_')):
+                    value = manager.dispatch(action, data)
+                else:
+                    value = {'first_run': False, 'projects': projects, 'chats': [], 'runs': [],
+                             'models': [], 'questions': [], 'skills': [], 'spaces': [], 'schedules': []}
+                route.fulfill(status=200, content_type='application/json', body=json.dumps(value))
+            page.route('**/api/v1/*', respond)
+            page.goto(f'http://127.0.0.1:{server.server_port}/')
+            page.get_by_role('button', name='Builder', exact=True).wait_for()
+            # The event initially arrives in App before the lazy Builder page
+            # mounts. Mount restoration must still show this exact preview.
+            page.evaluate("window.dispatchEvent(new CustomEvent('forge:preview-open'))")
+            pane = page.get_by_role('main', name='Project application preview', exact=True)
+            if other:
+                page.get_by_label('Objective').wait_for()
+                assert pane.count() == 0 and not shows
+                # A native identity outside the connected project scope is
+                # rejected; a later valid event opens the owned session.
+                native_state['project_id'] = project['id']
+                page.evaluate("window.dispatchEvent(new CustomEvent('forge:preview-open'))")
+            pane.get_by_role('heading', name=project['name'], exact=True).wait_for()
+            page.wait_for_function("()=>document.querySelector('#forge-preview-panel')?.getBoundingClientRect().height>=160")
+            # Process the bridge callback, rather than relying on layout alone.
+            pane.get_by_role('button', name='Reload preview', exact=True).click()
+            assert shows and reloads == [{'id': preview['id']}]
+            binding = shows[-1]
+            assert binding['id'] == preview['id'] and binding['panel_id'] == 'forge-preview-panel'
+            rect, viewport = binding['rect'], binding['viewport']
+            assert rect['width'] > 160 and rect['height'] >= 160
+            assert rect['x'] >= 0 and rect['y'] >= 0
+            assert rect['x'] + rect['width'] <= viewport['width'] + 1
+            assert rect['y'] + rect['height'] <= viewport['height'] + 1
+            assert len(store.entities('builders')) == int(unrelated_brief)
+            if other:
+                page.get_by_role('complementary', name='Builders').get_by_role(
+                    'button', name='Unrelated saved brief', exact=False).click()
+                page.get_by_role('button', name='Brief', exact=True).click()
+                page.get_by_label('Objective').fill('Keep this unsaved local draft too.')
+                page.get_by_text('Draft saved locally', exact=True).wait_for()
+                page.evaluate("window.dispatchEvent(new CustomEvent('forge:preview-open'))")
+                pane.get_by_role('heading', name=project['name'], exact=True).wait_for()
+            pane.get_by_role('button', name='Stop preview', exact=True).click()
+            page.wait_for_function("()=>!document.querySelector('[aria-label=\"Project application preview\"]')")
+            assert manager.previews.status(preview['id'])['status'] == 'stopped'
+            if other:
+                page.get_by_role('button', name='Brief', exact=True).click()
+                assert page.get_by_label('Objective').input_value() == 'Keep this unsaved local draft too.'
+                saved_other = store.entity('builders', other['id'])
+                assert saved_other['objective'] == other['objective'] and saved_other['revision'] == other['revision']
+                assert saved_other['requirements'] == other['requirements']
+            count = len(shows)
+            # A stale native identity must never resurrect the stopped pane.
+            page.evaluate("window.dispatchEvent(new CustomEvent('forge:preview-open'))")
+            page.wait_for_timeout(250)
+            assert pane.count() == 0 and len(shows) == count
+            assert len(store.entities('builders')) == int(unrelated_brief)
+            assert not errors
+            browser.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        manager.shutdown()

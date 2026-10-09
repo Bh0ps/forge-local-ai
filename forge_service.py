@@ -321,7 +321,7 @@ class ForgeService:
 
     def bootstrap(self):
         runs=self.store.runs(limit=200)
-        return dict(version='5.0.2',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
+        return dict(version='5.0.3',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
                     chats=self.store.list_chats(),runs=runs,goals=[self.goal_view(goal,runs) for goal in self.store.active_goals()],
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -407,7 +407,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='5.0.2')
+                    self.update_manager=UpdateManager(self,current_version='5.0.3')
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)

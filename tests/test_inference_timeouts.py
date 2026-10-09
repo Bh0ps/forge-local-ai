@@ -12,10 +12,14 @@ from core import Core
 from forge_inference import CompatibleProvider, ProviderPool
 from inference_stream import (InferenceTimeoutError, InferenceTimeouts,
                               FIRST_RESPONSE_TIMEOUT_SECONDS, GENERATION_IDLE_TIMEOUT_SECONDS,
-                              TOTAL_REQUEST_TIMEOUT_SECONDS)
+                              OLLAMA_TOOL_IDLE_TIMEOUT_SECONDS, TOTAL_REQUEST_TIMEOUT_SECONDS)
 
 REQUEST = {'model': 'fixture-large-model', 'context': 131072, 'tokens': 1024,
            'thinking': True, 'messages': [{'role': 'user', 'content': 'Continue the saved task.'}]}
+TOOL_REQUEST = {**REQUEST, 'tools': [{'type': 'function', 'function': {
+    'name': 'write_file', 'description': 'Write a fixture file.',
+    'parameters': {'type': 'object', 'properties': {'path': {'type': 'string'},
+                   'content': {'type': 'string'}}, 'required': ['path', 'content']}}}]}
 
 
 class TimedBody(httpx.AsyncByteStream):
@@ -56,17 +60,22 @@ def packet(engine, content=None, thinking=None, tools=None, done=False):
     return ('data: ' + json.dumps(result, ensure_ascii=False) + '\n\n').encode()
 
 
-def stream(engine, cancel=None):
-    if engine == 'ollama': return Core().stream_agent(REQUEST, cancel)
-    return CompatibleProvider({'url': 'http://127.0.0.1:8080/v1'}).generate(REQUEST, cancel)
+def stream(engine, cancel=None, request=REQUEST):
+    if engine == 'ollama': return Core().stream_agent(request, cancel)
+    return CompatibleProvider({'url': 'http://127.0.0.1:8080/v1'}).generate(request, cancel)
 
 
 def test_production_policy_gives_a_full_hour_before_first_output_and_keeps_probes_fast():
     assert FIRST_RESPONSE_TIMEOUT_SECONDS == 3600
     assert GENERATION_IDLE_TIMEOUT_SECONDS == 180
+    assert OLLAMA_TOOL_IDLE_TIMEOUT_SECONDS == 3600
     assert TOTAL_REQUEST_TIMEOUT_SECONDS == 5400
     policy = Core._inference_timeouts()
     assert policy.first_response == 3600 and policy.total == 5400
+    assert policy.generation_idle == 180
+    buffered = Core._inference_timeouts(buffered_tools=True)
+    assert buffered.generation_idle == 3600
+    assert buffered.first_response == policy.first_response and buffered.total == policy.total
     assert policy.http_timeout().read is None
     assert Core._timeout('/chat').read == 3600
     assert Core._timeout('/tags').read == 3
@@ -144,6 +153,89 @@ def test_empty_packets_cannot_extend_generation_stall_deadline(monkeypatch, engi
     assert error.value.stage == 'generation_idle'
     assert seen[0]['message']['content'] == 'Partial output'
     assert not any(item.get('done') for item in seen) and body.closed.is_set()
+
+
+def test_ollama_can_finish_a_buffered_tool_call_after_the_normal_idle_deadline(monkeypatch):
+    limits(monkeypatch, first=.4, idle=.06, total=.6)
+    # Ollama emits reasoning, then withholds all tool arguments until the call
+    # is complete. Socket silence is expected during this generation interval.
+    tools = [{'function': {'name': 'write_file', 'arguments': {
+        'path': 'index.html', 'content': '<main>Fixture application</main>'}}}]
+    body = TimedBody([(0, packet('ollama', thinking='Creating the page.')),
+                      (.16, packet('ollama', tools=tools, done=True))])
+    calls = []
+
+    def handler(request):
+        calls.append(json.loads(request.content))
+        return httpx.Response(200, stream=body)
+
+    transport(monkeypatch, handler)
+    result = list(stream('ollama', request=TOOL_REQUEST))
+    assert result[-1]['done'] is True and result[-1]['message']['tool_calls'] == tools
+    assert calls[0]['tools'] == TOOL_REQUEST['tools']
+    assert calls[0]['options']['num_ctx'] == REQUEST['context']
+    assert calls[0]['options']['num_predict'] == REQUEST['tokens']
+    assert len(calls) == 1 and body.closed.is_set()
+
+
+@pytest.mark.parametrize('engine,request_data', [('ollama', REQUEST), ('compatible', TOOL_REQUEST)])
+def test_other_requests_keep_the_normal_idle_deadline(monkeypatch, engine, request_data):
+    limits(monkeypatch, first=.4, idle=.06, total=.6)
+    body = TimedBody([(0, packet(engine, thinking='Preparing a response.')),
+                      (.16, packet(engine, content='Finished', done=True))])
+    transport(monkeypatch, lambda request: httpx.Response(200, stream=body))
+    with pytest.raises(InferenceTimeoutError) as error:
+        list(stream(engine, request=request_data))
+    assert error.value.stage == 'generation_idle' and body.closed.is_set()
+
+
+def test_buffered_ollama_tools_still_have_a_finite_idle_deadline(monkeypatch):
+    limits(monkeypatch, first=.5, idle=.04, total=.6)
+    monkeypatch.setattr(core, 'OLLAMA_TOOL_IDLE_TIMEOUT_SECONDS', .14)
+    body = TimedBody([(0, packet('ollama', thinking='Creating the file.'))], stall=True)
+    transport(monkeypatch, lambda request: httpx.Response(200, stream=body))
+    with pytest.raises(InferenceTimeoutError) as error:
+        list(stream('ollama', request=TOOL_REQUEST))
+    assert error.value.stage == 'generation_idle'
+    assert '0.14 seconds' in str(error.value) and body.closed.is_set()
+
+
+def test_total_ceiling_still_bounds_silent_ollama_tool_generation(monkeypatch):
+    limits(monkeypatch, first=.4, idle=.04, total=.12)
+    body = TimedBody([(0, packet('ollama', thinking='Creating the file.'))], stall=True)
+    transport(monkeypatch, lambda request: httpx.Response(200, stream=body))
+    with pytest.raises(InferenceTimeoutError) as error:
+        list(stream('ollama', request=TOOL_REQUEST))
+    assert error.value.stage == 'total' and body.closed.is_set()
+
+
+def test_stop_interrupts_silent_ollama_tool_generation_without_retry(monkeypatch):
+    limits(monkeypatch, first=.5, idle=.04, total=.6)
+    body = TimedBody([(0, packet('ollama', thinking='Creating the file.'))], stall=True)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, stream=body)
+
+    transport(monkeypatch, handler)
+    cancel, emitted, errors = threading.Event(), threading.Event(), []
+
+    def consume():
+        try:
+            for item in stream('ollama', cancel, TOOL_REQUEST):
+                emitted.set()
+        except Exception as exc:
+            errors.append(exc)
+
+    consumer = threading.Thread(target=consume)
+    consumer.start()
+    assert emitted.wait(2)
+    started = time.monotonic()
+    cancel.set()
+    consumer.join(2)
+    assert not consumer.is_alive() and time.monotonic() - started < 1
+    assert len(calls) == 1 and not errors and body.closed.is_set()
 
 
 @pytest.mark.parametrize('engine', ['ollama', 'compatible'])

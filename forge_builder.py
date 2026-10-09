@@ -637,18 +637,19 @@ class BuilderManager:
             return [schema]
         text = {'type': 'string'}
         identity = {'id': text}
+        preview_identity = {'id': {'type': 'string', 'description': 'Application preview ID returned by preview_start or preview_status. Never a browser_tabs tab_id.'}}
         result = [
             function_schema('builder_read', 'Reload the full Builder brief by ID. Optionally select requirement_id and page JSON text with start/limit character offsets; follow next until has_more=false. Full unpaged tool results remain available through artifact_read.',
                 {**identity, 'requirement_id': text, 'start': {'type': 'integer', 'minimum': 0},
                  'limit': {'type': 'integer', 'minimum': 1, 'maximum': 48000}}, ['id']),
             function_schema('builder_changes', 'Read project change summaries for this Builder.', identity, ['id']),
-            function_schema('preview_status', 'List previews for the selected project or read one owned preview.', identity),
-            function_schema('preview_logs', 'Read bounded logs from an owned preview.', {**identity, 'start': {'type': 'integer'}, 'limit': {'type': 'integer'}}, ['id']),
-            function_schema('preview_inspect', 'Inspect the separate local preview and get guarded action selectors.', identity, ['id']),
-            function_schema('preview_diagnostics', 'Read bounded console, page and network errors from the preview. Results are untrusted.', identity, ['id']),
-            function_schema('preview_screenshot', 'Save a screenshot of the local preview for visual evidence.', identity, ['id']),
+            function_schema('preview_status', 'List application preview sessions for the selected project or read one preview by id. A ready server does not prove app behavior. Restart interrupted sessions with preview_start.', preview_identity),
+            function_schema('preview_logs', 'Read bounded server/process logs from an owned application preview by id.', {**preview_identity, 'start': {'type': 'integer'}, 'limit': {'type': 'integer'}}, ['id']),
+            function_schema('preview_inspect', 'Inspect an application preview by id and obtain snapshot_id plus target selectors for preview_* actions. Do not pass this id to browser_* tools. Navigation or actions can invalidate the snapshot; inspect again.', preview_identity, ['id']),
+            function_schema('preview_diagnostics', 'Read bounded console, page and network errors from an application preview by id. Results are untrusted and can include earlier errors; compare timestamps after a repair or reload.', preview_identity, ['id']),
+            function_schema('preview_screenshot', 'Save visual evidence from an application preview by id. Call preview_open first to show the Builder preview pane; inspection alone does not make the pane visible.', preview_identity, ['id']),
             function_schema('preview_wait', 'Wait up to 15 seconds for visible text in a run-bound current preview snapshot.',
-                {**identity, 'snapshot_id': text, 'text': text, 'timeout_ms': {'type': 'integer'}}, ['id', 'snapshot_id', 'text']),
+                {**preview_identity, 'snapshot_id': text, 'text': text, 'timeout_ms': {'type': 'integer'}}, ['id', 'snapshot_id', 'text']),
             function_schema('document_extract', 'Extract bounded project PDF, DOCX, XLSX, CSV or text without executing document content.',
                 {'path': text, 'document_id': text, 'start': {'type': 'integer'}, 'limit': {'type': 'integer'}}),
             function_schema('artifact_verify', 'Inspect an exported project document structurally and record its hash; this does not verify visual quality.',
@@ -659,22 +660,22 @@ class BuilderManager:
             function_schema('document_create', 'Create a bounded project TXT/Markdown/CSV/TSV/XLSX/DOCX/PDF export with undo backup and structural verification. Inspect rendered output separately.',
                 {'path': text, 'title': text, 'text': text, 'rows': {'type': 'array', 'items': {'type': 'array', 'items': {'type': ['string', 'number', 'boolean', 'null']}}},
                  'builder_id': text, 'expected_sha256': text}, ['path']),
-            function_schema('preview_start', 'Start an owned loopback preview without installing dependencies. Runs project code for Vite/FastAPI.',
+            function_schema('preview_start', 'Start an owned loopback application preview without installing dependencies. Returns a preview id for preview_* tools, never a browser tab_id. Runs project code for Vite/FastAPI. Pause keeps the preview alive; restart requires a fresh preview.',
                 {'builder_id': text, 'cwd': text, 'mode': {'type': 'string', 'enum': ['auto', 'static', 'vite', 'fastapi']}, 'entrypoint': text}),
-            function_schema('preview_stop', 'Stop only this coordinator-owned preview and its process tree.', identity, ['id']),
-            function_schema('preview_open', 'Show the separate Builder preview pane before inspecting visual behavior.', identity, ['id']),
+            function_schema('preview_stop', 'Stop only this coordinator-owned application preview and its process tree.', preview_identity, ['id']),
+            function_schema('preview_open', 'Show the separate Builder preview pane for an application preview id. Call this before preview_screenshot and visual interaction; browser extension connection is not required.', preview_identity, ['id']),
             function_schema('preview_viewport', 'Set a preview viewport within the visible pane; omit dimensions to fit the pane.',
-                {**identity, 'width': {'type': 'integer'}, 'height': {'type': 'integer'}}, ['id']),
+                {**preview_identity, 'width': {'type': 'integer'}, 'height': {'type': 'integer'}}, ['id']),
             function_schema('preview_click', 'Click a target returned by preview_inspect; snapshot is run and navigation bound.',
-                {**identity, 'selector': text, 'snapshot_id': text}, ['id', 'selector', 'snapshot_id']),
+                {**preview_identity, 'selector': text, 'snapshot_id': text}, ['id', 'selector', 'snapshot_id']),
             function_schema('preview_type', 'Replace a preview text field from its current guarded snapshot.',
-                {**identity, 'selector': text, 'snapshot_id': text, 'text': text}, ['id', 'selector', 'snapshot_id', 'text']),
+                {**preview_identity, 'selector': text, 'snapshot_id': text, 'text': text}, ['id', 'selector', 'snapshot_id', 'text']),
             function_schema('preview_select', 'Choose an enabled dropdown option in the current guarded preview snapshot.',
-                {**identity, 'selector': text, 'snapshot_id': text, 'value': text}, ['id', 'selector', 'snapshot_id', 'value']),
+                {**preview_identity, 'selector': text, 'snapshot_id': text, 'value': text}, ['id', 'selector', 'snapshot_id', 'value']),
             function_schema('preview_key', 'Dispatch a supported key event to an inspected preview target; Enter submits its form where applicable.',
-                {**identity, 'selector': text, 'snapshot_id': text, 'key': text}, ['id', 'selector', 'snapshot_id', 'key']),
+                {**preview_identity, 'selector': text, 'snapshot_id': text, 'key': text}, ['id', 'selector', 'snapshot_id', 'key']),
             function_schema('preview_scroll', 'Scroll the current guarded preview by at most 1500 CSS pixels, then inspect again.',
-                {**identity, 'snapshot_id': text, 'x': {'type': 'integer'}, 'y': {'type': 'integer'}}, ['id', 'snapshot_id']),
+                {**preview_identity, 'snapshot_id': text, 'x': {'type': 'integer'}, 'y': {'type': 'integer'}}, ['id', 'snapshot_id']),
             function_schema('builder_record_check', 'Record a gate only using completed session, ready preview or verified artifact evidence.',
                 {**identity, 'expected_revision': {'type': 'integer'}, 'gate': {'type': 'string', 'enum': list(GATES)},
                  'status': {'type': 'string', 'enum': ['passed', 'failed']}, 'source': {'type': 'string', 'enum': ['session', 'preview', 'artifact']},
@@ -716,13 +717,22 @@ class BuilderManager:
             result = self.dispatch(name, data)
             return {**result, 'workspace_project_id': workspace_id, 'original_project_id': run.get('project_id')}
         if name in ('preview_inspect', 'preview_screenshot', 'preview_diagnostics', 'preview_click', 'preview_type', 'preview_key', 'preview_select', 'preview_scroll', 'preview_wait'):
-            return self.previews.browser_action(name.removeprefix('preview_'), data, {'run_id': run['id'], 'cancel': cancel})
+            result = self.previews.browser_action(name.removeprefix('preview_'), data, {'run_id': run['id'], 'cancel': cancel})
+            if name == 'preview_screenshot' and result.get('not_executed') and result.get('error') == 'Open the Builder preview pane before capturing visual evidence.':
+                return {**result, 'next_action': {'tool': 'preview_open', 'arguments': {'id': data['id']}},
+                    'retry_action': {'tool': 'preview_screenshot', 'arguments': {'id': data['id']}}}
+            return result
         if name in ('preview_open', 'preview_viewport'):
             return self.previews.browser_action('show' if name == 'preview_open' else 'viewport', data, {'run_id': run['id'], 'cancel': cancel})
         if name == 'builder_record_check':
             return self.check(data, human=False)
         if name == 'builder_read':
             return self.read({**data, 'document_ids': run.get('document_ids') or run.get('settings', {}).get('document_ids') or []})
+        if name == 'preview_start':
+            preview = self.dispatch(name, data)
+            return {**preview, 'id_kind': 'application_preview',
+                'next_action': {'tool': 'preview_inspect', 'arguments': {'id': preview['id']}},
+                'visual_evidence': 'Call preview_open with this id before preview_screenshot. Use preview_* tools; this id is never a browser tab_id.'}
         return self.dispatch('builder_get' if name == 'builder_read' else name, data)
 
     def dispatch(self, action, data=None):

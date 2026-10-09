@@ -639,6 +639,42 @@ def main():
                         finally:
                             manager.previews.stop(preview['id'])
                         result['native_preview']['stopped'] = manager.previews.status(preview['id'])['status']=='stopped' and preview['id'] not in manager.previews.active
+                        # Plain plans can start previews without a Builder brief.
+                        # The actual workspace must discover that identity while
+                        # preview_open waits for its guarded native pane to appear.
+                        standalone_run = {'id':'standalone-native-smoke','project_id':project['id'],
+                            'settings':service.store.get_settings()}
+                        standalone = manager.execute(standalone_run,'preview_start',{'cwd':'site','mode':'static'},cancel)
+                        try:
+                            api._window.evaluate_js("document.querySelector('button.new-chat')?.click();window.dispatchEvent(new Event('pywebviewready'));document.querySelector('button[aria-label=\"Open sidebar\"]')?.click();true")
+                            deadline=time.monotonic()+10
+                            while not api._window.evaluate_js("document.body.innerText.includes('Disposable preview fixture')") and time.monotonic()<deadline:
+                                time.sleep(.05)
+                            manager.execute(standalone_run,'preview_open',{'id':standalone['id']},cancel)
+                            deadline=time.monotonic()+10
+                            while (not manager.previews.browser.status().get('visible') or manager.previews.browser.status().get('loading')) and time.monotonic()<deadline:
+                                time.sleep(.05)
+                            if not manager.previews.browser.status().get('visible'):
+                                raise ValueError('The standalone preview pane did not open.')
+                            manager.execute(standalone_run,'preview_viewport',{'id':standalone['id']},cancel)
+                            inspected=manager.execute(standalone_run,'preview_inspect',{'id':standalone['id']},cancel)
+                            target=next(t for t in inspected['targets'] if t['tag']=='input')
+                            manager.execute(standalone_run,'preview_type',{'id':standalone['id'],'snapshot_id':inspected['snapshot_id'],
+                                'selector':target['selector'],'text':'Standalone preview works'},cancel)
+                            inspected=manager.execute(standalone_run,'preview_inspect',{'id':standalone['id']},cancel)
+                            target=next(t for t in inspected['targets'] if t['tag']=='button')
+                            manager.execute(standalone_run,'preview_click',{'id':standalone['id'],'snapshot_id':inspected['snapshot_id'],
+                                'selector':target['selector']},cancel)
+                            inspected=manager.execute(standalone_run,'preview_inspect',{'id':standalone['id']},cancel)
+                            if 'Standalone preview works' not in inspected['text']:
+                                raise ValueError('Standalone preview controls did not update the fixture.')
+                            capture=manager.execute(standalone_run,'preview_screenshot',{'id':standalone['id']},cancel)
+                            result['native_standalone_preview']={'pane_visible':True,'fixture_updated':True,
+                                'without_builder':standalone.get('builder_id') is None,
+                                'bridge_exposed':manager.previews.browser.view.evaluate('typeof window.pywebview'),
+                                'screenshot_bytes':Path(capture['artifact']).stat().st_size}
+                        finally:
+                            manager.previews.stop(standalone['id'])
                 except Exception as exc:
                     result['error'] = str(exc)
                 finally:

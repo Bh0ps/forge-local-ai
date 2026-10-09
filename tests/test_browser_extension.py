@@ -77,7 +77,8 @@ def test_registered_origin_is_checked_before_ipc(messaging):
     assert child.stdout.read()==b''
 
 
-def test_connected_tab_snapshot_is_run_bound_and_actions_are_not_replayed(messaging, tmp_path):
+@pytest.mark.parametrize('action',['browser_click','browser_select','browser_key','browser_scroll'])
+def test_connected_tab_snapshot_is_run_bound_and_actions_are_not_replayed(messaging, tmp_path,action):
     bridge,start=messaging; child=start(); poll(child)
     tools=BrowserTools(tmp_path); tools.bridge=bridge
     tab_id=bridge.tabs()[0]['id']; inspected=[]
@@ -87,12 +88,12 @@ def test_connected_tab_snapshot_is_run_bound_and_actions_are_not_replayed(messag
     poll(child,[{'id':command['id'],'result':response}]);worker.join(3)
     args={'tab_id':tab_id,'snapshot_id':'fixture-snapshot','selector':'button'}
     try:
-        assert tools.execute('browser_click',args,{'run_id':'two'})['not_executed']
+        assert tools.execute(action,args,{'run_id':'two'})['not_executed']
         result=[]
-        worker=threading.Thread(target=lambda: result.append(tools.execute('browser_click',args,{'run_id':'one'})))
+        worker=threading.Thread(target=lambda: result.append(tools.execute(action,args,{'run_id':'one'})))
         worker.start();wait_pending(bridge);command=poll(child)['commands'][0]
         poll(child,[{'id':command['id'],'result':{'ok':True,'inspect_again':True}}]);worker.join(3)
-        assert result[0]['ok'] and tools.execute('browser_click',args,{'run_id':'one'})['not_executed']
+        assert result[0]['ok'] and tools.execute(action,args,{'run_id':'one'})['not_executed']
     finally:
         # Fixture owns the shared bridge; tool cleanup must not shut it down twice.
         tools.bridge=None;tools.shutdown()

@@ -720,7 +720,7 @@ class IntegrationHub:
         invocation_started = False
         try:
             if name.startswith("browser_"):
-                invocation_started = name in {"browser_navigate", "browser_click", "browser_type", "browser_close"}
+                invocation_started = name in {"browser_navigate", "browser_click", "browser_type", "browser_select", "browser_key", "browser_scroll", "browser_close"}
                 return self.browser.execute(name, arguments, context=run_context)
             project = (run_context or {}).get("project") if isinstance(run_context, dict) else None
             if name == "skills_read":

@@ -106,7 +106,7 @@ def test_host_origin_and_content_guards(browser):
     assert client.get('/bundle.js').status_code == 200
     assert client.get('/%2e%2e/test_forge_host.py').status_code == 404
     health = client.get('/api/v1/health').json()
-    assert health['app'] == 'Forge' and health['version'] == '5.0.2'
+    assert health['app'] == 'Forge' and health['version'] == '5.0.3'
 
 
 def test_cursor_events_json_and_sse(browser):

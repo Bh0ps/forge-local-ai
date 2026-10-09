@@ -266,6 +266,11 @@ class PreviewManager:
             **({'error': 'Preview stopped; browser cleanup reported: ' + '; '.join(errors)} if errors else {})})
 
     def browser_action(self, action, data, context=None):
+        # Opening a native pane waits for the workspace to render it. That
+        # workspace must be able to read the current preview identity while
+        # the opening action owns the pane lock.
+        if action == 'status':
+            return self._browser_action(action, data, context)
         with self.browser_lock:
             return self._browser_action(action, data, context)
 
@@ -278,9 +283,13 @@ class PreviewManager:
         if action in ('hide', 'status'):
             result = self.browser.dispatch(action)
             if action == 'status':
-                current = self.active.get(self.browser_preview)
-                result = {**result, 'preview_id': self.browser_preview,
-                          'builder_id': current['record'].get('builder_id') if current else None}
+                with self.lock:
+                    identifier = self.browser_preview
+                    current = self.active.get(identifier)
+                    record = dict(current['record']) if current else {}
+                result = {**result, 'preview_id': identifier,
+                          'builder_id': record.get('builder_id'),
+                          'project_id': record.get('project_id')}
             return result
         record = self.status(identifier)
         if record['status'] != 'ready' or identifier not in self.active:

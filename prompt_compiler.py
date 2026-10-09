@@ -10,7 +10,7 @@ from collections import Counter
 
 from context_window import estimated_prompt_tokens, prompt_budget, response_budget
 
-PROMPT_VERSION = 'forge-5.0.2'
+PROMPT_VERSION = 'forge-5.0.3'
 MUTATION_DIFF_TOOLS=frozenset(('write_file','edit_file','apply_patch','patch_files','restore_file'))
 
 

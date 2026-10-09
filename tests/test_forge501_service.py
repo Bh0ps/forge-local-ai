@@ -61,7 +61,7 @@ def test_bootstrap_and_goal_views_share_guidance_and_progress(tmp_path):
         goal,run=tracked(svc)
         svc.store.update_run(run['id'],planner_assignment={'state':'unavailable','reason':'Advisory deadline'})
         active=svc.dispatch('goals',{'active_only':True})['goals']
-        assert svc.bootstrap()['version']=='5.0.2' and svc.bootstrap()['goals']==active
+        assert svc.bootstrap()['version']=='5.0.3' and svc.bootstrap()['goals']==active
         detailed=svc.dispatch('goal_get',{'id':goal['id']})
         assert detailed['planner_assignment']['state']=='unavailable'
         assert detailed['progress_summary']['total']==2 and detailed['progress_summary']['verified']==0

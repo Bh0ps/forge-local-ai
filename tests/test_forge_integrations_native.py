@@ -1,6 +1,8 @@
 """Native browser delegate preserves permissions context and unknown outcomes."""
 import threading
 
+import pytest
+
 from forge_integrations import IntegrationHub
 
 
@@ -30,12 +32,13 @@ def test_native_browser_receives_run_and_cancel_context_and_dispatch(tmp_path):
     assert browser.calls[-3:]==['stop','reset','shutdown']
 
 
-def test_native_browser_preflight_failure_is_known_but_started_effect_is_unknown(tmp_path):
+@pytest.mark.parametrize('action',['browser_navigate','browser_select','browser_key','browser_scroll'])
+def test_native_browser_preflight_failure_is_known_but_started_effect_is_unknown(tmp_path,action):
     hub=IntegrationHub(tmp_path)
     hub.browser.shutdown();hub.browser=FakeBrowser()
     preflight=hub.execute('browser_click',{'stale':True},{'run_id':'fixture'})
     assert preflight['not_executed'] and not preflight.get('outcome_unknown')
-    interrupted=hub.execute('browser_navigate',{'after_effect':True},{'run_id':'fixture'})
+    interrupted=hub.execute(action,{'after_effect':True},{'run_id':'fixture'})
     assert interrupted['outcome_unknown']
     hub.shutdown()
 

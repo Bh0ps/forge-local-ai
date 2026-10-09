@@ -252,7 +252,7 @@ class NativeBrowser:
         payload = json.dumps(dict(selector=selector, signature=expected, operation=name, text=text,
                                   value=data.get('value'), key=data.get('key'),
                                   url=snapshot['url']), ensure_ascii=True)
-        check = json.dumps(dict(selector=selector, signature=expected, operation='validate', text=None,
+        check = json.dumps(dict(selector=selector, signature=expected, operation='validate', action=name, key=data.get('key'), text=None,
                                 url=snapshot['url']), ensure_ascii=True)
         preflight = self.view.evaluate(ACTION_SCRIPT.replace('__FORGE_DATA__', check))
         if preflight.get('not_executed'):
@@ -371,7 +371,15 @@ ACTION_SCRIPT = r'''(() => {
  if(JSON.stringify(signature)!==JSON.stringify(d.signature)||!el.isConnected||!r.width||!r.height||getComputedStyle(el).visibility==='hidden')return fail('Browser target changed. Inspect again.');
  if(el.type==='password'||el.type==='file')return fail('Password and file fields require direct user interaction.');
  if(el.disabled||el.readOnly)return fail('Target is disabled or read-only.');
- if(d.operation==='validate')return {ok:true};
+  const button=el.tagName==='BUTTON'||el.tagName==='INPUT'&&['button','submit','reset','image'].includes(el.type);
+  const checkable=el.tagName==='INPUT'&&['checkbox','radio'].includes(el.type);
+  const textInput=el.tagName==='INPUT'&&['text','search','email','url','tel','number',''].includes(el.type||'');
+  const textEntry=el.tagName==='TEXTAREA'||el.tagName==='INPUT'&&['text','search','url','tel',''].includes(el.type||'');
+  if((d.action||d.operation)==='browser_key'&&['Enter',' '].includes(d.key)){
+   if(d.key==='Enter'&&!button&&!textInput&&el.tagName!=='TEXTAREA'&&el.tagName!=='A')return fail('Enter default action is unsupported for this target. Use browser_click or another supported action.');
+   if(d.key===' '&&!button&&!checkable&&!textEntry)return fail('Space default action is unsupported for this target. Use browser_click or browser_type.');
+  }
+  if(d.operation==='validate')return {ok:true};
  if(d.operation==='browser_select'){
   if(el.tagName!=='SELECT'||el.options.length>200)return fail('Select a dropdown with at most 200 options from the snapshot.');
   const option=[...el.options].find(option=>option.value===d.value&&!option.disabled);if(!option)return fail('Option changed or is disabled. Inspect again.');
@@ -380,8 +388,23 @@ ACTION_SCRIPT = r'''(() => {
  }
  if(d.operation==='browser_key'){
   el.focus();const proceed=el.dispatchEvent(new KeyboardEvent('keydown',{key:d.key,bubbles:true,cancelable:true}));
-  if(proceed&&d.key==='Enter'&&el.form&&['INPUT','BUTTON'].includes(el.tagName))el.form.requestSubmit();
-  el.dispatchEvent(new KeyboardEvent('keyup',{key:d.key,bubbles:true}));return {ok:true};
+   if(proceed&&d.key==='Enter'){
+    if(button||el.tagName==='A')el.click();
+    else if(el.tagName==='TEXTAREA'){
+     el.setRangeText('\n',el.selectionStart,el.selectionEnd,'end');el.dispatchEvent(new Event('input',{bubbles:true}));
+    }else if(textInput&&el.form){
+     const submitter=[...document.querySelectorAll('button,input')].find(control=>control.form===el.form&&
+      (control.tagName==='BUTTON'&&control.type==='submit'||control.tagName==='INPUT'&&['submit','image'].includes(control.type)));
+     if(submitter)submitter.click();
+     else if([...el.form.elements].filter(control=>control.tagName==='INPUT'&&['text','search','tel','url','email','password','date','month','week','time','datetime-local','number'].includes(control.type)).length<=1)
+      HTMLFormElement.prototype.requestSubmit.call(el.form);
+    }
+   }else if(proceed&&d.key===' '&&textEntry){
+    el.setRangeText(' ',el.selectionStart,el.selectionEnd,'end');el.dispatchEvent(new Event('input',{bubbles:true}));
+   }
+   el.dispatchEvent(new KeyboardEvent('keyup',{key:d.key,bubbles:true}));
+   if(proceed&&d.key===' '&&(button||checkable))el.click();
+   return {ok:true};
  }
  if(d.operation==='browser_type'&&!['INPUT','TEXTAREA'].includes(el.tagName))return fail('Select an editable text field.');
  if(d.operation==='browser_type'&&!['text','search','email','url','tel','number',''].includes(el.type||''))return fail('Unsupported input type.');

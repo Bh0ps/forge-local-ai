@@ -116,7 +116,7 @@ class BrowserTools:
         if arguments.get('tab_id') is not None:
             tabs = {str(tab['id']):tab for tab in self.bridge.tabs()} if self.bridge else {}
             tab = tabs.get(str(arguments['tab_id']))
-            if not tab: return {'ok':False,'error':'This tab is not connected. Click its Forge extension button.','not_executed':True}
+            if not tab: return {'ok':False,'error':'This tab ID is not connected. Use browser_tabs for connected extension tab IDs; connect the intended tab through the Forge extension popup. Preview session IDs require preview_* tools.','not_executed':True}
             return {'app':'browser:connected-tab','target':arguments.get('url') or tab['url'], 'tab_id':tab['id']}
         return {'app':'browser:isolated','target':arguments.get('url') or 'Forge isolated browser'}
 
@@ -173,13 +173,16 @@ class BrowserTools:
     @staticmethod
     def schemas():
         text = {"type": "string"}
-        target = {"tab_id": {"type": ["string", "integer"], "description": "Optional opaque ID from browser_tabs; identifies an explicitly connected browser tab"},
+        target = {"tab_id": {"type": ["string", "integer"], "description": "Optional connected extension tab ID returned by browser_tabs only. Never use a preview session ID; local app previews use preview_* tools."},
                   "backend": {"type": "string", "enum": ["native", "isolated"], "description": "Default is built-in native desktop browser when available"}}
         return [
             function_schema("browser_navigate", "Navigate Forge's built-in browser, optional isolated browser or explicitly connected tab", {**target, "url": text}, ["url"]),
             function_schema("browser_inspect", "Read page text and target selectors; returns a snapshot_id for actions", target),
             function_schema("browser_click", "Click a target from the current snapshot", {**target, "selector": text, "snapshot_id": text}, ["selector", "snapshot_id"]),
             function_schema("browser_type", "Replace a form field using the current snapshot", {**target, "selector": text, "text": text, "snapshot_id": text}, ["selector", "text", "snapshot_id"]),
+            function_schema("browser_select", "Choose an enabled dropdown option returned by the current browser snapshot", {**target, "selector": text, "value": text, "snapshot_id": text}, ["selector", "value", "snapshot_id"]),
+            function_schema("browser_key", "Dispatch a supported key to a target from the current snapshot; Enter submits its form where applicable", {**target, "selector": text, "key": {"type":"string","enum":["Enter","Tab","Escape","ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," ","Backspace","Delete","Home","End"]}, "snapshot_id": text}, ["selector", "key", "snapshot_id"]),
+            function_schema("browser_scroll", "Scroll the inspected page by at most 1500 CSS pixels, then inspect again", {**target, "x": {"type":"integer","minimum":-1500,"maximum":1500}, "y": {"type":"integer","minimum":-1500,"maximum":1500}, "snapshot_id": text}, ["snapshot_id"]),
             function_schema("browser_screenshot", "Capture the current browser viewport", target),
             function_schema("browser_tabs", "List only user-connected extension tabs"),
             function_schema("browser_close", "Close Forge's browser", {"backend": target['backend']}),
@@ -192,7 +195,7 @@ class BrowserTools:
             if not self.bridge:
                 raise RuntimeError("No browser extension is connected")
             operation = name.removeprefix("browser_")
-            if operation not in {"navigate", "inspect", "click", "type", "screenshot"}:
+            if operation not in {"navigate", "inspect", "click", "type", "select", "key", "scroll", "screenshot"}:
                 raise ValueError("Unsupported connected-tab operation")
             data = dict(arguments)
             if operation == "navigate":
@@ -200,7 +203,7 @@ class BrowserTools:
             tab_id = data.pop('tab_id')
             run = str((context or {}).get('run_id') or 'interactive')
             key = (run, str(tab_id))
-            if operation in ('click','type'):
+            if operation in ('click','type','select','key','scroll'):
                 snap = self.extension_snapshots.get(key)
                 tabs = {str(tab['id']):tab for tab in self.bridge.tabs()}
                 if not snap or data.get('snapshot_id') != snap['id'] or time.monotonic()-snap['time']>30 or str(tab_id) not in tabs or tabs[str(tab_id)]['url'] != snap['url']:
@@ -212,7 +215,7 @@ class BrowserTools:
             if operation == 'inspect':
                 self.extension_snapshots = {k:v for k,v in self.extension_snapshots.items() if time.monotonic()-v['time']<=30}
                 self.extension_snapshots[key] = {'id':result.get('snapshot_id'), 'url':result.get('url'), 'time':time.monotonic()}
-            elif operation in ('navigate','click','type'):
+            elif operation in ('navigate','click','type','select','key','scroll'):
                 self.extension_snapshots.pop(key, None)
             return self._bounded_result(result)
         if name == "browser_tabs":
@@ -280,11 +283,18 @@ class BrowserTools:
             path = self._artifact(raw, ".png")
             return {"ok": True, "artifact": str(path), "mimeType": "image/png", "url": self.page.url,
                     "content": [{"type": "image", "artifact": str(path), "mimeType": "image/png"}]}
-        if name in {"browser_click", "browser_type"}:
+        if name in {"browser_click", "browser_type", "browser_select", "browser_key", "browser_scroll"}:
             expected = data.get("snapshot_id")
             selector = str(data.get("selector", ""))
             if not self.snapshot or expected != self.snapshot["id"] or self.page.url != self.snapshot["url"]:
                 raise ValueError("Stale browser snapshot; inspect the page again")
+            if name == 'browser_scroll':
+                x,y=data.get('x',0),data.get('y',0)
+                if type(x) is not int or type(y) is not int or max(abs(x),abs(y))>1500:
+                    raise ValueError('Scroll by integer offsets of at most 1500 CSS pixels.')
+                self.snapshot=None
+                self.page.evaluate('({x,y}) => window.scrollBy(x,y)',{'x':x,'y':y})
+                return self._inspect()
             if selector not in self.snapshot["selectors"]:
                 raise ValueError("Select a target returned by browser_inspect")
             target = self.page.locator(selector)
@@ -292,9 +302,21 @@ class BrowserTools:
             signature = target.evaluate("el => [el.tagName,el.getAttribute('type'),el.getAttribute('href'),el.textContent.slice(0,200)]")
             if signature != self.snapshot["signatures"][selector] or target.count() != 1:
                 raise ValueError("Browser target changed; inspect the page again")
+            editable=target.evaluate("el => ({type:el.type,disabled:el.disabled===true,readonly:el.readOnly===true})")
+            if editable.get('type') in ('password','file') or editable.get('disabled') or editable.get('readonly'):
+                return {'ok':False,'error':'Password, file, disabled or read-only fields require direct user interaction.','not_executed':True}
             self.snapshot = None
             if name == "browser_click":
                 target.click()
+            elif name == 'browser_select':
+                if not target.evaluate("el => el.tagName==='SELECT' && el.options.length<=200 && [...el.options].some(option=>option.value===%s&&!option.disabled)" % json.dumps(data['value'])):
+                    raise ValueError('Choose an enabled dropdown option from the snapshot.')
+                target.select_option(data['value'])
+            elif name == 'browser_key':
+                key=data.get('key')
+                if key not in ('Enter','Tab','Escape','ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' ','Backspace','Delete','Home','End'):
+                    raise ValueError('This browser key is unsupported.')
+                target.press('Space' if key==' ' else key)
             else:
                 target.fill(str(data.get("text", "")))
             return self._inspect()
@@ -306,7 +328,9 @@ class BrowserTools:
           .filter(el => el.getBoundingClientRect().width && el.getBoundingClientRect().height).slice(0,200)
           .map((el,i) => {const id=snap+'-'+i; el.setAttribute('data-forge-target',id); return {
             selector:'[data-forge-target="'+id+'"]', tag:el.tagName.toLowerCase(),
-            label:(el.getAttribute('aria-label')||el.innerText||el.getAttribute('placeholder')||'').slice(0,300),
+            label:(el.getAttribute('aria-label')||[...(el.labels||[])].map(label=>label.textContent).join(' ')||el.innerText||el.getAttribute('placeholder')||'').trim().slice(0,300),
+            ...(!['password','file'].includes(el.type)&&['INPUT','TEXTAREA','SELECT'].includes(el.tagName)?{value:String(el.value).slice(0,300)}:{}),
+            ...(el.tagName==='SELECT'?{options:[...el.options].slice(0,200).map(option=>({value:option.value.slice(0,300),label:option.text.slice(0,300),disabled:option.disabled}))}:{}),
             type:el.getAttribute('type'), signature:[el.tagName,el.getAttribute('type'),el.getAttribute('href'),el.textContent.slice(0,200)]};})""", snap)
         self.snapshot = {"id": snap, "url": self.page.url, "selectors": {x["selector"] for x in targets},
                          "signatures": {x["selector"]: x.pop("signature") for x in targets}}

@@ -111,6 +111,63 @@ def test_unknown_outcome_requires_inspection_and_never_reexecutes(tmp_path):
     with svc.store._connection() as db: assert db.execute('SELECT COUNT(*) FROM invocations').fetchone()[0]==1
     svc.shutdown()
 
+@pytest.mark.parametrize('interruptions',[1,2])
+def test_resume_after_partial_assistant_output_starts_a_new_turn_without_replaying_tools(tmp_path,interruptions):
+    from core import Core
+    from copy import deepcopy
+
+    def interrupted(index):
+        def generate(data,cancel):
+            message={'thinking':'Fixture partial reasoning.'} if index==0 else {'content':'Fixture partial visible report.'}
+            yield {'message':message}
+            raise ValueError('Fixture generation interrupted.')
+        return generate
+
+    payloads=[]
+    def continued(data,cancel):
+        payload=Core._agent_payload(data);payloads.append(deepcopy(payload))
+        if len(payload['messages'])>=2 and all(m['role']=='assistant' for m in payload['messages'][-2:]):
+            raise ValueError('Cannot have 2 or more assistant messages at the end of the list.')
+        yield {'message':{'content':'Saved work retained; continued the task.'},'done':True}
+
+    folder=tmp_path/'project';folder.mkdir()
+    engine=Engine([{'tool_calls':[call('write_file',{'path':'page.txt','content':'Completed effect'})]},
+        *[interrupted(index) for index in range(interruptions)],continued])
+    svc=service(tmp_path,engine)
+    svc.store.update_settings({'permission_profile':'full_access','memory_enabled':False,'memory_suggestions':False,
+        'context':32768,'browser_tools':False,'computer_tools':False,'web':False})
+    project=svc.create_project({'name':'Resume fixture','path':str(folder)})
+    run=svc.jobs.start({'text':'Write the fixture page and report its contents.','project_id':project['id']})
+    try:
+        for index in range(interruptions):
+            outcome=finished(svc,run)
+            assert outcome['status']=='paused' and outcome['recovery']=='Fixture generation interrupted.'
+            if index+1<interruptions:svc.jobs.resume(run['id'])
+        before=svc.store.run_chat(run['chat_id'],0)['messages']
+        partials=[row for row in before if row.get('status')=='partial']
+        assert len(partials)==interruptions
+        resumed=svc.jobs.resume(run['id'])
+        outcome=finished(svc,resumed)
+        assert outcome['status']=='completed',outcome
+        messages=payloads[0]['messages']
+        assert messages[-1]['role']=='user' and 'the user resumed this run' in messages[-1]['content']
+        if interruptions==2:
+            assert any('Fixture partial visible report.'==m['content'] for m in messages)
+        assert [m['role'] for m in messages[-interruptions-1:-1]]==['assistant']*interruptions
+        calls=[m for m in messages if m.get('tool_calls')]
+        results=[m for m in messages if m['role']=='tool']
+        assert len(calls)==len(results)==1
+        assert calls[0]['tool_calls'][0]['function']==call('write_file',{'path':'page.txt','content':'Completed effect'})['function']
+        assert results[0]['tool_name']=='write_file' and json.loads(results[0]['content'])['result']['ok']
+        assert (folder/'page.txt').read_text()=='Completed effect'
+        after=svc.store.run_chat(run['chat_id'],0)['messages']
+        assert after[:len(before)]==before
+        assert not any('Coordinator continuation:' in row['content'] for row in after)
+        with svc.store._connection() as db:
+            assert db.execute('SELECT COUNT(*) FROM invocations WHERE run_id=?',(run['id'],)).fetchone()[0]==1
+    finally:svc.shutdown()
+
+
 def test_todo_external_edits_are_not_overwritten_and_import_reconciles(tmp_path):
     svc=service(tmp_path); goal=svc.goal_create({'text':'First step\nSecond step'})
     assert len(goal['tasks'])==2 and svc.store.runs()==[]

@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Forge connection</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+  <header><img src="icons/forge-48.png" width="36" height="36" alt=""><div><h1>Forge</h1><p>Your selected tab, connected.</p></div></header>
+  <main>
+    <div class="state"><span id="indicator" aria-hidden="true"></span><strong id="status" role="status">Checking connection…</strong></div>
+    <p id="page-title" class="page-title"></p><p id="origin" class="origin"></p>
+    <p id="message">Open Forge to use this page with your agent.</p>
+    <div class="actions"><button id="connect" type="button" disabled>Connect this tab</button><button id="disconnect" type="button" hidden>Disconnect</button><button id="reconnect" type="button" hidden>Reconnect Forge</button></div>
+    <details id="setup"><summary>Connection setup</summary><ol><li>Open Forge <strong>Settings → Browser</strong> and enable <strong>Browser bridge</strong>.</li><li>Choose <strong>Register native host</strong> and enter this extension ID:</li></ol><input id="extension-id" readonly aria-label="Extension ID"><p>Select the ID to copy it. Return here and choose Connect or Reconnect.</p><p id="detail" class="detail"></p></details>
+  </main>
+  <footer>Only tabs you choose. Changing websites disconnects this tab.</footer>
+  <script src="popup.js"></script>
+</body>
+</html>

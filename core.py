@@ -10,7 +10,7 @@ from context_window import (validate_context, response_budget, history_character
                             history_message_limit, estimated_prompt_tokens, prompt_budget)
 from inference_stream import (InferenceTimeouts, cancellable_inference, bounded_lines,
                               FIRST_RESPONSE_TIMEOUT_SECONDS, GENERATION_IDLE_TIMEOUT_SECONDS,
-                              TOTAL_REQUEST_TIMEOUT_SECONDS)
+                              OLLAMA_TOOL_IDLE_TIMEOUT_SECONDS, TOTAL_REQUEST_TIMEOUT_SECONDS)
 from prompt_compiler import AGENT_POLICY
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -154,9 +154,10 @@ class Core:
         return httpx.Timeout(read_seconds, connect=2, write=15, pool=2)
 
     @staticmethod
-    def _inference_timeouts(connect=2):
+    def _inference_timeouts(connect=2, *, buffered_tools=False):
         return InferenceTimeouts(first_response=FIRST_RESPONSE_TIMEOUT_SECONDS,
-                                 generation_idle=GENERATION_IDLE_TIMEOUT_SECONDS,
+                                 generation_idle=(OLLAMA_TOOL_IDLE_TIMEOUT_SECONDS if buffered_tools
+                                                  else GENERATION_IDLE_TIMEOUT_SECONDS),
                                  total=STREAM_DEADLINE_SECONDS, connect=connect)
 
     @staticmethod
@@ -475,7 +476,8 @@ class Core:
 
         try:
             yield from cancellable_inference(self.base + '/chat', payload, cancel_event, consume,
-                                             timeouts=self._inference_timeouts(), provider='Ollama',
+                                             timeouts=self._inference_timeouts(buffered_tools=bool(payload.get('tools'))),
+                                             provider='Ollama',
                                              response_error=self._response_json)
         except httpx.HTTPError as exc:
             raise self._connection_error(exc) from None

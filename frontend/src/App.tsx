@@ -110,7 +110,7 @@ export default function App() {
   useEffect(() => { function showBrowser() { setRightPanel(true); setPanelTab('browser'); } window.addEventListener('forge:browser-open', showBrowser); return () => window.removeEventListener('forge:browser-open', showBrowser); }, []);
   const [contextOpen, setContextOpen] = useState(false);
   const [hud, setHud] = useState(false); const [peek, setPeek] = useState(false); const [modelOpen, setModelOpen] = useState(false);
-  useEffect(() => { function showPreview() { setPage('builder'); if (hud) void switchMode(false); } window.addEventListener('forge:preview-open', showPreview); return () => window.removeEventListener('forge:preview-open', showPreview); }, [hud]);
+  useEffect(() => { function showPreview() { if (page !== 'builder') setPage('builder'); if (hud) void switchMode(false); } window.addEventListener('forge:preview-open', showPreview); return () => window.removeEventListener('forge:preview-open', showPreview); }, [hud, page]);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS); const [projects, setProjects] = useState<Project[]>([]); const [chats, setChats] = useState<Chat[]>([]); const [models, setModels] = useState<Model[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null); const [chatId, setChatId] = useState<string | null>(null); const [chat, setChat] = useState<SavedChat | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({}); const [attachments, setAttachments] = useState<Record<string, string[]>>({}); const [lives, setLives] = useState<Record<string, LiveRun>>({});

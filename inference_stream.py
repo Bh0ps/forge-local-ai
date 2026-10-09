@@ -14,6 +14,9 @@ import httpx
 
 FIRST_RESPONSE_TIMEOUT_SECONDS = 3600
 GENERATION_IDLE_TIMEOUT_SECONDS = 180
+# Ollama may buffer an entire native tool call while decoding its arguments.
+# A file write can therefore be silent for many minutes on a local model.
+OLLAMA_TOOL_IDLE_TIMEOUT_SECONDS = 3600
 TOTAL_REQUEST_TIMEOUT_SECONDS = 5400
 MAX_PACKET_BYTES = 65536
 
