@@ -314,7 +314,12 @@ def test_pause_cancels_cloud_review_and_preserves_parent_request(tmp_path):
         svc.core.rounds = [mark_complete(svc), {'content': 'Completed.'}]
         goal = svc.goal_create({'text': 'Inspect implementation.'})
         run = svc.goal_resume({'id': goal['id']})
-        assert entered.wait(3)
+        # Review admission includes local journal/evidence work before the cloud worker starts.
+        assert entered.wait(15), {
+            'parent_status': svc.store.run(run['id'])['status'],
+            'review_statuses': [(child['status'], child.get('recovery'))
+                                for child in svc.store.runs() if child.get('parent_id') == run['id']],
+        }
         original = svc.store.run(run['id'])['request']
         svc.jobs.cancel(run['id'], pause=True)
         assert finished(svc, run)['status'] == 'paused' and stopped.wait(2)

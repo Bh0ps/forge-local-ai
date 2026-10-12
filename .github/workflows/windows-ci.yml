@@ -10,9 +10,14 @@ concurrency:
   group: windows-ci-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  validate:
+  backend:
+    name: Backend shard ${{ matrix.shard }}
     runs-on: windows-2022
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -34,7 +39,31 @@ jobs:
         working-directory: frontend
         run: npm ci
       - name: Test Python and evaluation contracts
-        run: python -m pytest -q
+        run: python scripts/ci_backend_tests.py --shard ${{ matrix.shard }} --shards 4 -q
+  validate:
+    needs: backend
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          # Later 3.12 security releases have no Windows setup-python artifact.
+          python-version: '3.12.10'
+          architecture: x64
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24.18.0'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install exact hashed Python dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements-build.lock
+          python -m pip install --require-hashes --no-build-isolation -r requirements-ci.lock
+          python -m pip check
+      - name: Install exact frontend and browser-oracle dependencies
+        working-directory: frontend
+        run: npm ci
       - name: Test and compile frontend
         working-directory: frontend
         run: |
