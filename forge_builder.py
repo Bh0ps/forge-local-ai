@@ -131,29 +131,55 @@ class BuilderManager:
                 'status': status if updated['status'] == 'pending' else builder['status']}
 
     def fingerprint(self, builder):
+        snapshot = self.source_snapshot(builder)
+        if not snapshot.get('available'):
+            raise ValueError(snapshot.get('reason', 'Builder sources are unavailable.'))
+        return {key: snapshot[key] for key in ('sha256', 'bytes', 'latest_modified', 'directory')} | {'files': len(snapshot['files'])}
+
+    def source_snapshot(self, builder):
+        from forge_sources import source_manifest
         project = self.store.get_project(builder['project_id'])
-        tools = ProjectTools(project['path'], self.store.home / 'backups')
-        root = tools._path(builder.get('directory', '.'), directory=True)
-        digest = hashlib.sha256()
-        count = size = 0
-        latest_modified = 0
-        for folder, dirs, files in os.walk(root, followlinks=False):
-            dirs[:] = sorted(d for d in dirs if d not in SKIP and not (Path(folder) / d).is_symlink())
-            for name in sorted(files):
-                path = Path(folder) / name
-                if path.suffix.lower() in ('.sqlite3', '.db', '.log', '.pyc'):
-                    continue
-                path = tools._path(str(path))
-                count += 1
-                size += path.stat().st_size
-                latest_modified = max(latest_modified, path.stat().st_mtime)
-                if count > 5000 or size > 64 * 1024 * 1024:
-                    raise ValueError('Builder evidence scope exceeds 5000 files or 64 MiB. Select a smaller app directory.')
-                digest.update(path.relative_to(root).as_posix().encode())
-                digest.update(b'\0')
-                digest.update(hashlib.sha256(path.read_bytes()).digest())
-        return {'sha256': digest.hexdigest(), 'files': count, 'bytes': size,
-                'latest_modified': latest_modified, 'directory': builder.get('directory', '.')}
+        ProjectTools(project['path'], self.store.home / 'backups')._path(builder.get('directory', '.'), directory=True)
+        return source_manifest(project['path'], builder.get('directory', '.'), builder.get('generated_outputs', []))
+
+    def command_verification_scope(self, run, arguments):
+        """Host-only launch policy; tools cannot provide source exclusions."""
+        resolver = getattr(self.service, 'associated_builder', None)
+        builder = resolver(run) if callable(resolver) else None
+        if not builder or run.get('workspace_project_id', run.get('project_id')) not in (None, run.get('project_id')):
+            return None
+        argv = arguments.get('argv', [])
+        executable = Path(argv[0]).stem.lower() if argv else ''
+        tail = argv[1:]
+        known = (executable in ('pytest', 'coverage', 'tsc', 'vite') or
+                 executable.startswith('python') and tail[:2] in (['-m', 'pytest'], ['-m', 'coverage'], ['-m', 'compileall']) or
+                 executable == 'node' and tail[:1] == ['--test'] or executable in ('cargo', 'go') and tail[:1] == ['test'] or
+                 executable in ('npm', 'pnpm', 'yarn', 'bun', 'npx') and any(value in ('test', 'build', 'tsc', 'vite') for value in tail[:3]))
+        if not known and argv not in builder.get('check_commands', {}).values():
+            return None
+        with self.lock:
+            builder = self.store.entity('builders', builder['id'])
+            project = self.store.get_project(builder['project_id'])
+            tools = ProjectTools(project['path'], self.store.home / 'backups')
+            working = tools._path(arguments.get('cwd', '.'), directory=True)
+            scope = tools._path(builder.get('directory', '.'), directory=True)
+            if not working.is_relative_to(scope):
+                return None
+            from forge_sources import command_outputs
+            outputs = list(builder.get('generated_outputs', []))
+            for candidate in command_outputs(tools.root, working, argv):
+                # A collision remains protected even if a later command overwrites
+                # it with report-shaped data. Never weaken that saved decision.
+                old = next((item for item in outputs if (item.get('kind'), item.get('path')) == (candidate.get('kind'), candidate.get('path'))), None)
+                if old is None:
+                    outputs.append(candidate)
+                elif candidate.get('protected_paths'):
+                    old['protected_paths'] = list(dict.fromkeys(old.get('protected_paths', []) + candidate['protected_paths']))
+            if len(outputs) > 128:
+                raise ValueError('Check output policy exceeds its bound. Revise the Builder brief before adding more report destinations.')
+            self.store.save_entity('builders', {**builder, 'generated_outputs': outputs})
+            return {'version': 1, 'builder_id': builder['id'], 'builder_revision': builder['revision'],
+                    'directory': builder.get('directory', '.'), 'outputs': outputs}
 
     def save(self, data):
         with self.lock:
@@ -231,6 +257,7 @@ class BuilderManager:
                 # revision and planner identity.
                 return old
             record['gates'] = self.gate_defaults(record)
+            record['generated_outputs'] = []
             record = self.refresh_build_gate(record)
             if old.get('goal_id'):
                 record['goal_id'] = old['goal_id']
@@ -566,6 +593,13 @@ class BuilderManager:
                 known_test = gate == 'functional' and ((executable.startswith('python') and tail[:2] == ['-m', 'pytest']) or
                     executable == 'pytest' or package_test or
                     executable == 'node' and tail[:1] == ['--test'] or executable in ('cargo', 'go') and tail[:1] == ['test'])
+                pytest_command = executable == 'pytest' or executable.startswith('python') and tail[:2] == ['-m', 'pytest']
+                test_information = (pytest_command and any(part in ('--help', '-h', '--version', '--collect-only', '--co', '--setup-plan') for part in tail) or
+                    executable == 'cargo' and tail[:1] == ['test'] and '--no-run' in tail or
+                    executable == 'go' and tail[:1] == ['test'] and any(part == '-list' or part.startswith('-list=') for part in tail) or
+                    executable == 'node' and '--test' in tail and any(part in ('--help', '-h', '--version') for part in tail))
+                if test_information:
+                    raise ValueError('Help, collection-only and compile-only test commands cannot verify a gate. Run the actual tests.')
                 if gate not in ('build', 'functional') or (configured and argv != configured) or (not configured and not known_build and not known_test):
                     raise ValueError('Use the brief-configured check command or a recognized build/test command for this gate.')
                 brief_time = datetime.fromisoformat(builder['brief_updated_at']).timestamp()
@@ -601,8 +635,17 @@ class BuilderManager:
             entry = {'gate': gate, 'status': status, 'revision': builder['revision'], 'evidence': evidence,
                      'note': note, 'created_at': datetime.now(timezone.utc).isoformat()}
             fingerprint = self.fingerprint(builder)
-            if source == 'session' and fingerprint['latest_modified'] > session['created_at'] + .001:
-                raise ValueError('App files changed after this check started. Run the check again before recording it.')
+            if source == 'session':
+                getter = getattr(self.service.command_sessions, 'verification', None)
+                verification = getter(reference) if callable(getter) else {}
+                scope = verification.get('scope') or {}
+                before, after = verification.get('before') or {}, verification.get('after') or {}
+                if (scope.get('version') != 1 or scope.get('builder_id') != builder['id'] or
+                    scope.get('builder_revision') != builder['revision'] or scope.get('directory') != builder.get('directory', '.') or
+                    not before.get('available') or not after.get('available')):
+                    raise ValueError('This check has no source snapshots for the current brief. Run a new managed check before recording it.')
+                if before.get('fingerprint') != after.get('fingerprint') or after.get('fingerprint') != fingerprint['sha256']:
+                    raise ValueError('App source files changed during or after this check. Run the check again before recording it.')
             evidence = {**evidence, 'kind': {'manual': 'human_inspection', 'session': 'command_result',
                 'preview': 'preview_availability', 'artifact': 'document_structure'}[source],
                 'project_id': builder['project_id'], 'builder_id': builder['id'], 'brief_revision': builder['revision'],

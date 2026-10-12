@@ -49,8 +49,30 @@ class CommandSessionManager:
         except (OSError, ValueError):
             raise ValueError('Command session was not found.') from None
 
+    def _source_snapshot(self, record, phase):
+        from forge_sources import source_manifest
+        scope = record['verification_scope']
+        snapshot = source_manifest(record['project_root'], scope['directory'], scope.get('outputs', []))
+        path = self.root / (record['id'] + '-' + phase + '.sources')
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(snapshot, ensure_ascii=False), encoding='utf-8')
+        os.replace(temporary, path)
+        return {'available': snapshot['available'], 'fingerprint': snapshot.get('fingerprint'),
+                'reason': snapshot.get('reason')}
+
+    def verification(self, identifier):
+        """Private host evidence; full manifests never enter command output."""
+        record = self.status(identifier)
+        result = {'scope': record.get('verification_scope'), 'before': None, 'after': None}
+        for phase in ('before', 'after'):
+            try:
+                result[phase] = json.loads((self.root / (identifier + '-' + phase + '.sources')).read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                pass
+        return result
+
     def start(self, project_root, argv, cwd='.', run_id='', purpose='command', owner_id='', max_seconds=3600,
-              source_key=None, cancel=None):
+              source_key=None, cancel=None, verification_scope=None):
         if not isinstance(argv, list) or not 1 <= len(argv) <= 128 or any(not isinstance(a, str) or '\x00' in a or len(a) > 16384 for a in argv):
             raise ValueError('Provide an executable argv array with 1–128 text arguments.')
         if not argv[0].strip() or sum(map(len, argv)) > 65536:
@@ -83,6 +105,12 @@ class CommandSessionManager:
                 'project_root': str(project.root), 'cwd': str(working), 'argv': list(argv), 'purpose': purpose,
                 'max_seconds': max_seconds, 'source_key': source_key, 'status': 'starting', 'created_at': time.time(),
                 'exit_code': None, 'output_bytes': 0, 'truncated': False}
+            if verification_scope is not None:
+                record['verification_scope'] = json.loads(json.dumps(verification_scope))
+                try:
+                    record['source_before'] = self._source_snapshot(record, 'before')
+                except (OSError, ValueError) as exc:
+                    record['source_before'] = {'available': False, 'reason': str(exc)[:300]}
             self._save(record)
             options = {'cwd': str(working), 'shell': False, 'stdin': subprocess.DEVNULL,
                 'stdout': subprocess.PIPE, 'stderr': subprocess.STDOUT}
@@ -190,6 +218,11 @@ class CommandSessionManager:
             self._terminate(job)
             reader.join(timeout=5)
             if not reader.is_alive(): job['process'].stdout.close()
+            if job['record'].get('verification_scope'):
+                try:
+                    job['record']['source_after'] = self._source_snapshot(job['record'], 'after')
+                except (OSError, ValueError) as exc:
+                    job['record']['source_after'] = {'available': False, 'reason': str(exc)[:300]}
             with self.lock:
                 record = job['record']
                 record.update(status='timed_out' if timed_out else 'stopped' if job['stop'].is_set() else 'completed',

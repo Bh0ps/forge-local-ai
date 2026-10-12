@@ -44,7 +44,7 @@ READ_ACTIONS=READ_ACTIONS|frozenset(('skills_search','skills_resource_read','ski
     'run_context_inspect','usage_requests','command_session_status','command_session_read','command_session_wait',
     'artifact_list','artifact_get','artifact_download','document_list','performance','performance_benchmarks','performance_calibrations'))
 READ_ACTIONS=READ_ACTIONS|frozenset(('draft_get','submission_get','builder_runtime_get',
-    'ai_workflow_status','ai_workflow_self_test_status'))
+    'ai_workflow_status','ai_workflow_self_test_status','ui_layout_get','run_activity','run_diagnostics_export'))
 
 class AgentLaunchRejected(ValueError):
     """Preflight failed before any worktree, child or remote request was created."""
@@ -321,7 +321,8 @@ class ForgeService:
 
     def bootstrap(self):
         runs=self.store.runs(limit=200)
-        return dict(version='5.0.4',name='Forge',settings=self.store.get_settings(),projects=self.store.list_projects(),
+        from forge_workspace_ui import WorkspaceUI
+        return dict(version='5.1.0',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
                     chats=self.store.list_chats(),runs=runs,goals=[self.goal_view(goal,runs) for goal in self.store.active_goals()],
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -354,6 +355,13 @@ class ForgeService:
             if data and any(k in data for k in ('memory_semantic','memory_model_path')):
                 with self.manager_lock: self.memory_manager=None
             return result
+        if action in ('ui_layout_get','ui_layout_save','project_appearance_save','run_activity','run_diagnostics_export'):
+            from forge_workspace_ui import WorkspaceUI
+            workspace=WorkspaceUI(self.store)
+            if action.startswith('ui_layout_'): return workspace.layout(data,save=action=='ui_layout_save')
+            if action=='project_appearance_save': return workspace.save_project(data)
+            if action=='run_activity': return workspace.activity(data)
+            return workspace.diagnostics(data)
         if action=='run_context_inspect':
             run=self.store.run(data['run_id'])
             from prompt_compiler import verification_packet
@@ -407,7 +415,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='5.0.4')
+                    self.update_manager=UpdateManager(self,current_version='5.1.0')
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)
@@ -427,7 +435,9 @@ class ForgeService:
             os.startfile(str(self.store.home)); return {'ok':True}
         if action=='commands': return {'commands':COMMANDS}
         if action=='command': return self.command(data)
-        if action=='projects': return {'projects':self.store.list_projects()}
+        if action=='projects':
+            from forge_workspace_ui import WorkspaceUI
+            return {'projects':WorkspaceUI(self.store).projects()}
         if action=='create_project': return self.create_project(data)
         if action=='chats': return {'chats':self.store.list_chats(data.get('project_id'),archived=None if data.get('archived')=='all' else data.get('archived',False))}
         if action in ('chat_move','chat_archive','chat_delete'):
@@ -437,7 +447,9 @@ class ForgeService:
             if self.builder_manager and hasattr(self.builder_manager,'close_project'): self.builder_manager.close_project(data['id'])
             from forge_chats import dispatch_chat
             return dispatch_chat(self,action,data)
-        if action=='get_chat': return self.store.get_chat(data['id'],limit=data.get('limit',200))
+        if action=='get_chat':
+            from forge_workspace_ui import WorkspaceUI
+            return WorkspaceUI(self.store).chat(data['id'],data.get('limit',200))
         if action=='attachment':
             image=self.store.hydrate_images([data['id']])[0]
             import base64,io
@@ -901,6 +913,29 @@ class ForgeService:
         if not profile.get('enabled',True): raise AgentLaunchRejected('Enable this agent profile first.')
         if parent and parent.get('parent_id'): raise AgentLaunchRejected('Helper agents cannot recursively delegate. Return findings to the main agent.')
         if parent and parent['status'] in TERMINAL: raise AgentLaunchRejected('The parent run is no longer active.')
+        retry=None;original=None;lineage={}
+        required=data.get('required',not str(source_key or '').startswith('planner:'))
+        if type(required) is not bool:raise AgentLaunchRejected('required must be true or false.')
+        if data.get('retry_of'):
+            try:retry=self.store.run(data['retry_of'])
+            except ValueError:raise AgentLaunchRejected('The failed assignment is unavailable.') from None
+            if not parent or retry.get('parent_id')!=parent['id'] or retry.get('agent_id')!=profile['id']:
+                raise AgentLaunchRejected('Retry only a direct child using its original helper profile.')
+            if retry.get('mode')=='goal_review' or retry.get('settings',{}).get('provider_id')!='openrouter' or retry['status'] not in ('paused','failed','interrupted'):
+                raise AgentLaunchRejected('Only a failed or interrupted cloud assignment can be retried; resolve approvals or questions in place.')
+            assignment=retry.get('assignment_id') or retry['id']
+            attempts=[r for r in self.store.runs() if (r.get('assignment_id') or r['id'])==assignment]
+            latest=max(attempts,key=lambda r:r.get('attempt',1))
+            if latest['id']!=retry['id']:raise AgentLaunchRejected('This assignment already has a newer attempt. Retrieve that result instead.')
+            if retry.get('retry_count',0)>=3:raise AgentLaunchRejected('This assignment used all three extra attempts. Report it unavailable or resolve the required blocker.')
+            if (retry.get('failure') or {}).get('category') not in ('refusal','empty_result'):
+                raise AgentLaunchRejected('Only refused or empty cloud results may use a reworded assignment retry. Resolve this failure using its specific recovery action before continuing.')
+            original=self.store.run(assignment)
+            if 'required' in data and required!=original.get('assignment_required',True):
+                raise AgentLaunchRejected('A retry must preserve whether the original assignment is required.')
+            required=original.get('assignment_required',True)
+            lineage={'assignment_id':assignment,'retry_of':retry['id'],'attempt':retry.get('attempt',1)+1,
+                'retry_count':retry.get('retry_count',0)+1,'assignment_original_request':original.get('assignment_original_request',original['request'])}
         if parent:
             with self.jobs.lock: parent_job=self.jobs.jobs.get(parent['id'])
             if parent_job and parent_job['cancel'].is_set(): raise AgentLaunchRejected('The parent run is stopping; no helper was started.')
@@ -910,19 +945,26 @@ class ForgeService:
         if not parent and profile.get('goal_limits'): settings={**settings,'goal_limits':profile['goal_limits']}
         project_id=parent.get('project_id') if parent else data.get('project_id')
         provider_id=profile.get('provider_id') or settings['provider_id']
+        if retry and provider_id!=original['settings']['provider_id']:
+            raise AgentLaunchRejected('The helper profile provider changed. Restore the original provider before retrying this assignment; its saved scope cannot move to another engine.')
         model=profile.get('model') or settings['model']
         if provider_id=='openrouter':
             try: config=self.store.entity('providers','openrouter')
             except ValueError: raise AgentLaunchRejected('Connect OpenRouter before launching a cloud helper.') from None
             if not config.get('enabled') or not config.get('remote_consent') or not config.get('credential_ref'):
                 raise AgentLaunchRejected('Enable OpenRouter with cloud consent and a saved key before launching a cloud helper.')
-            model=profile.get('model') or config.get('model') or 'openrouter/free'
-            if model!='openrouter/free' and not re.fullmatch(r'[A-Za-z0-9_./-]+:free',model):
+            configured_model=profile.get('model') or config.get('model') or 'openrouter/free'
+            if configured_model!='openrouter/free' and not re.fullmatch(r'[A-Za-z0-9_./-]+:free',configured_model):
                 raise AgentLaunchRejected('OpenRouter helpers require the free router or a :free model.')
+            # Each helper attempt starts with fresh free routing. The user's
+            # profile/connection selections remain saved; tool continuation pins
+            # only this run to its verified returned model.
+            model='openrouter/free'
             active=[r for r in self.store.runs() if r.get('parent_id')==data.get('parent_id') and
                 r['status'] not in TERMINAL and r.get('settings',{}).get('provider_id')=='openrouter']
             if parent and len(active)>=2: raise AgentLaunchRejected('Two cloud specialists are already assigned. Consume their results before launching more.')
         readonly=provider_id=='openrouter' or profile.get('role') in ('researcher','reviewer')
+        if retry: readonly=readonly or bool(original.get('readonly'))
         if parent and (parent.get('readonly') or parent.get('mode')=='plan') and not readonly:
             raise AgentLaunchRejected('Read-only runs can only launch read-only helpers.')
         text=data.get('text') or data.get('prompt') or 'Inspect the project.'
@@ -944,6 +986,17 @@ class ForgeService:
             # explicit scope when the two profiles have no tool intersection.
             if not tools: tools=['artifact_read']
         cloud_scope=data.get('cloud_scope')
+        retry_evidence=[]
+        if retry:
+            from forge_cloud_policy import cloud_invocation_records
+            project_id=original.get('project_id')
+            tools=original.get('agent_tools',tools)
+            cloud_scope=json.loads(encode(original.get('cloud_scope') or {}))
+            records=cloud_invocation_records(self.store,{r['id'] for r in attempts},successful_only=True,
+                recipient=original,permission=self.jobs.registry.permission)
+            retry_evidence=[{'artifact':r['artifact'],'tool':r['tool']} for r in records if r.get('artifact')]
+            cloud_scope['artifacts']=list(dict.fromkeys(cloud_scope.get('artifacts',[])+[r['artifact'] for r in retry_evidence]))[:256]
+            ceiling=permission_ceiling(ceiling,original.get('permission_ceiling') or original['settings']['permission_profile'])
         if provider_id=='openrouter' and cloud_scope is None:
             from forge_goal_review import assignment_files
             from forge_cloud_policy import cloud_invocation_records
@@ -963,16 +1016,18 @@ class ForgeService:
                 worktree=self.worktree_create({'project_id':project_id})
             elif parent and parent.get('project_id')==project_id:
                 raise AgentLaunchRejected('Writing delegation requires a Git worktree. Initialize and commit this project, or run the agent after the main writer pauses.')
-        result=self.jobs.start({**settings,'context':profile.get('context',settings['context']),
+        result=self.jobs.start({**settings,'context':original['settings']['context'] if retry else profile.get('context',settings['context']),
             'provider_id':provider_id,'auto_delegate':False,
             'model':model,'text':text,
             'project_id':project_id,'parent_id':data.get('parent_id'),'readonly':readonly,
             'instructions':profile.get('instructions',''),'agent_id':profile['id'],'agent_tools':tools,'skills':profile.get('skills',[]),
             'worktree_id':worktree['worktree']['id'] if worktree else None,
-            'workspace_project_id':worktree['project']['id'] if worktree else (parent or {}).get('workspace_project_id'),
+            'workspace_project_id':worktree['project']['id'] if worktree else (original if retry else (parent or {})).get('workspace_project_id'),
             'permission_ceiling':ceiling,
             'cloud_scope':cloud_scope,
-            'goal_id':parent.get('goal_id') if parent else None,'source_key':source_key})
+            'goal_id':parent.get('goal_id') if parent else None,'source_key':source_key,
+            'schedule_id':data.get('schedule_id'),'assignment_required':required,
+            'retry_evidence':retry_evidence,**lineage})
         if profile.get('specialty'): self.store.update_run(result['id'],specialty=profile['specialty'])
         return {**result,'worktree':worktree}
 
@@ -1035,17 +1090,31 @@ class ForgeService:
             rows=db.execute("SELECT * FROM messages WHERE chat_id=? AND id>=? AND (? IS NULL OR id<?) AND role IN ('user','assistant') ORDER BY id DESC LIMIT 12",
                 (child['chat_id'],child['request_message_id'],later,later)).fetchall()
             messages=[dict(id=row['id'],role=row['role'],content=row['content']) for row in reversed(rows)]
-        assistant=next((message['content'] for message in reversed(messages) if message['role']=='assistant'),'')
+        final_row=next((row for row in rows if row['role']=='assistant'),None)
+        final_meta=json.loads(final_row['metadata']) if final_row else {}
+        assistant=final_row['content'] if final_row and not final_meta.get('tool_calls') and final_meta.get('status','complete')=='complete' else ''
+        successful=child['status']=='completed' and bool(assistant.strip())
+        remaining=max(0,3-child.get('retry_count',0))
+        retryable=(child.get('settings',{}).get('provider_id')=='openrouter' and child['status'] in ('paused','failed','interrupted') and
+            remaining>0 and (child.get('failure') or {}).get('category') in ('refusal','empty_result'))
         public={key:child.get(key) for key in ('id','chat_id','parent_id','agent_id','project_id','workspace_project_id','worktree_id',
-            'status','readonly','checkpoint','recovery','rounds','tools','output_tokens')}
+            'status','readonly','checkpoint','recovery','rounds','tools','output_tokens','assignment_id','retry_of','attempt','retry_count','assignment_required','failure')}
         public['settings']={key:child['settings'].get(key) for key in ('provider_id','model','context')}
-        if child['status']=='completed' and not cancel.is_set():
+        if successful and not cancel.is_set():
             self.store.update_run(child['id'],result_consumed=True,result_consumed_by=parent['id'])
+            assignment=child.get('assignment_id') or child['id']
+            for earlier in self.store.runs():
+                if earlier['id']!=child['id'] and (earlier.get('assignment_id') or earlier['id'])==assignment:
+                    self.store.update_run(earlier['id'],result_consumed=True,result_consumed_by=parent['id'],assignment_result_id=child['id'])
         return {'run':public,'messages':messages,'response':assistant,'finished':child['status'] in TERMINAL,
-            'successful':child['status']=='completed','result_consumed':child['status']=='completed' and not cancel.is_set(),
-            'needs_attention':child['status'] in ('paused','interrupted','failed','cancelled','awaiting_approval','waiting_question'),
+            'successful':successful,'result_consumed':successful and not cancel.is_set(),
+            'retry_available':retryable,'retries_remaining':remaining,'required':child.get('assignment_required',True),
+            'unavailable':child['status'] in TERMINAL and not successful and not child.get('assignment_required',True),
+            'needs_attention':child['status'] in ('paused','interrupted','failed','cancelled','awaiting_approval','waiting_question') or child['status']=='completed' and not successful,
             'waiting':child['status'] not in TERMINAL,'cancelled_wait':cancel.is_set(),
-            'next_action':'Use the helper evidence to continue the task.' if child['status']=='completed' else
+            'next_action':'Use the helper evidence to continue the task.' if successful else
+                'Reword the original bounded task without changing its objective; call delegate_agent with retry_of='+child['id']+' for a fresh free-router attempt. Preserve its scopes and completed evidence.' if retryable else
+                'Resume cannot replay this incomplete signed exchange. Inspect the saved work and request explicit recovery; a new unrelated helper does not satisfy this required assignment.' if (child.get('failure') or {}).get('category')=='incomplete_provider_state' else
                 'Inspect the helper activity or pending approval/question; call agent_result to wait again. Do not treat unfinished work as complete.'}
 
     def openrouter_setup_agents(self):
@@ -1193,9 +1262,15 @@ class ForgeService:
         elif candidate<=current: candidate+=timedelta(days=1)
         # UTC roundtrip normalizes nonexistent spring-forward local times.
         return candidate.astimezone(timezone.utc)
-    def schedule_run(self,schedule):
-        with self.schedule_lock: return self._schedule_run(schedule)
-    def _schedule_run(self,schedule):
+    def schedule_run(self,schedule,source_key=None):
+        with self.schedule_lock: return self._schedule_run(schedule,source_key)
+    def _schedule_run(self,schedule,source_key=None):
+        if source_key:
+            with self.store._connection() as db:
+                prior=db.execute('SELECT run_id FROM request_keys WHERE source_key=?',(source_key,)).fetchone()
+            if prior:
+                run=self.store.run(prior['run_id'])
+                return {'id':run['id'],'chat_id':run['chat_id'],'queued':False,'message':'This occurrence was already admitted.'}
         if schedule.get('project_missing'): raise ValueError('Reconnect the original project and review this schedule before running it.')
         existing=next((r for r in self.store.runs() if r.get('schedule_id')==schedule['id'] and r['status'] not in TERMINAL),None)
         if existing: return {'id':existing['id'],'chat_id':existing['chat_id'],'queued':False,'message':'This occurrence is already active.'}
@@ -1203,28 +1278,61 @@ class ForgeService:
         # Schedules can tighten policy; they cannot override a global deny.
         if settings['permission_profile']=='deny_access': profile='deny_access'
         elif settings['permission_profile']=='always_ask' and profile=='full_access': profile='always_ask'
-        data={**settings,'text':schedule['prompt'],'project_id':schedule.get('project_id'),'model':schedule.get('model') or settings['model'],'permission_profile':profile,'schedule_id':schedule['id']}
+        data={**settings,'text':schedule['prompt'],'project_id':schedule.get('project_id'),'model':schedule.get('model') or settings['model'],'permission_profile':profile,'schedule_id':schedule['id'],'source_key':source_key}
         if schedule.get('agent_id'): result=self.agent_start({**data,'agent_id':schedule['agent_id']})
         else: result=self.jobs.start(data)
         self.store.update_run(result['id'],schedule_id=schedule['id']); return result
     def tick_schedules(self,now=None):
+        with self.schedule_lock:
+            return self._tick_schedules(now)
+    def _tick_schedules(self,now=None):
         current=now or datetime.now(timezone.utc)
         for schedule in self.store.entities('schedules'):
             if not schedule.get('enabled'): continue
             due=datetime.fromisoformat(schedule['next_run'])
             if due>current: continue
-            slot=due.isoformat()
-            with self.store._connection(transaction='write') as db:
-                if db.execute('SELECT 1 FROM occurrences WHERE schedule_id=? AND slot=?',(schedule['id'],slot)).fetchone(): continue
-                db.execute('INSERT INTO occurrences VALUES(?,?,NULL)',(schedule['id'],slot))
-            try:
-                result=self.schedule_run(schedule)
-                with self.store._connection(transaction='write') as db: db.execute('UPDATE occurrences SET run_id=? WHERE schedule_id=? AND slot=?',(result['id'],schedule['id'],slot))
-                schedule.update(last_run=current.isoformat(),last_run_id=result['id'],last_error=None)
-            except Exception as exc: schedule['last_error']=str(exc)[:1000]
+            slot=due.astimezone(timezone.utc).isoformat()
+            source_key='schedule:'+schedule['id']+':'+slot
+            with self.store._connection() as db:
+                # Legacy slots were saved using their original ISO offset.
+                occurrence=db.execute('SELECT run_id FROM occurrences WHERE schedule_id=? AND slot IN (?,?)',
+                    (schedule['id'],slot,due.isoformat())).fetchone()
+                admitted=db.execute('SELECT run_id FROM request_keys WHERE source_key=?',(source_key,)).fetchone()
+            run_id=admitted['run_id'] if admitted else occurrence['run_id'] if occurrence else None
+            if occurrence or admitted:
+                # A legacy claim has no trustworthy admission identity. Advance
+                # future work, but never replay that possibly executed request.
+                schedule['last_error']=None if run_id else 'A previous occurrence was interrupted before its run was recorded. Inspect saved work; it was not replayed.'
+                if run_id: schedule.update(last_run=current.isoformat(),last_run_id=run_id)
+            else:
+                try:
+                    result=self.schedule_run(schedule,source_key=source_key)
+                    run_id=result['id']
+                    schedule.update(last_run=current.isoformat(),last_run_id=run_id,last_error=None)
+                except Exception as exc:
+                    schedule['last_error']=str(exc)[:1000]
+                    with self.store._connection() as db:
+                        admitted=db.execute('SELECT run_id FROM request_keys WHERE source_key=?',(source_key,)).fetchone()
+                    if admitted:
+                        run_id=admitted['run_id']
+                        schedule.update(last_run=current.isoformat(),last_run_id=run_id)
             if schedule['recurrence']=='once': schedule['enabled']=False
             else: schedule['next_run']=self.next_occurrence(schedule,current).isoformat()
-            self.store.save_entity('schedules',schedule)
+            # The run/key admission commits first. A crash in this final commit
+            # is reconciled by that key without restarting inference or tools.
+            schedule['updated_at']=_now()
+            with self.store._connection(transaction='write') as db:
+                db.execute('INSERT INTO occurrences VALUES(?,?,?) ON CONFLICT(schedule_id,slot) DO UPDATE SET run_id=COALESCE(occurrences.run_id,excluded.run_id)',
+                    (schedule['id'],slot,run_id))
+                row=db.execute("SELECT data FROM entities WHERE kind='schedules' AND id=?",(schedule['id'],)).fetchone()
+                if row:
+                    fresh=json.loads(row['data'])
+                    saved={**fresh,**{key:schedule[key] for key in ('last_run','last_run_id','last_error','updated_at') if key in schedule}}
+                    # A concurrent user edit keeps its new timing and settings.
+                    if datetime.fromisoformat(fresh['next_run'])==due and fresh.get('recurrence')==schedule['recurrence']:
+                        if schedule['recurrence']=='once': saved['enabled']=False
+                        else:saved['next_run']=schedule['next_run']
+                    db.execute("UPDATE entities SET data=? WHERE kind='schedules' AND id=?",(encode(saved),schedule['id']))
     def _scheduler(self):
         while not self.stop_event.is_set():
             try: self.tick_schedules()

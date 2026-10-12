@@ -4,6 +4,7 @@ Only the official HTTPS endpoint receives the OS-vault API key. Saving a key or
 reading status is local; connection tests fetch metadata without a prompt.
 """
 from decimal import Decimal, InvalidOperation
+import json
 import re
 import threading
 import time
@@ -11,7 +12,11 @@ import time
 import httpx
 
 from forge_credentials import CredentialVault
-from forge_inference import CompatibleProvider, validated_response_format
+from forge_inference import CompatibleProvider, ProviderStreamFailure, validated_response_format
+from forge_provider_state import reasoning_details, state_size, INCOMPLETE_PROVIDER_RECOVERY
+from core import AGENT_SYSTEM_PROMPT, Core
+from context_window import estimated_prompt_tokens, prompt_budget, response_budget, require_model_context, history_character_limit
+from inference_stream import InferenceTimeoutError
 from storage import _now
 
 
@@ -24,6 +29,13 @@ CONDITION_FIELDS = frozenset(('min_prompt_tokens', 'utc_start', 'utc_end', 'utc_
 
 class OpenRouterFailure(ValueError):
     """A local, scrubbed error; remote error messages never gain this type."""
+    def __init__(self,message,*,category='configuration',http_status=None):
+        super().__init__(message)
+        self.category=category;self.http_status=http_status
+
+    def diagnostics(self):
+        return {'provider_id':'openrouter','category':self.category,
+            **({'http_status':self.http_status} if self.http_status is not None else {})}
 
 
 def _zero(value):
@@ -78,11 +90,13 @@ def free_catalog(raw):
             capabilities.append('vision')
         if 'response_format' in parameters or 'structured_outputs' in parameters or name == FREE_ROUTER:
             capabilities.append('structured_outputs')
+        if 'reasoning' in parameters or 'reasoning_effort' in parameters:capabilities.append('thinking')
         title = item.get('name')
         title = title[:200] if isinstance(title, str) else name
         result.append({'name': name, 'model': name, 'title': title, 'provider': 'openrouter',
                        'capabilities': capabilities, 'context_length': context, 'free': True,
-                       'pricing': {k: '0' for k in PRICE_FIELDS}})
+                       'pricing': {k: '0' for k in PRICE_FIELDS},
+                       'reasoning':{key:value for key,value in (item.get('reasoning') or {}).items() if key=='mandatory' and type(value) is bool} if isinstance(item.get('reasoning'),dict) else {}})
     return sorted(result, key=lambda m: (m['name'] != FREE_ROUTER, m['name']))
 
 
@@ -109,14 +123,22 @@ class OpenRouterProvider(CompatibleProvider):
         return {'Authorization': 'Bearer ' + token, 'X-OpenRouter-Title': 'Forge Local AI'}
 
     @staticmethod
-    def _http_error(status):
+    def _http_error(status,*,inference=False):
         if status in (401, 403):
             return 'OpenRouter rejected the API key. Update it in Forge Settings.'
         if status == 429:
             return 'OpenRouter free quota or capacity is limited. No automatic retry was made; check quota and retry later.'
         if status == 402:
             return 'OpenRouter rejected this free-only request. No paid model or credit purchase is required by Forge.'
+        if inference:
+            if status==400:return 'OpenRouter rejected the inference request (HTTP 400). Its model may require compatible reasoning and tool history; inspect and resolve that compatibility problem before resuming.'
+            if status==404:return 'No free OpenRouter inference route matched this model, privacy policy and tool capabilities (HTTP 404).'
+            return 'OpenRouter inference is unavailable (HTTP '+str(status)+'). Saved tool work remains local; no automatic request retry was made.'
         return 'OpenRouter metadata is unavailable. Check the connection and retry later.'
+
+    @staticmethod
+    def _http_category(status):
+        return 'authentication' if status in (401,403) else 'rate_limit' if status==429 else 'free_route' if status in (402,404) else 'invalid_request' if status==400 else 'provider_unavailable'
 
     def _get(self, suffix):
         headers = self._headers()
@@ -127,17 +149,17 @@ class OpenRouterProvider(CompatibleProvider):
                 with httpx.Client(timeout=10, follow_redirects=False, trust_env=False) as client:
                     response = client.get(OPENROUTER_URL + suffix, headers=headers)
             if not 200 <= response.status_code < 300:
-                raise OpenRouterFailure(self._http_error(response.status_code))
+                raise OpenRouterFailure(self._http_error(response.status_code),category=self._http_category(response.status_code),http_status=response.status_code)
             value = response.json()
             if not isinstance(value, dict):
                 raise OpenRouterFailure('OpenRouter returned invalid metadata.')
             return value
         except httpx.HTTPError:
-            raise OpenRouterFailure('OpenRouter connection failed. No automatic retry was made.') from None
+            raise OpenRouterFailure('OpenRouter connection failed. No automatic retry was made.',category='network') from None
         except (ValueError, TypeError, RecursionError) as exc:
             if isinstance(exc, OpenRouterFailure):
                 raise
-            raise OpenRouterFailure('OpenRouter returned invalid metadata.') from None
+            raise OpenRouterFailure('OpenRouter returned invalid metadata.',category='metadata') from None
 
     def models(self, refresh=False):
         with self.catalog_lock:
@@ -153,7 +175,28 @@ class OpenRouterProvider(CompatibleProvider):
         if info is None:
             raise OpenRouterFailure('Free-only OpenRouter model is unavailable or does not advertise zero pricing.')
         return {'capabilities': info['capabilities'], 'model_info': {'openrouter.context_length': info['context_length']},
-                'context_length': info['context_length'], 'free': True, 'remote': True}
+                'context_length': info['context_length'], 'free': True, 'remote': True,'reasoning':info.get('reasoning',{})}
+
+    def validate_continuation(self,model,context,required=()):
+        """A router response cannot authorize guessing a paid or aliased model."""
+        entry=next((m for m in self.models(refresh=True) if m['name']==model and model!=FREE_ROUTER),None)
+        if entry is None:
+            raise OpenRouterFailure('The free router returned no exact advertised free model for this reasoning continuation. Start a fresh scoped assignment; no tool from this response ran.',category='continuation_unavailable')
+        info={'capabilities':entry['capabilities'],'model_info':{'openrouter.context_length':entry['context_length']}}
+        try:require_model_context(context,info)
+        except ValueError:
+            raise OpenRouterFailure('The selected Context exceeds the routed model limit. Start a fresh scoped assignment with a compatible free model; no tool from this response ran.',category='continuation_unavailable') from None
+        if set(required)-set(info['capabilities']):
+            raise OpenRouterFailure('The routed free model lacks a required continuation capability. Start a fresh scoped assignment; no tool from this response ran.',category='continuation_unavailable')
+        return model
+
+    def estimate_tokens(self,messages,tools):
+        projected=[]
+        for message in messages:
+            value={key:child for key,child in message.items() if key!='_provider_state'}
+            if message.get('_provider_state'):value['reasoning_details']=message['_provider_state']['reasoning_details']
+            projected.append(value)
+        return super().estimate_tokens(projected,tools)
 
     def prepare_body(self, data, body):
         if self.config.get('enabled') is not True or self.config.get('remote_consent') is not True:
@@ -170,6 +213,30 @@ class OpenRouterProvider(CompatibleProvider):
         if policy not in ('allow', 'deny'):
             raise OpenRouterFailure('Free-only OpenRouter has an invalid data collection policy.')
         safe = {k: v for k, v in body.items() if k in ('model', 'messages', 'stream', 'stream_options', 'max_tokens', 'temperature', 'tools')}
+        original=[message for message in data.get('messages',[]) if message.get('role')=='assistant']
+        normalized=[message for message in safe.get('messages',[]) if message.get('role')=='assistant']
+        if len(original)!=len(normalized):raise OpenRouterFailure('Provider continuation message binding failed.',category='protocol')
+        for source,message in zip(original,normalized):
+            private=source.get('_provider_state')
+            thinking=message.pop('thinking',None)
+            if private:
+                if private.get('complete') is False:
+                    raise OpenRouterFailure(INCOMPLETE_PROVIDER_RECOVERY,category='incomplete_provider_state')
+                if private.get('provider_id')!='openrouter' or private.get('model_id')!=safe['model']:
+                    raise OpenRouterFailure('This reasoning continuation belongs to another model. Start a fresh assignment instead of replaying provider state.',category='continuation_unavailable')
+                message['reasoning_details']=reasoning_details(private['reasoning_details'])
+            elif thinking:message['reasoning']=thinking
+        if state_size(data.get('messages',[])):
+            plain=[{key:value for key,value in message.items() if key not in ('images','_provider_state')} for message in data['messages']]
+            if len(json.dumps(plain,ensure_ascii=False).encode('utf-8'))+state_size(data['messages'])>history_character_limit(data.get('context',8192)):
+                raise OpenRouterFailure('The complete provider reasoning state exceeds this request size limit. Increase Context or start a fresh assignment; required state was not truncated.',category='context')
+            total=self.estimate_tokens(data['messages'],data.get('tools',[]))
+            if total>prompt_budget(data.get('context',8192),response_budget(data.get('context',8192),data.get('tokens',2048))):
+                raise OpenRouterFailure('The complete provider reasoning state cannot fit this Context. Increase Context or start a fresh assignment; required state was not truncated.',category='context')
+        if type(data.get('thinking')) is bool and (safe.get('model')==FREE_ROUTER or 'thinking' in info['capabilities']):
+            if info.get('reasoning',{}).get('mandatory') and data['thinking'] is False:
+                raise OpenRouterFailure('This free model requires reasoning. Enable reasoning or choose another advertised free model.',category='configuration')
+            safe['reasoning']={'enabled':data['thinking']}
         if 'response_format' in body:
             if 'structured_outputs' not in info['capabilities']:
                 raise OpenRouterFailure('Free-only OpenRouter model does not advertise structured output support.')
@@ -179,6 +246,8 @@ class OpenRouterProvider(CompatibleProvider):
         return safe
 
     def generate(self, data, cancel):
+        try:Core._agent_payload(data)
+        except ValueError as exc:raise OpenRouterFailure(str(exc),category='context') from None
         try:
             yield from super().generate(data, cancel)
         except ValueError as exc:
@@ -187,11 +256,18 @@ class OpenRouterProvider(CompatibleProvider):
                 raise
             match = re.search(r'HTTP (\d{3})', message)
             if match:
-                raise OpenRouterFailure(self._http_error(int(match[1]))) from None
+                code=int(match[1])
+                raise OpenRouterFailure(self._http_error(code,inference=True),category=self._http_category(code),http_status=code) from None
             if cancel is not None and cancel.is_set():
-                raise OpenRouterFailure('OpenRouter inference was cancelled; partial output is retained.') from None
+                raise OpenRouterFailure('OpenRouter inference was cancelled; partial output is retained.',category='cancelled') from None
+            if isinstance(exc,ProviderStreamFailure):
+                if exc.http_status:
+                    raise OpenRouterFailure(self._http_error(exc.http_status,inference=True),category=self._http_category(exc.http_status),http_status=exc.http_status) from None
+                raise OpenRouterFailure('OpenRouter '+('refused this response.' if exc.category=='refusal' else 'returned an invalid or incomplete inference stream.')+' Saved tool work remains local.',category=exc.category) from None
+            if isinstance(exc,InferenceTimeoutError):
+                raise OpenRouterFailure('OpenRouter inference timed out. Saved work remains local; inspect the connection and resume after resolving the timeout.',category='timeout') from None
             # Provider error bodies may echo prompts, tool results or credentials.
-            raise OpenRouterFailure('OpenRouter inference failed or no free provider matched the requested privacy and capabilities. Partial output is retained; no automatic retry or paid fallback was made.') from None
+            raise OpenRouterFailure('OpenRouter inference failed or returned invalid protocol data. Partial output is retained; no automatic retry or paid fallback was made.',category='protocol') from None
 
     def account(self):
         data = self._get('/key').get('data')

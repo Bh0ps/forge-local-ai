@@ -18,6 +18,18 @@ def verification_sources(store,run,contract,permission=None):
     """Hash a host-registered source scope; model output cannot choose paths."""
     if not contract or ('scope_path' not in contract and 'required_sources' not in contract): return None
     if not run.get('project_id'): return {'available':False,'reason':'This contract requires a connected project.'}
+    if contract.get('builder_id'):
+        try:
+            builder=store.entity('builders',contract['builder_id'])
+            if builder['project_id']!=run['project_id'] or contract.get('scope_path')!=builder.get('directory','.'):
+                raise ValueError('Builder source scope changed.')
+            from forge_sources import source_manifest
+            project=store.get_project(run.get('workspace_project_id') or run['project_id'])
+            return source_manifest(project['path'],contract['scope_path'],builder.get('generated_outputs',[]),
+                required_sources=contract.get('required_sources'),permission=permission,
+                max_files=256,max_bytes=32_000_000,max_file_bytes=8_000_000)
+        except (ValueError,OSError) as exc:
+            return {'available':False,'reason':str(exc)[:300]}
     try:
         project=store.get_project(run.get('workspace_project_id') or run['project_id']); root=Path(project['path']).resolve(strict=True)
         def safe(value):

@@ -33,6 +33,16 @@ def builder(tmp_path):
     manager.shutdown()
 
 
+def check_sessions(manager, record, session):
+    """Recognition fixtures provide the private launch/exit evidence contract."""
+    def verification(_):
+        current = manager.store.entity('builders', record['id'])
+        snapshot = manager.source_snapshot(current)
+        return {'scope': {'version': 1, 'builder_id': current['id'], 'builder_revision': current['revision'],
+                          'directory': current.get('directory', '.')}, 'before': snapshot, 'after': snapshot}
+    return SimpleNamespace(status=lambda _: dict(session), verification=verification)
+
+
 def test_revision_history_rejects_stale_edit_and_preserves_requirement_ids(builder):
     manager, record, _, _ = builder
     second = manager.save({**record, 'expected_revision': record['revision'], 'objective': 'Changed objective'})
@@ -431,7 +441,7 @@ def test_session_gate_rejects_echo_failed_old_and_out_of_scope_evidence(builder)
     (folder / 'app.py').write_text('print(1)', encoding='utf-8')
     session = {'id': 'fixture', 'project_root': str(folder), 'cwd': str(folder), 'status': 'completed',
                'created_at': time.time() + .05, 'exit_code': 0, 'argv': ['python', '-m', 'pytest', '-q']}
-    service.command_sessions = SimpleNamespace(status=lambda _: dict(session))
+    service.command_sessions = check_sessions(manager, record, session)
     data = {'id': record['id'], 'expected_revision': 1, 'gate': 'functional', 'status': 'passed', 'source': 'session', 'reference': 'fixture'}
     manager.check(data)
     session['argv'] = ['python', '-c', 'print("success")']
@@ -458,7 +468,7 @@ def test_node_build_sessions_accept_project_package_managers_and_local_compilers
     (folder / 'package.json').write_text('{"scripts":{"build":"tsc --noEmit && vite build"}}', encoding='utf-8')
     session = {'id': 'build-fixture', 'project_root': str(folder), 'cwd': '.', 'status': 'completed',
         'created_at': time.time() + .05, 'exit_code': 0, 'argv': argv}
-    service.command_sessions = SimpleNamespace(status=lambda _: dict(session))
+    service.command_sessions = check_sessions(manager, record, session)
     result = manager.check({'id': record['id'], 'expected_revision': 1, 'gate': 'build', 'status': 'passed',
         'source': 'session', 'reference': session['id']})
     assert result['gates']['build']['status'] == 'passed'
@@ -471,10 +481,25 @@ def test_functional_session_accepts_project_package_manager_tests(builder, argv)
     manager, record, folder, service = builder
     session = {'id': 'test-fixture', 'project_root': str(folder), 'cwd': '.', 'status': 'completed',
         'created_at': time.time() + .05, 'exit_code': 0, 'argv': argv}
-    service.command_sessions = SimpleNamespace(status=lambda _: dict(session))
+    service.command_sessions = check_sessions(manager, record, session)
     result = manager.check({'id': record['id'], 'expected_revision': 1, 'gate': 'functional', 'status': 'passed',
         'source': 'session', 'reference': session['id']})
     assert result['gates']['functional']['status'] == 'passed'
+
+
+@pytest.mark.parametrize('argv', [
+    ['pytest', '-h'], ['python', '-m', 'pytest', '--version'], ['pytest', '--co'], ['pytest', '--setup-plan'],
+    ['cargo', 'test', '--no-run'], ['go', 'test', '-list', '.'], ['go', 'test', '-list=.'], ['node', '--test', '--help'],
+])
+def test_informational_tests_cannot_pass_even_as_exact_configured_commands(builder, argv):
+    manager, record, folder, service = builder
+    record = manager.save({**record, 'expected_revision': 1, 'check_commands': {'functional': argv}})
+    session = {'id': 'test-fixture', 'project_root': str(folder), 'cwd': '.', 'status': 'completed',
+               'created_at': time.time() + .05, 'exit_code': 0, 'argv': argv}
+    service.command_sessions = check_sessions(manager, record, session)
+    with pytest.raises(ValueError, match='cannot verify a gate'):
+        manager.check({'id': record['id'], 'expected_revision': record['revision'], 'gate': 'functional', 'status': 'passed',
+                       'source': 'session', 'reference': session['id']})
 
 
 def test_python_compile_cannot_pass_node_build_unless_brief_configures_exact_command(builder):
@@ -483,7 +508,7 @@ def test_python_compile_cannot_pass_node_build_unless_brief_configures_exact_com
     python = ['python', '-m', 'compileall', '-q', '.']
     session = {'id': 'build-fixture', 'project_root': str(folder), 'cwd': '.', 'status': 'completed',
         'created_at': time.time() + .05, 'exit_code': 0, 'argv': python}
-    service.command_sessions = SimpleNamespace(status=lambda _: dict(session))
+    service.command_sessions = check_sessions(manager, record, session)
     data = {'id': record['id'], 'expected_revision': 1, 'gate': 'build', 'status': 'passed',
         'source': 'session', 'reference': session['id']}
     for argv in (python, ['npx', 'vite', 'build'], ['tsc', '--showConfig'], ['vite', 'build', '--help']):
@@ -694,7 +719,7 @@ def test_builder_rendered_browser_and_real_static_preview(builder, tmp_path):
             page.route('**/api/v1/*', respond)
             page.goto(f'http://127.0.0.1:{server.server_port}/')
             page.get_by_role('button', name='Task details and recovery', exact=True).click()
-            page.get_by_text('Repair failed checks', exact=True).wait_for()
+            page.locator('.compact-task-details').get_by_text('Repair failed checks', exact=True).wait_for()
             page.wait_for_function("()=>document.querySelector('.compact-run-controls [aria-label=Resume]')?.disabled===false")
             for theme in ('light', 'dark'):
                 page.evaluate('(theme)=>document.documentElement.dataset.theme=theme', theme)
@@ -711,9 +736,11 @@ def test_builder_rendered_browser_and_real_static_preview(builder, tmp_path):
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
                     page.screenshot(path=str(tmp_path / f'workspace-status-{theme}-{width}.png'), full_page=True)
             page.set_viewport_size({'width': 1440, 'height': 1050})
-            page.get_by_role('button', name='Open sidebar', exact=True).click()
+            if page.get_by_role('button', name='Open sidebar', exact=True).is_visible():
+                page.get_by_role('button', name='Open sidebar', exact=True).click()
             try:
-                page.get_by_role('navigation', name='Workspace navigation').get_by_role('button', name='Builder', exact=True).click()
+                page.get_by_role('button', name='Tools', exact=True).click()
+                page.get_by_role('menuitem', name='Builder', exact=True).click()
             except Exception:
                 page.screenshot(path=str(tmp_path / 'builder-error.png'), full_page=True)
                 print('Builder page errors:', errors, 'UI:', page.locator('body').inner_text()[:2500])
@@ -731,7 +758,8 @@ def test_builder_rendered_browser_and_real_static_preview(builder, tmp_path):
             assert saved_draft['content']['brief']['objective'] == 'Unsaved browser draft, preserved after restart'
             assert manager.store.entity('builders', record['id'])['objective'] == record['objective']
             page.reload()
-            page.get_by_role('navigation', name='Workspace navigation').get_by_role('button', name='Builder', exact=True).click()
+            page.get_by_role('button', name='Tools', exact=True).click()
+            page.get_by_role('menuitem', name='Builder', exact=True).click()
             page.get_by_label('Objective').wait_for()
             page.wait_for_function("()=>document.querySelector('.builder-brief textarea')?.value==='Unsaved browser draft, preserved after restart'")
             page.get_by_role('button', name='Projects', exact=True).click()
@@ -740,7 +768,8 @@ def test_builder_rendered_browser_and_real_static_preview(builder, tmp_path):
             page.get_by_role('button', name='Projects', exact=True).click()
             page.get_by_role('button', name='Discard & Leave', exact=True).click()
             page.get_by_role('heading', name='Projects', exact=True).wait_for()
-            page.get_by_role('navigation', name='Workspace navigation').get_by_role('button', name='Builder', exact=True).click()
+            page.get_by_role('button', name='Tools', exact=True).click()
+            page.get_by_role('menuitem', name='Builder', exact=True).click()
             page.get_by_label('Objective').wait_for()
             page.wait_for_function("(objective)=>document.querySelector('.builder-brief textarea')?.value===objective", arg=record['objective'])
             assert manager.store.entity('builders', record['id'])['revision'] == 1
@@ -1017,7 +1046,7 @@ def test_production_project_preview_opens_without_creating_a_builder(tmp_path, u
                 route.fulfill(status=200, content_type='application/json', body=json.dumps(value))
             page.route('**/api/v1/*', respond)
             page.goto(f'http://127.0.0.1:{server.server_port}/')
-            page.get_by_role('button', name='Builder', exact=True).wait_for()
+            page.get_by_role('button', name='Tools', exact=True).wait_for()
             # The event initially arrives in App before the lazy Builder page
             # mounts. Mount restoration must still show this exact preview.
             page.evaluate("window.dispatchEvent(new CustomEvent('forge:preview-open'))")

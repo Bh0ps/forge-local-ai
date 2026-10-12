@@ -16,6 +16,13 @@ import httpx
 from core import Core, AGENT_SYSTEM_PROMPT, MAX_STREAM_CHARACTERS, _tool_calls, thinking_metadata
 from context_window import estimated_prompt_tokens, prompt_budget
 from inference_stream import cancellable_inference, bounded_lines
+from forge_provider_state import reasoning_details
+
+
+class ProviderStreamFailure(ValueError):
+    def __init__(self,message,*,category='protocol',http_status=None):
+        super().__init__(message)
+        self.category=category;self.http_status=http_status
 
 
 def validated_response_format(value):
@@ -177,7 +184,7 @@ class CompatibleProvider:
         started=time.monotonic()
 
         async def consume(response,publish):
-            final={}; completed=False; characters=0
+            final={}; completed=False; characters=0; private_details=[]
             async for line in bounded_lines(response):
                 if cancel.is_set(): return
                 if not line.startswith('data:'): continue
@@ -187,11 +194,17 @@ class CompatibleProvider:
                 try: packet=json.loads(raw)
                 except ValueError: raise ValueError('Provider returned an invalid response stream.') from None
                 if not isinstance(packet,dict): raise ValueError('Provider returned an invalid response packet.')
-                if isinstance(packet.get('model'),str) and len(packet['model'])<=300: final['provider_model']=packet['model']
+                if isinstance(packet.get('model'),str) and len(packet['model'])<=300:
+                    if final.get('provider_model') and final['provider_model']!=packet['model']:
+                        raise ProviderStreamFailure('Provider changed model identity within one response.')
+                    final['provider_model']=packet['model']
                 if isinstance(packet.get('provider'),str) and len(packet['provider'])<=300: final['response_provider']=packet['provider']
+                if isinstance(packet.get('id'),str) and len(packet['id'])<=300:final['provider_generation_id']=packet['id']
                 if packet.get('error'):
                     error=packet['error']
-                    raise ValueError(str(error.get('message') if isinstance(error,dict) else error)[:1500])
+                    code=error.get('code') if isinstance(error,dict) else None
+                    raise ProviderStreamFailure('Provider rejected the streamed response.',category='provider_error',
+                        http_status=code if type(code) is int and 400<=code<=599 else None)
                 usage=packet.get('usage')
                 if usage is not None and not isinstance(usage,dict): raise ValueError('Provider returned invalid usage counters.')
                 if usage:
@@ -235,8 +248,15 @@ class CompatibleProvider:
                     if not isinstance(delta,dict) or any(delta.get(key) is not None and not isinstance(delta[key],str)
                         for key in ('content','reasoning_content','reasoning')):
                         raise ValueError('Provider returned an invalid message.')
+                    detail_chunk=reasoning_details(delta['reasoning_details']) if delta.get('reasoning_details') is not None else []
+                    if detail_chunk:
+                        private_details=reasoning_details(private_details+detail_chunk)
+                        # Private deltas survive a later disconnect/cancellation.
+                        # They never enter public message or telemetry fields.
+                        await publish({'message':{},'_provider_progress':True,'_provider_reasoning_details_delta':detail_chunk,
+                            **{key:final[key] for key in ('provider_model','response_provider','provider_generation_id') if key in final}})
                     if delta.get('refusal'):
-                        raise ValueError('Provider refused the response. Partial content is saved; tool calls were not executed.')
+                        raise ProviderStreamFailure('Provider refused the response. Partial content is saved; tool calls were not executed.',category='refusal')
                     calls=delta.get('tool_calls')
                     if calls is None: calls=[]
                     # SSE may first emit only an index/ID, followed by function
@@ -250,17 +270,21 @@ class CompatibleProvider:
                              'tool_calls':calls}
                     characters+=len(message['content'])+len(message['thinking'])+call_characters
                     if characters>MAX_STREAM_CHARACTERS: raise ValueError('Response is too large. Ask for a shorter answer.')
-                    await publish({'message':message})
+                    if any(message.values()) or not detail_chunk:
+                        await publish({'message':message,
+                            **{key:final[key] for key in ('provider_model','response_provider','provider_generation_id') if key in final}})
                     if choice.get('finish_reason') is not None:
                         reason=choice['finish_reason']
                         if not isinstance(reason,str): raise ValueError('Provider returned an invalid completion reason.')
                         if reason not in ('stop','tool_calls','function_call','length','max_tokens'):
-                            raise ValueError('Provider did not complete the response successfully. Partial content is saved; tool calls were not executed.')
+                            raise ProviderStreamFailure('Provider did not complete the response successfully. Partial content is saved; tool calls were not executed.',
+                                category='refusal' if reason=='content_filter' else 'protocol')
                         final['provider_finish_reason']=reason
                         final['done_reason']=reason
                         completed=True
             if cancel.is_set(): return
             if not completed: raise ValueError('Provider stream ended before completion. Partial content is saved; tool calls were not executed.')
+            if private_details:final['_provider_reasoning_details']=private_details
             await publish({**final,'done':True,'message':{},'total_duration':int((time.monotonic()-started)*1e9)})
 
         try:
@@ -362,7 +386,7 @@ class ProviderPool:
                 for packet in provider.generate(data,cancel):
                     message=packet.get('message',{})
                     content=(message.get('content') or '')+(message.get('thinking') or '')
-                    if (content or message.get('tool_calls')) and first is None: first=time.monotonic()
+                    if (content or message.get('tool_calls') or packet.get('_provider_progress')) and first is None: first=time.monotonic()
                     if message.get('content') and visible is None: visible=time.monotonic()
                     if message.get('tool_calls'):
                         call_bytes=min(2_000_000,call_bytes+len(json.dumps(message['tool_calls'],ensure_ascii=False).encode('utf-8')))
@@ -374,7 +398,9 @@ class ProviderPool:
                             self.store.event(run['id'],'stream_speed',tps=estimate,estimated=True,
                                 request_id=identifier,window_seconds=meter.window,source='backend_output_bytes')
                             last_speed=moment
-                    if packet.get('done'): final=packet
+                    for key in ('provider_model','response_provider','provider_generation_id'):
+                        if packet.get(key):final[key]=packet[key]
+                    if packet.get('done'): final={**final,**packet}
                     yield packet
         finally:
             finished=time.monotonic(); duration=max(0,finished-submitted); usage=final.get('usage') or {}

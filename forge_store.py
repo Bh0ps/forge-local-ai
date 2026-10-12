@@ -17,6 +17,7 @@ from storage import Store, _context_setting, _now
 
 DEFAULTS = dict(context=32768, model='', provider_id='ollama', permission_profile='always_ask',
                 permission_overrides={}, theme='system', tokens=4096, temperature=0.3,
+                ui_appearance={'name':'Forge','accent':'copper','motion':'system'},
                 thinking=True, web=True, timezone='UTC', performance='balanced', keep_alive='10m',
                 auto_compact=True, auto_delegate=False, startup=False, dictation_model='base',allow_edits=True,
                 computer_tools=False,browser_tools=True,num_thread=4,
@@ -109,14 +110,14 @@ class ForgeStore(Store):
         with self._connection() as db:
             present=db.execute("SELECT 1 FROM sqlite_master WHERE name='forge_migrations'").fetchone()
             previous=db.execute('SELECT COALESCE(MAX(version),0) FROM forge_migrations').fetchone()[0] if present else 0
-        if 0<previous<6:
-            backup=self.home/'backups'/('pre-schema-6-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f'))
+        if 0<previous<7:
+            backup=self.home/'backups'/('pre-schema-7-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f'))
             backup.mkdir()
             with sqlite3.connect(self.db_path) as src, sqlite3.connect(backup/'forge.sqlite3') as dst: src.backup(dst)
         with self._connection(transaction='write') as db:
             db.execute('CREATE TABLE IF NOT EXISTS forge_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
             version = db.execute('SELECT COALESCE(MAX(version),0) FROM forge_migrations').fetchone()[0]
-            if version > 6: raise ValueError('This workspace requires a newer Forge version.')
+            if version > 7: raise ValueError('This workspace requires a newer Forge version.')
             if version < 1:
                 for statement in (
                     'CREATE TABLE forge_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)',
@@ -156,6 +157,10 @@ class ForgeStore(Store):
                 db.execute('CREATE INDEX IF NOT EXISTS usage_model_date ON usage(model,created_at)')
                 db.execute('CREATE INDEX IF NOT EXISTS usage_project_date ON usage(project_id,created_at)')
                 db.execute('INSERT INTO forge_migrations VALUES(6,?)',(_now(),))
+            if version < 7:
+                db.execute('CREATE TABLE IF NOT EXISTS provider_turn_state(message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,provider_id TEXT NOT NULL,model_id TEXT NOT NULL,state TEXT NOT NULL)')
+                db.execute('CREATE INDEX IF NOT EXISTS provider_turn_run ON provider_turn_state(run_id,message_id)')
+                db.execute('INSERT INTO forge_migrations VALUES(7,?)',(_now(),))
         if not self.entities('agents'):
             for role, instruction in (
                 ('Researcher','Research using primary sources. Cite sources and explain uncertainty. Do not edit the project.'),
@@ -220,6 +225,48 @@ class ForgeStore(Store):
         if metadata.get('images'): metadata['images']=self.store_images(metadata['images'])
         return super().add_message(chat_id,role,content,**metadata)
 
+    def save_assistant_turn(self,run_id,content,*,provider_state=None,**metadata):
+        """Atomically save a public turn and its coordinator-only protocol state."""
+        from storage import _text, MAX_MESSAGE_CHARACTERS
+        from forge_provider_state import reasoning_details
+        content=_text(content,'Message',MAX_MESSAGE_CHARACTERS,empty=True,strip=False)
+        public=self._metadata(metadata)
+        private=None
+        if provider_state:
+            if (set(provider_state)-{'provider_id','model_id','reasoning_details'} or
+                    provider_state.get('provider_id')!='openrouter' or
+                    not isinstance(provider_state.get('model_id'),str) or
+                    not 1<=len(provider_state['model_id'])<=300):
+                raise ValueError('Invalid private provider state binding.')
+            private=reasoning_details(provider_state.get('reasoning_details'))
+        with self._connection(transaction='write') as db:
+            row=db.execute('SELECT chat_id,data FROM runs WHERE id=?',(run_id,)).fetchone()
+            if not row:raise ValueError('Run not found.')
+            run=json.loads(row['data'])
+            if private is not None and run['settings']['provider_id']!='openrouter':
+                raise ValueError('Provider state belongs to another engine.')
+            stamp=_now()
+            cursor=db.execute('INSERT INTO messages(chat_id,role,content,metadata,created_at) VALUES(?,?,?,?,?)',
+                (row['chat_id'],'assistant',content,public,stamp))
+            if private is not None:
+                db.execute('INSERT INTO provider_turn_state VALUES(?,?,?,?,?)',
+                    (cursor.lastrowid,run_id,'openrouter',provider_state['model_id'],encode({'version':1,
+                        'complete':metadata.get('status','complete')=='complete','reasoning_details':private})))
+            db.execute('UPDATE chats SET updated_at=? WHERE id=?',(stamp,row['chat_id']))
+            return self._message(db.execute('SELECT * FROM messages WHERE id=?',(cursor.lastrowid,)).fetchone())
+
+    def provider_turn_states(self,run_id,message_ids):
+        """Private inference-only loader; public chat readers never join this table."""
+        from forge_provider_state import reasoning_details
+        identifiers=list(dict.fromkeys(message_ids))
+        if not identifiers:return {}
+        with self._connection(transaction='read') as db:
+            rows=db.execute('SELECT p.*,m.metadata AS message_metadata FROM provider_turn_state p JOIN messages m ON m.id=p.message_id JOIN runs r ON r.id=p.run_id WHERE p.run_id=? AND m.chat_id=r.chat_id AND m.role=\'assistant\' AND p.message_id IN ('+','.join('?' for _ in identifiers)+')',
+                (run_id,*identifiers)).fetchall()
+        return {row['message_id']:{'provider_id':row['provider_id'],'model_id':row['model_id'],
+            'complete':json.loads(row['state']).get('complete',True) is True and json.loads(row['message_metadata']).get('status','complete')=='complete',
+            'reasoning_details':reasoning_details(json.loads(row['state'])['reasoning_details'])} for row in rows}
+
     def get_chat(self,chat_id,*,limit=None):
         chat=super().get_chat(chat_id,limit=limit)
         for message in chat['messages']:
@@ -249,6 +296,9 @@ class ForgeStore(Store):
 
     def update_settings(self, settings):
         if not isinstance(settings,dict): raise ValueError('Settings must be an object.')
+        if 'ui_appearance' in settings:
+            from forge_workspace_ui import workspace_appearance
+            settings={**settings,'ui_appearance':workspace_appearance(settings['ui_appearance'],self.get_settings().get('ui_appearance'))}
         if 'context' in settings: _context_setting(settings['context'])
         if 'permission_profile' in settings and settings['permission_profile'] not in ('always_ask','full_access','deny_access'):
             raise ValueError('Unknown permission profile.')

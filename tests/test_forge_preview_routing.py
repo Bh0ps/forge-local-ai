@@ -64,7 +64,7 @@ def test_preview_hint_does_not_confirm_out_of_scope_identity(preview_run,tmp_pat
         svc.store.save_entity('previews',{**preview,'run_id':'other-run'})
     else:run={**run,'workspace_project_id':'worktree-project'}
     result=execute_browser(svc,run,preview['id'])
-    assert result=={'not_executed':True,'error':'Connected tab is unavailable.'}
+    assert result=={'not_executed':True,'coordinator_refusal':True,'error':'Connected tab is unavailable.'}
     assert 'suggested_arguments' not in result and preview['id'] not in str(result) and preview['url'] not in str(result)
     assert len(attempts)==1 and attempts[0][0]=='describe'
 
@@ -80,7 +80,7 @@ def test_preview_hint_does_not_bypass_disabled_browser_permission(preview_run):
 def test_connected_tab_routing_is_not_replaced_by_preview_tools(preview_run):
     svc,run,manager,preview,attempts=preview_run
     result=execute_browser(svc,run,'fixture-connected-tab')
-    assert result=={'not_executed':True,'error':'Connected tab is unavailable.'}
+    assert result=={'not_executed':True,'coordinator_refusal':True,'error':'Connected tab is unavailable.'}
     assert attempts==[('describe',{'tab_id':'fixture-connected-tab'})]
 
 

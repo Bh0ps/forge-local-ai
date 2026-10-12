@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT))
 from forge_builder import BuilderManager
 from forge_drafts import DraftManager
 from forge_store import ForgeStore
+from forge_workspace_ui import WorkspaceUI
 
 
 DEMO_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -93,13 +94,23 @@ class DemoFixture:
         app.mkdir(parents=True)
         (app / 'index.html').write_text(DEMO_HTML, encoding='utf-8')
         self.store = ForgeStore(home / 'state')
+        self.workspace = WorkspaceUI(self.store)
         project = self.store.create_project('Tide Studio', str(app.parent))
         # The browser receives a generic path. Actual temporary paths never
         # enter the public UI or screenshots.
         self.project = {**project, 'path': './demo-workspace', 'branch': 'main'}
         chat = self.store.create_chat(project['id'], 'A small studio for ideas', 'local-model')
-        self.store.add_message(chat['id'], 'user',
+        request = self.store.add_message(chat['id'], 'user',
             'Build a calm little studio board for my ideas. Keep it simple, local and easy to use with a keyboard.')
+        run = self.store.create_run({'chat_id': chat['id'], 'request_message_id': request['id'], 'mode': 'chat',
+                                    'request': request['content'], 'settings': {'model': 'local-model', 'provider_id': 'ollama'}})
+        invocation = 'f' * 32
+        self.store.invocation(invocation, run['id'], 'read_file', {'path': 'site/index.html'})
+        self.store.invocation_state(invocation, 'completed', {'content': 'Synthetic demo fixture'})
+        self.store.tool_message(invocation, 0, 'read_file', '{"content":"Synthetic demo fixture"}')
+        self.store.event(run['id'], 'tool', name='read_file', invocation_id=invocation, state='done', result={'summary': 'Reviewed the local preview'})
+        self.store.event(run['id'], 'status', text='Preview reviewed')
+        self.store.update_run(run['id'], status='completed')
         self.store.add_message(chat['id'], 'assistant',
             'Let’s start with a clear direction.\n\n'
             '**Tide Studio** gives each idea a little room to grow: a quiet board, a quick way to add a thought, '
@@ -142,7 +153,13 @@ class DemoFixture:
                 result = {'settings': self.settings, 'projects': [self.project], 'chats': [self.chat],
                           'runs': [], 'capabilities': {}}
             elif action == 'get_chat':
-                result = self.chat
+                result = self.workspace.chat(self.chat['id'], data.get('limit', 200))
+            elif action in ('ui_layout_get', 'ui_layout_save'):
+                result = self.workspace.layout(data, save=action == 'ui_layout_save')
+            elif action == 'run_activity':
+                result = self.workspace.activity(data)
+            elif action == 'run_diagnostics_export':
+                result = self.workspace.diagnostics(data)
             elif action == 'settings':
                 self.settings.update(data)
                 result = self.settings
@@ -223,7 +240,7 @@ def capture_extension(executable, output: Path):
         assert not page.get_by_role('button', name='Reconnect Forge', exact=True).is_visible()
         assert page.get_by_text('Reference page', exact=True).is_visible()
         assert page.get_by_text('https://example.org', exact=True).is_visible()
-        target = output / 'forge-5.0.3-extension-popup.png'
+        target = output / 'forge-5.1.0-extension-popup.png'
         Image.open(io.BytesIO(page.locator('body').screenshot())).save(target, optimize=True)
         connect.click()
         page.get_by_role('status').get_by_text('Connected to Forge', exact=True).wait_for()
@@ -287,7 +304,7 @@ def main():
                 page.wait_for_timeout(300)
                 frames = [pixels(page)]
                 page.get_by_role('button', name='Skills and notes', exact=True).click()
-                page.get_by_role('heading', name='Make it your own', exact=True).wait_for()
+                page.get_by_role('heading', name='Skills and notes', exact=True).wait_for()
                 frames.append(pixels(page))
                 page.get_by_role('checkbox', name='UI design', exact=False).check()
                 frames.append(pixels(page))
@@ -298,18 +315,18 @@ def main():
                     'Add keyboard controls and keep the layout calm.')
                 page.get_by_text('Draft saved locally', exact=True).wait_for()
                 frames.append(pixels(page))
-                png(page, args.output / 'forge-5.0.3-workspace-dark.png')
+                png(page, args.output / 'forge-5.1.0-workspace-dark.png')
                 page.get_by_role('button', name='Skills and notes', exact=True).click()
                 frames.append(pixels(page))
                 page.get_by_role('button', name='Skills and notes', exact=True).click()
                 frames.append(pixels(page))
-                gif(frames, args.output / 'forge-5.0.3-context.gif')
+                gif(frames, args.output / 'forge-5.1.0-context.gif')
 
                 page.get_by_role('button', name='Skills and notes', exact=True).click()
                 page.set_viewport_size({'width': 1440, 'height': 1050})
                 page.evaluate("document.documentElement.dataset.theme='light'")
-                page.get_by_role('navigation', name='Workspace navigation').get_by_role(
-                    'button', name='Builder', exact=True).click()
+                page.get_by_role('button', name='Tools', exact=True).click()
+                page.get_by_role('menuitem', name='Builder', exact=True).click()
                 page.get_by_label('Objective').wait_for()
                 frames = [pixels(page)]
                 page.get_by_role('button', name='Preview', exact=True).click()
@@ -320,7 +337,7 @@ def main():
                 frame = page.frame_locator('iframe[title="Local application preview"]')
                 frame.get_by_role('heading', name='Make space for what comes next.', exact=False).wait_for()
                 frames.append(pixels(page))
-                png(page, args.output / 'forge-5.0.3-builder-light.png')
+                png(page, args.output / 'forge-5.1.0-builder-light.png')
                 field = frame.get_by_role('textbox', name='New idea', exact=True)
                 field.fill('A small creative habit')
                 frames.append(pixels(page))
@@ -344,7 +361,7 @@ def main():
                 page.get_by_role('button', name='Preview', exact=True).click()
                 frame.get_by_role('heading', name='Make space for what comes next.', exact=False).wait_for()
                 frames.append(pixels(page))
-                gif(frames, args.output / 'forge-5.0.3-builder.gif')
+                gif(frames, args.output / 'forge-5.1.0-builder.gif')
                 assert not errors, errors
                 assert not blocked_requests, 'The demo attempted a request outside its isolated loopback servers.'
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
@@ -352,7 +369,7 @@ def main():
                 browser.close()
         finally:
             fixture.manager.shutdown()
-    for path in sorted(args.output.glob('forge-5.0.3-*')):
+    for path in sorted(args.output.glob('forge-5.1.0-*')):
         print(f'{path.name}: {path.stat().st_size:,} bytes')
     print('Synthetic production-UI capture passed; no page errors or external requests.')
 

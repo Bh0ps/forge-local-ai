@@ -184,6 +184,7 @@ def _project_delete(service,project_id):
                     data['updated_at']=_now()
                     db.execute('UPDATE entities SET data=? WHERE kind=? AND id=?',(encode(data),row['kind'],row['id']))
             db.execute('DELETE FROM tasks WHERE project_id=?',(project_id,))
+            db.execute("DELETE FROM entities WHERE kind='project_appearance' AND id=?",(project_id,))
             db.execute('DELETE FROM projects WHERE id=?',(project_id,))
     return {'ok':True,'deleted':project_id,'folder_preserved':True,
             'message':'Project registration removed. Its folder and chats are preserved; saved goals/plans require their original project before continuing.'}

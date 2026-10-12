@@ -27,7 +27,7 @@ describe('Forge workspace', () => {
   it('preserves a draft across navigation and HUD switching', async () => {
     const { mode } = bridge(); render(<App />); await ready();
     await userEvent.type(screen.getByRole('textbox', { name: 'Message Forge' }), 'Keep this draft');
-    await userEvent.click(screen.getByRole('button', { name: 'Spaces' })); await screen.findByRole('heading', { name: 'Spaces' });
+    await userEvent.click(screen.getByRole('button', { name: 'Tools' })); await userEvent.click(screen.getByRole('menuitem', { name: 'Spaces' })); await screen.findByRole('heading', { name: 'Spaces' });
     await userEvent.click(screen.getByRole('button', { name: /New chat/ })); expect((screen.getByRole('textbox', { name: 'Message Forge' }) as HTMLTextAreaElement).value).toBe('Keep this draft');
     await userEvent.click(screen.getByRole('button', { name: 'Minimal HUD' })); await waitFor(() => expect(mode).toHaveBeenCalledWith('hud', false));
     expect((screen.getByRole('textbox', { name: 'Message Forge' }) as HTMLTextAreaElement).value).toBe('Keep this draft');

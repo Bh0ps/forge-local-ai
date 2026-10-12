@@ -298,7 +298,7 @@ def test_actual_cloud_research_child_returns_local_tool_result_to_parent_once(en
     env.service.core.dispatch = research
     def handler(http_request):
         payload = json.loads(http_request.content); calls.append(payload)
-        assert payload['model'] == FREE_ROUTER and all(value == 0 for value in payload['provider']['max_price'].values())
+        assert payload['model'] == (FREE_ROUTER if len(calls)==1 else 'fixture/coder:free') and all(value == 0 for value in payload['provider']['max_price'].values())
         assert not any(field in payload for field in ('models', 'plugins', 'server_tools'))
         if len(calls) == 1:
             packets = [sse({'model': 'fixture/coder:free', 'choices': [{'delta': {'tool_calls': [{'index': 0, 'id': 'research_fixture_call', 'type': 'function',

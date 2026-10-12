@@ -22,7 +22,7 @@ export function TaskContextPanel({projectId, skills, notes, spaces, onSkills, on
   const toggle = (values: string[], id: string) => values.includes(id) ? values.filter(value => value !== id) : [...values, id];
   const selected = [...skills.map(id => ({id, name: catalog.find(skill => skill.id === id || skill.library_id === id)?.name || id, remove: () => onSkills(skills.filter(value => value !== id))})), ...notes.map(id => ({id, name: spaces.find(note => note.id === id)?.name || id, remove: () => onNotes(notes.filter(value => value !== id))}))];
   return <section className="task-context-panel" aria-label="Skills and reference notes">
-    <header><Sparkles size={22}/><h2>Make it your own</h2><p>Choose guidance and notes for your next message.</p></header>
+    <header><Sparkles size={22}/><h2>Skills and notes</h2><p>Choose guidance and notes for your next message.</p></header>
     <div className="context-selected">{selected.map(item => <span className="context-chip" key={`${item.id}:${item.name}`}>{item.name}<button aria-label={`Remove ${item.name}`} onClick={item.remove}><X size={12}/></button></span>)}{!selected.length && <small>Nothing attached yet. Forge can also select relevant skills automatically.</small>}</div>
     <label className="context-search"><Search size={15}/><input aria-label="Search skills and notes" autoFocus placeholder="Search skills and notes…" value={query} onChange={event => setQuery(event.target.value)}/></label>
     {error && <ErrorNotice error={error} retry={() => setRetry(value => value + 1)}/>}

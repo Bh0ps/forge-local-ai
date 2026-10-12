@@ -55,6 +55,8 @@ class InferenceTimeoutError(ValueError):
 
 
 def meaningful_packet(packet):
+    if packet.get('_provider_progress') is True:
+        return True
     message = packet.get('message') or {}
     if message.get('content') or message.get('thinking'):
         return True

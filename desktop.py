@@ -38,6 +38,10 @@ class Bridge:
         self._hotkey = None
         self._server_url = None
         self._navigation_guard = None
+        self._visibility_lock = threading.Lock()
+        self._visible = True
+        self._visibility_seq = 0
+        self._visibility_guard = None
 
     def _ensure_service(self):
         if self._service is None:
@@ -96,6 +100,7 @@ class Bridge:
                 return result
             if action == 'host_status':
                 return {'native': True, 'mode': self._mode, 'pinned': self._pin,
+                        **self._visibility_status(),
                         'url': self._server_url, 'tray': self._tray is not None,
                         'emergency_shortcut': self._hotkey.shortcut if self._hotkey else 'Ctrl+Alt+Shift+S',
                         'shortcut_error': self._hotkey.error if self._hotkey else None}
@@ -252,6 +257,7 @@ class Bridge:
         try:
             from PIL import ImageGrab
             self._window.hide()
+            self._publish_visibility(False)
             time.sleep(.2)
             picture = ImageGrab.grab()
             picture.thumbnail((1600, 1600))
@@ -264,6 +270,7 @@ class Bridge:
             if not self._closing:
                 try:
                     self._window.show()
+                    self._refresh_visibility()
                 except Exception:
                     log.exception('Restore after capture failed')
             self._capture_lock.release()
@@ -279,12 +286,21 @@ class Bridge:
                                         else FormWindowState.Normal)
                 form.Activate()
             self._native(focus)
+            self._refresh_visibility()
         except Exception:
             log.exception('Could not show Forge')
 
     def restrict_navigation(self):
         """Never expose the authenticated native bridge to a third-party page."""
         def attach(form):
+            if self._visibility_guard is None:
+                def visibility_changed(sender, args):
+                    # Native callbacks run on the WinForms thread. Capture the
+                    # state here, but never synchronously evaluate JavaScript.
+                    self._publish_visibility(bool(form.Visible and str(form.WindowState) != 'Minimized'))
+                self._visibility_guard = visibility_changed
+                form.VisibleChanged += visibility_changed
+                form.Resize += visibility_changed
             if self._navigation_guard:
                 return
             expected = urlsplit(self._server_url)
@@ -302,11 +318,52 @@ class Bridge:
             form.webview.NavigationStarting += guard
         return self._native(attach)
 
+    def _visibility_status(self):
+        with self._visibility_lock:
+            return {'visible': self._visible, 'visibility_seq': self._visibility_seq}
+
+    def _send_visibility(self, payload):
+        try:
+            if self._window is not None and not self._closing:
+                self._window.evaluate_js("window.dispatchEvent(new CustomEvent('forge:visibility',{detail:" + json.dumps(payload) + "}));true")
+        except Exception:
+            # The loaded callback republishes the current snapshot if startup
+            # has not yet installed the bridge or React listener.
+            log.debug('Native visibility event unavailable', exc_info=True)
+
+    def _publish_visibility(self, visible, snapshot=False):
+        with self._visibility_lock:
+            changed = self._visible != visible
+            if changed:
+                self._visible = visible
+                self._visibility_seq += 1
+            payload = {'visible': self._visible, 'seq': self._visibility_seq}
+        if changed or snapshot:
+            threading.Thread(target=self._send_visibility, args=(payload,),
+                name='Forge-visibility', daemon=True).start()
+        return payload
+
+    def _refresh_visibility(self, snapshot=False):
+        # Publish inside the marshaled operation so a stale native read cannot
+        # overwrite a later hide/restore transition with a newer sequence.
+        try:
+            return self._native(lambda form: self._publish_visibility(
+                bool(form.Visible and str(form.WindowState) != 'Minimized'), snapshot=snapshot))
+        except Exception:
+            log.debug('Native visibility snapshot unavailable', exc_info=True)
+
+    def _on_loaded(self):
+        self._refresh_visibility(snapshot=True)
+
+    def _on_visibility_event(self):
+        self._refresh_visibility()
+
     def _on_closing(self):
         if self._closing:
             return True
         if self._tray is not None:
             self._window.hide()
+            self._publish_visibility(False)
             log.info('Workspace hidden; coordinator remains active')
         else:
             log.warning('Tray is unavailable; use Quit Forge to stop the coordinator')
@@ -439,8 +496,13 @@ def main():
                                            maximized=True,
                                            hidden='--background' in sys.argv,
                                            background_color='#171717', text_select=True)
+        api._visible = '--background' not in sys.argv
         api._window.events.closing += api._on_closing
         api._window.events.shown += api.restrict_navigation
+        api._window.events.loaded += api._on_loaded
+        api._window.events.minimized += api._on_visibility_event
+        api._window.events.restored += api._on_visibility_event
+        api._window.events.maximized += api._on_visibility_event
         icon = BASE_DIR / 'assets' / 'forge.ico'
         options = dict(gui='edgechromium', private_mode=False, storage_path=str(directory / 'webview'))
         if icon.exists():
@@ -476,7 +538,9 @@ def main():
                     starters = [skill for skill in api.call('skills')['skills'] if skill.get('builtin')]
                     if len(starters) != 24 or not all(skill['enabled'] and skill['automatic'] for skill in starters):
                         raise ValueError('The packaged starter library was not prepared correctly.')
-                    opened = api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('nav[aria-label=\"Workspace navigation\"] button')].find(e=>e.textContent.trim()==='Library');if(button){button.click();return true;}return false;})()")
+                    api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='Tools');button?.click();return true;})()")
+                    time.sleep(.1)
+                    opened = api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('[role=menuitem],nav[aria-label=\"Workspace navigation\"] button')].find(e=>e.textContent.trim()==='Library');if(button){button.click();return true;}return false;})()")
                     if not opened: raise ValueError('The Library navigation is missing.')
                     deadline = time.monotonic() + 10
                     cards = 0
@@ -589,8 +653,9 @@ def main():
                             # before looking for Builder, then wait for React to render.
                             api._window.evaluate_js("document.querySelector('button[aria-label=\"Close workspace panel\"]')?.click();document.querySelector('button[aria-label=\"Open sidebar\"]')?.click();true")
                             opened = False; deadline = time.monotonic()+10
+                            api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='Tools');button?.click();return true;})()")
                             while not opened and time.monotonic()<deadline:
-                                opened = api._window.evaluate_js("(()=>{const b=[...document.querySelectorAll('nav[aria-label=\"Workspace navigation\"] button')].find(e=>e.textContent.trim()==='Builder');if(b){b.click();return true;}return false;})()")
+                                opened = api._window.evaluate_js("(()=>{const b=[...document.querySelectorAll('[role=menuitem],nav[aria-label=\"Workspace navigation\"] button')].find(e=>e.textContent.trim()==='Builder');if(b){b.click();return true;}return false;})()")
                                 if not opened: time.sleep(.05)
                             if not opened: raise ValueError('Builder navigation is missing.')
                             deadline = time.monotonic()+10

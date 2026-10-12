@@ -1,18 +1,24 @@
-export interface Project { id: string; name: string; path: string; branch?: string; worktree?: string; }
+export type Accent = 'copper' | 'sage' | 'blue' | 'violet' | 'rose';
+export interface WorkspaceAppearance { name: string; accent: Accent; motion: 'system' | 'reduced'; }
+export interface ProjectAppearance { icon: 'folder' | 'code' | 'globe' | 'book' | 'flask' | 'palette'; accent?: Accent; }
+export interface Project { id: string; name: string; path: string; branch?: string; worktree?: string; appearance?: ProjectAppearance; }
 export interface Chat { id: string; project_id: string | null; title: string; model: string; updated_at?: string; archived?: boolean; }
-export interface Message { id?: string | number; role: string; content: string; thinking?: string; images?: string[]; tool_name?: string; status?: string; tool_calls?: unknown[]; interaction_run_id?: string; sources?: { title?: string; url: string }[]; }
-export interface SavedChat extends Chat { messages: Message[]; total_messages?: number; summary?: string; }
+export interface Message { id?: string | number; role: string; content: string; thinking?: string; images?: string[]; tool_name?: string; status?: string; tool_calls?: unknown[]; interaction_run_id?: string; invocation_id?: string; run_id?: string; sources?: { title?: string; url: string }[]; }
+export interface RunFailure {provider_id?:string;category?:string;http_status?:number;}
+export interface ActivityGroup { run_id: string; request_message_id?: number; status: string; mode?: string; model?: string; provider_id?: string; created_at?: string; updated_at?: string; current_step?: string; summary?: string; tool_count: number; helper_count: number; children: ActivityGroup[]; assignment_id?:string;attempt?:number;retry_count?:number;failure?:RunFailure|string;finish_reason?:string;response_provider?:string;attempts?:ActivityGroup[]; }
+export interface SavedChat extends Chat { messages: Message[]; total_messages?: number; summary?: string; activity_groups?: ActivityGroup[]; }
 export interface Model { name: string; size?: number; details?: Record<string, unknown>; capabilities?: string[]; context_length?: number; max_context?: number; provider?: string; }
 export interface Settings {
   context: number; tokens: number; temperature: number; thinking: boolean;
   theme: 'system' | 'light' | 'dark'; permission_profile: 'always_ask' | 'full_access' | 'deny_access';
   model: string; web: boolean; allow_edits: boolean; performance: string; startup: boolean; num_thread?: number;
   timezone: string; [key: string]: unknown;
+  ui_appearance?: WorkspaceAppearance;
 }
 export interface GoalReview { status: 'reviewing' | 'complete' | 'needs_changes' | 'insufficient_evidence' | 'error' | 'disabled' | 'unavailable'; verdict?: 'complete' | 'needs_changes' | 'insufficient_evidence'; summary?: string; feedback?: string[]; review_run_id?: string; model?: string; attempt?: number; }
 export interface ProgressSummary { activity?: string; phase?: string; verified?: number; total?: number; verified_task_ids?: string[]; verified_count?: number; requirement_count?: number; waiting_reason?: string; blocker?: string; next_action?: string; available_actions?: string[]; }
 export interface PlannerAssignment { state: 'requested' | 'waiting' | 'consumed' | 'unavailable' | 'superseded'; scope_revision?: number; run_id?: string; requested_at?: string; consumed_at?: string; reason?: string; guidance_hash?: string; }
-export interface Run { id: string; workflow_stage?: string; progress_summary?: ProgressSummary; planner_assignment?: PlannerAssignment; context_snapshot?: RunContextSnapshot; builder_revision?: number; result_consumed?: boolean; chat_id?: string; project_id?: string; created_at?: string; status?: string; mode?: string; recovery?: string; model?: string; text?: string; request?: string; request_message_id?: number; settings?: Partial<Settings>; parent_id?: string; goal_id?: string; cursor?: number; review?: GoalReview; }
+export interface Run { id: string; workflow_stage?: string; progress_summary?: ProgressSummary; planner_assignment?: PlannerAssignment; context_snapshot?: RunContextSnapshot; builder_revision?: number; result_consumed?: boolean; chat_id?: string; project_id?: string; created_at?: string; status?: string; mode?: string; recovery?: string; model?: string; returned_model_last?:string;continuation_model?:string;assignment_id?:string;attempt?:number;retry_count?:number; text?: string; request?: string; request_message_id?: number; settings?: Partial<Settings>; parent_id?: string; goal_id?: string; cursor?: number; review?: GoalReview; }
 export interface RunEvent { seq?: number; type: string; text?: string; name?: string; state?: string; number?: number; result?: unknown; arguments?: unknown; approval_id?: string; command?: string; cancelled?: boolean; reason?: string; [key: string]: unknown; }
 export interface Approval { job_id: string; approval_id: string; name: string; arguments?: unknown; command?: string; }
 export interface Goal { id: string; revision?: number; execution_mode?: string; progress_summary?: ProgressSummary; planner_assignment?: PlannerAssignment; builder_revision?: number; builder_id?: string; chat_id?: string; run_id?: string; title?: string; text?: string; status: string; markdown?: string; path?: string; tasks?: Task[]; next_action?: string; review?: GoalReview; }

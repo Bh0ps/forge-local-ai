@@ -845,9 +845,15 @@ class ChannelManager:
         run = runs[0]
         # Remote commands never accept an arbitrary run ID or project target.
         if command == '/pause':
+            run = next((item for item in runs if item['status'] not in TERMINAL), None)
+            if not run:
+                return 'This chat has no active run to pause.'
             self.service.jobs.cancel(run['id'], pause=True)
             return 'Pause requested for ' + run['id'][:8] + '.'
         if command == '/cancel':
+            run = next((item for item in runs if item['status'] not in ('completed', 'cancelled')), None)
+            if not run:
+                return 'This chat has no unfinished run to cancel.'
             self.service.jobs.cancel(run['id'])
             return 'Cancellation requested for ' + run['id'][:8] + '.'
         if command == '/resume':
@@ -1261,12 +1267,27 @@ class ChannelManager:
                     break
                 self._dispatch_inbound(record)
             self._journal_events()
-            with self.store._connection() as db:
-                outgoing = db.execute("SELECT * FROM channel_outbox WHERE status IN ('pending','retry') AND next_attempt<=? ORDER BY created_at,rowid LIMIT 30", (self.clock(),)).fetchall()
-            for record in outgoing:
-                if self.stop_event.is_set():
+            remaining = 30
+            while remaining and not self.stop_event.is_set():
+                with self.store._connection() as db:
+                    # Filter readiness before the limit. Refill after delivery
+                    # so newly unblocked chunks retain normal response ordering.
+                    outgoing = db.execute("""SELECT o.* FROM channel_outbox o
+                        JOIN entities e ON e.kind='channels' AND e.id=o.channel_id
+                        LEFT JOIN channel_outbox p ON p.id=json_extract(o.payload,'$._forge_previous')
+                        WHERE o.status IN ('pending','retry') AND o.next_attempt<=?
+                          AND (json_extract(o.payload,'$._forge_previous') IS NULL OR p.status='delivered')
+                          AND (json_extract(e.data,'$.kind')!='telegram' OR
+                               json_extract(e.data,'$.connected')=1 OR json_extract(e.data,'$.enabled')!=1 OR
+                               json_extract(e.data,'$.allow_outbound')=0)
+                        ORDER BY o.created_at,o.rowid LIMIT ?""", (self.clock(), remaining)).fetchall()
+                if not outgoing:
                     break
-                self._deliver(record)
+                for record in outgoing:
+                    if self.stop_event.is_set():
+                        break
+                    self._deliver(record)
+                    remaining -= 1
 
     def start(self):
         with self.lock:

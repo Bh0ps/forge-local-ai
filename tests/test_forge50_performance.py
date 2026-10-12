@@ -86,4 +86,4 @@ def test_usage_pagination_and_local_calendar_filter(tmp_path):
     page=store.usage_requests(limit=1)
     assert page['total']==2 and len(page['requests'])==1
     assert isinstance(page['requests'][0]['phase_timings'],dict)
-    with store._connection() as db: assert db.execute('SELECT MAX(version) FROM forge_migrations').fetchone()[0]==6
+    with store._connection() as db: assert db.execute('SELECT MAX(version) FROM forge_migrations').fetchone()[0]==7

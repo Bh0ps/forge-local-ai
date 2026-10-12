@@ -185,7 +185,7 @@ describe('update and workspace integration', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Skip for now' }));
     await screen.findByText('What are we building?');
     await userEvent.type(screen.getByRole('textbox', { name: 'Message Forge' }), 'Keep my draft.');
-    await userEvent.click(screen.getByRole('button', { name: 'Memory' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Tools' })); await userEvent.click(screen.getByRole('menuitem', { name: 'Memory' }));
     expect(await screen.findByRole('heading', { name: 'Memory' })).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: /New chat/ }));
     expect((screen.getByRole('textbox', { name: 'Message Forge' }) as HTMLTextAreaElement).value).toBe('Keep my draft.');

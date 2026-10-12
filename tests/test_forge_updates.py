@@ -515,12 +515,16 @@ def test_failed_installer_with_new_work_keeps_current_code_data_and_blocks_repla
 def test_schema_only_additions_do_not_falsely_count_as_new_user_work(setup, monkeypatch):
     manager, app = setup; data, restarted = install_ready_fixture(manager, app, monkeypatch)
     with manager.store._connection(transaction='write') as db:
+        baseline_schema = db.execute('SELECT MAX(version) FROM forge_migrations').fetchone()[0]
+        future_schema = baseline_schema + 1
         db.execute("ALTER TABLE usage ADD COLUMN future_timing TEXT NOT NULL DEFAULT '{}'")
         db.execute('CREATE TABLE future_empty_records(id TEXT PRIMARY KEY,data TEXT)')
-        db.execute("INSERT INTO forge_migrations VALUES(7,'2026-10-08')")
+        db.execute('INSERT INTO forge_migrations VALUES(?,?)', (future_schema, '2026-10-08'))
     result = restarted.rollback(); data = load_operation(manager.home, result['operation_id'])
     outcome = helper_main(manager.home, data['id'], data['parent_pid'], install_dir=app,
         publishers=(PUBLISHER,), verifier=signature, runner=lambda args: pytest.fail('no installer on rollback'))
     assert outcome['rolled_back'] and (app / 'Forge.exe').read_bytes() == b'Old application 4.1.1'
     with sqlite3.connect(manager.store.db_path) as db:
-        assert db.execute('SELECT MAX(version) FROM forge_migrations').fetchone()[0] == 6
+        assert db.execute('SELECT MAX(version) FROM forge_migrations').fetchone()[0] == baseline_schema
+        assert not db.execute("SELECT 1 FROM sqlite_master WHERE name='future_empty_records'").fetchone()
+        assert 'future_timing' not in {row[1] for row in db.execute('PRAGMA table_info(usage)')}
