@@ -75,6 +75,9 @@ classified as check outputs. Tracked source files and conflicting existing
 source files remain part of verification. Older command sessions need a fresh
 check to establish an automatic source snapshot.
 
+The Forge-authored dependency attribution checksum matches a clean LF source
+checkout. Upstream license text is unchanged.
+
 Schema 7 adds private provider-turn state. Upgrading an existing database creates
 a consistent `pre-schema-7` backup before migration. Close Forge before restoring
 that backup; older applications cannot open a migrated workspace.
@@ -83,9 +86,10 @@ that backup; older applications cannot open a migrated workspace.
 
 Validation on Windows, 12–13 October 2026:
 
-- Backend cumulative coverage: 1,812 passed, one skipped across 1,813 tests,
+- Backend cumulative coverage: 1,813 passed, one skipped across 1,814 tests,
   combining the prior 1,811-test coverage with two additional offline provider-change
-  regressions. The final continuation/delegation check passed all 61 cases.
+  regressions and one attribution-checksum regression. Final focused checks passed
+  all 61 continuation/delegation cases and all 22 license-collection cases.
   One legacy compaction fixture exceeded its eight-second deadline under parallel
   load and passed unchanged in 3.43 seconds when rerun serially.
 - Frontend: 204 tests passed across 20 files; TypeScript and production Vite build passed.

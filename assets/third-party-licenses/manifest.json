@@ -167,7 +167,7 @@
         },
         {
           "path": "proxy-tools-0.1.0/ATTRIBUTION.txt",
-          "sha256": "e6632af56c543c1e7e50e56127611dd50260d7da7d540e0155ce447457237232",
+          "sha256": "5bdbb58e9d1d0a438f5db40be8c9831ac63e8db50cba25331ba3fa27b11b48dd",
           "provenance": {
             "kind": "forge-provenance-note",
             "basis": {

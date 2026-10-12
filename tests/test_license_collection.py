@@ -24,6 +24,18 @@ def fallback_source(tmp_path, requirement):
     return root
 
 
+def test_forge_authored_attribution_hash_matches_lf_checkout():
+    root = Path(__file__).resolve().parents[1] / 'assets/third-party-licenses'
+    manifest = json.loads((root / 'manifest.json').read_text(encoding='utf-8'))
+    entry = next(item for item in manifest['distributions'] if item['name'] == 'proxy-tools')
+    notice = next(item for item in entry['files'] if item['path'].endswith('/ATTRIBUTION.txt'))
+    data = (root / notice['path']).read_bytes()
+    # .gitattributes forces LF on checkout; a CRLF hash can pass locally and fail in CI.
+    checkout_bytes = data.replace(b'\r\n', b'\n')
+    assert data == checkout_bytes
+    assert sha256(checkout_bytes).hexdigest() == notice['sha256']
+
+
 @pytest.mark.parametrize(('name', 'version', 'count'), [
     ('ctranslate2', '4.8.2', 1), ('flatbuffers', '25.12.19', 1),
     ('openpyxl', '3.1.5', 2), ('primp', '2.0.1', 6),
