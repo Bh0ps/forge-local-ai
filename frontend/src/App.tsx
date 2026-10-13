@@ -207,7 +207,7 @@ export default function App() {
   const speedLabel = speed !== undefined ? `${speed.toFixed(1)}${speedEstimated ? ' (estimated)' : ''}` : running ? '— (estimated)' : '—';
   const activeRuns = Object.values(lives).filter(l => !l.finished);
   const setDraft = (text: string) => {if(updateReadiness.canEdit())setDrafts(prev => ({ ...prev, [draftKey]: text }));};
-  useReadinessParticipant({inspect:()=>{
+  useReadinessParticipant({kind:'workspace',inspect:()=>{
     const reasons:ReadinessReason[]=[];
     if(!booted.current || authNeeded)reasons.push('workspace_loading');
     if(Object.values(privateComposers.current.attachments).some(items=>items.length))reasons.push('unsent_images');
@@ -220,7 +220,7 @@ export default function App() {
     if(Object.values(lives).some(item=>item.approval))reasons.push('approval_pending');
     if(pendingQuestionCount)reasons.push('question_pending');
     if(Object.values(lives).some(item=>item.tools.some(tool=>tool.type==='outcome_unknown' || tool.state==='Outcome unknown')))reasons.push('recovery_pending');
-    return {reasons};
+    return {reasons,state:preferencesFailed.current?'save_failed':queuedPreferences.current?'waiting':!booted.current || authNeeded?'loading':'ready',pending:queuedPreferences.current};
   },flushAndConfirm:async()=>{await settingsQueue.current;return {ok:true,receipts:[]};}});
 
   const flash = useCallback((message: string) => { setNotice(message); setDictationSetupNeeded(false); }, []);
