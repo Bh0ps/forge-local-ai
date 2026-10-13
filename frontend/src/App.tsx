@@ -134,7 +134,10 @@ export default function App() {
   const [jumpToLatest,setJumpToLatest]=useState(false), [historyLoading,setHistoryLoading]=useState(false);const visibleDocument=useWorkspaceVisibility();
   const historyAnchor=useRef<{height:number;top:number}|null>(null);
   const [authNeeded, setAuthNeeded] = useState(false); const [authInput, setAuthInput] = useState('');
-  const booted = useRef(false); const liveRef = useRef(lives); const chatRef = useRef(chatId); const settingsQueue = useRef(Promise.resolve()); const settingsRevision = useRef(0); const polling = useRef(false); const chatScroll = useRef<HTMLDivElement>(null); const promptRef = useRef<HTMLTextAreaElement>(null); const fileInput = useRef<HTMLInputElement>(null); const shouldScroll = useRef(true); const dictationTarget = useRef(''); const dictationJob = useRef('');
+  const booted = useRef(false),bootstrapGeneration=useRef(0),bootstrapNavigation=useRef<number|null>(null);
+  const [workspaceReady,setWorkspaceReady]=useState(false);
+  const workspaceReadyRef=useRef(false);
+  const liveRef = useRef(lives); const chatRef = useRef(chatId); const settingsQueue = useRef(Promise.resolve()); const settingsRevision = useRef(0); const polling = useRef(false); const chatScroll = useRef<HTMLDivElement>(null); const promptRef = useRef<HTMLTextAreaElement>(null); const fileInput = useRef<HTMLInputElement>(null); const shouldScroll = useRef(true); const dictationTarget = useRef(''); const dictationJob = useRef('');
   const recorder = useRef<MediaRecorder | null>(null); const recordingStream = useRef<MediaStream | null>(null); const browserAudio = useRef<Blob[]>([]); const recordingTimer = useRef<ReturnType<typeof setTimeout> | null>(null); const recordingCancelled = useRef(false);
   const dictationScope=useRef<import('./persistentDraft').DraftScope|undefined>(undefined),dictationDeliveries=useRef(new Set<string>()),dictationEpoch=useRef(0);
   const chatNavigationVersion = useRef(0);
@@ -161,7 +164,7 @@ export default function App() {
     privateComposers.current={...privateComposers.current,[name]:next};
     const state=privateComposers.current;
     for(const changedKey of Object.keys(next)) {
-      if(next[changedKey]===previous[changedKey])continue;
+      if(next[changedKey]===previous[changedKey] || !workspaceReadyRef.current)continue;
       const owned=draftScopes.current.get(changedKey); if(!owned || name==='attachments')continue;
       persistedDraft.captureScope(owned,{text:state.drafts[changedKey] || '',document_ids:(state.documents[changedKey] || []).map(item=>item.id),skills:state.taskSkills[changedKey] || [],space_ids:state.taskSpaces[changedKey] || []});
     }
@@ -193,7 +196,7 @@ export default function App() {
     setDocuments(previous => ({...previous, [draftKey]: (content.document_ids || []).map(id => ({id, name: documentAttachments.find(item => item.id === id)?.name || 'Saved document'}))}));
     setTaskSkills(previous => ({...previous, [draftKey]: content.skills || []}));
     setTaskSpaces(previous => ({...previous, [draftKey]: content.space_ids || []}));
-  }, booted.current);
+  }, workspaceReady);
   useEffect(() => {setSlashIndex(0); setSlashDismissed(false);}, [draft]);
   useEffect(() => { let alive=true; void api<{spaces:{id:string;name:string;project_ids?:string[]}[]}>('spaces').then(result=>{if(alive)setSpaces(result.spaces || []);}).catch(()=>{}); return()=>{alive=false;}; },[projectId]);
   const project = projects.find(p => p.id === projectId);
@@ -209,7 +212,7 @@ export default function App() {
   const setDraft = (text: string) => {if(updateReadiness.canEdit())setDrafts(prev => ({ ...prev, [draftKey]: text }));};
   useReadinessParticipant({kind:'workspace',inspect:()=>{
     const reasons:ReadinessReason[]=[];
-    if(!booted.current || authNeeded)reasons.push('workspace_loading');
+    if(!workspaceReady || authNeeded)reasons.push('workspace_loading');
     if(Object.values(privateComposers.current.attachments).some(items=>items.length))reasons.push('unsent_images');
     if(localInputs.current.attachments || captureBusy || Object.values(pendingAttachments).some(items=>items.some(item=>item.state==='processing')))reasons.push('attachment_pending');
     if(localInputs.current.dictation || recording || transcribing || dictationBusy || recorder.current || recordingStream.current || browserAudio.current.length || dictationJob.current)reasons.push('dictation_pending');
@@ -220,11 +223,11 @@ export default function App() {
     if(Object.values(lives).some(item=>item.approval))reasons.push('approval_pending');
     if(pendingQuestionCount)reasons.push('question_pending');
     if(Object.values(lives).some(item=>item.tools.some(tool=>tool.type==='outcome_unknown' || tool.state==='Outcome unknown')))reasons.push('recovery_pending');
-    return {reasons,state:preferencesFailed.current?'save_failed':queuedPreferences.current?'waiting':!booted.current || authNeeded?'loading':'ready',pending:queuedPreferences.current};
+    return {reasons,state:preferencesFailed.current?'save_failed':queuedPreferences.current?'waiting':!workspaceReady || authNeeded?'loading':'ready',pending:queuedPreferences.current};
   },flushAndConfirm:async()=>{await settingsQueue.current;return {ok:true,receipts:[]};}});
 
   const flash = useCallback((message: string) => { setNotice(message); setDictationSetupNeeded(false); }, []);
-  const workspaceLayout=useWorkspaceLayout(booted.current,flash), uiAppearance=appearance(settings);
+  const workspaceLayout=useWorkspaceLayout(workspaceReady,flash), uiAppearance=appearance(settings);
   const sidebar=compactViewport?smallSidebar:workspaceLayout.layout.sidebar_open;
   const setSidebar=(open:boolean)=>{if(compactViewport)setSmallSidebar(open);else workspaceLayout.update({sidebar_open:open});};
   const layoutReady=useRef(false);
@@ -235,51 +238,71 @@ export default function App() {
   const activities=transcriptActivity(chat,recentRuns), activityOwners=activityRunIds(activities);
   const activitiesFor=(id:Message['id'])=>activities.filter(group=>Number(group.request_message_id)===Number(id));
   const unanchoredActivities=activities.filter(group=>!chat?.messages.some(message=>Number(message.id)===Number(group.request_message_id)));
-  async function refreshModels() {
-    try { const result = await api<{ models: Model[] }>('models'); setModels(result.models || []); setConnection('Local engine'); }
-    catch (e) { setConnection('Engine offline'); flash(errorText(e)); }
+  async function refreshModels(accepted=()=>true) {
+    try { const result = await api<{ models: Model[] }>('models'); if(!accepted())return;setModels(result.models || []); setConnection('Local engine'); }
+    catch (e) { if(accepted()){setConnection('Engine offline'); flash(errorText(e));} }
   }
-  async function refreshWorkspace() {
+  async function refreshWorkspace(accepted=()=>true) {
     const results = await Promise.allSettled([api<{ projects: Project[] }>('projects'), api<{ chats: Chat[] }>('chats', { archived: 'all' }), api<{schedules: {enabled?: boolean}[]}>('schedules')]);
+    if(!accepted())return;
     if (results[0].status === 'fulfilled') setProjects(results[0].value.projects || []);
     if (results[1].status === 'fulfilled') setChats(results[1].value.chats || []);
     if (results[2].status === 'fulfilled') setScheduledCount((results[2].value.schedules || []).filter(item => item.enabled !== false).length);
   }
-  async function loadChat(id: string, limit = 80, older = false) {
-    if(!updateReadiness.canEdit() || deletedChats.current.has(id))return;
+  async function loadChat(id: string, limit = 80, older = false, accepted=()=>true) {
+    if(!accepted() || !updateReadiness.canEdit() || deletedChats.current.has(id))return;
     const event = new CustomEvent('forge:navigate', {cancelable: true, detail: {page: 'chat', chat_id: id}}); if (!window.dispatchEvent(event)) return;
     const navigationVersion=++navigation.current;
     const version = ++chatNavigationVersion.current;
     if(older && chatScroll.current){historyAnchor.current={height:chatScroll.current.scrollHeight,top:chatScroll.current.scrollTop};setHistoryLoading(true);}else{historyAnchor.current=null;setJumpToLatest(false);}
     try {
-      const next = await api<SavedChat>('get_chat', { id, limit }); if (deletedChats.current.has(id) || version !== chatNavigationVersion.current || navigationVersion!==navigation.current) return; if(older && chatScroll.current)historyAnchor.current={height:chatScroll.current.scrollHeight,top:chatScroll.current.scrollTop};setChat(next); setChatId(next.id); setProjectId(next.project_id); setMessagesLimit(limit); setPageState('chat');
+      const next = await api<SavedChat>('get_chat', { id, limit }); if (!accepted() || deletedChats.current.has(id) || version !== chatNavigationVersion.current || navigationVersion!==navigation.current) return; if(older && chatScroll.current)historyAnchor.current={height:chatScroll.current.scrollHeight,top:chatScroll.current.scrollTop};setChat(next); setChatId(next.id); setProjectId(next.project_id); setMessagesLimit(limit); setPageState('chat');
       if (next.model) setSettings(prev => ({ ...prev, model: next.model }));
       shouldScroll.current = !older;
-    } catch (e) { if(version===chatNavigationVersion.current){historyAnchor.current=null;flash(errorText(e));} }
-    finally{if(version===chatNavigationVersion.current)setHistoryLoading(false);}
+    } catch (e) { if(accepted() && version===chatNavigationVersion.current){historyAnchor.current=null;flash(errorText(e));} }
+    finally{if(accepted() && version===chatNavigationVersion.current)setHistoryLoading(false);}
   }
   async function bootstrap() {
     if (booted.current) return; booted.current = true;
+    const generation=++bootstrapGeneration.current,transport=isNative()?window.pywebview!.api:null;
+    const accepted=()=>generation===bootstrapGeneration.current && transport===(isNative()?window.pywebview!.api:null);
+    // Ref-only activation can be cached in a React bailout without running its
+    // effects. Saved-work owners activate through committed readiness state.
+    workspaceReadyRef.current=false;setWorkspaceReady(false);
     try {
       const result = await api<Record<string, unknown>>('bootstrap');
+      if(!accepted())return;
       const saved = result.settings as Partial<Settings> || {};
       setSettings(prev => ({ ...prev, ...saved })); setProjects(listFrom<Project>(result, 'projects')); const savedChats = listFrom<Chat>(result, 'chats'); setChats(savedChats); setCapabilities(result.capabilities as Record<string, unknown> || {});
       const restored: Record<string, LiveRun> = {};
       for (const run of listFrom<Run>(result, 'runs')) if (ACTIVE.has(run.status || '') || ['paused', 'interrupted', 'failed', 'completed'].includes(run.status || '')) restored[run.id] = { run, text: '', thinking: '', parts: [], tools: [], cursor: 0, status: run.status || 'running', finished: !ACTIVE.has(run.status || '') };
-      void api<{ first_run: boolean }>('setup_status').then(r => { if (r.first_run) setShowSetup(true); }).catch(() => {});
+      void api<{ first_run: boolean }>('setup_status').then(r => { if (accepted() && r.first_run) setShowSetup(true); }).catch(() => {});
       setLives(restored); setConnection('Coordinator ready'); setAuthNeeded(false);
       // Initial history restoration is subordinate to navigation already chosen
       // by the user, including a click before bootstrap begins.
-      if (savedChats[0] && navigation.current===0) await loadChat(savedChats[0].id);
-      void refreshWorkspace();
-      void refreshModels();
-    } catch (e) { booted.current = false; setConnection('Disconnected'); flash(errorText(e)); if (/401|authenticate|unauthoriz|token|pair/i.test(errorText(e))) setAuthNeeded(true); }
+      if (savedChats[0] && (navigation.current===0 || bootstrapNavigation.current===navigation.current)) {
+        const previousNavigation=navigation.current,restoring=loadChat(savedChats[0].id,80,false,accepted);
+        if(navigation.current===previousNavigation+1)bootstrapNavigation.current=navigation.current;
+        await restoring;
+      }
+      if(!accepted())return;
+      workspaceReadyRef.current=true;setWorkspaceReady(true);
+      // Keep work typed before startup in its original scope, including a new
+      // conversation hidden by automatic history restoration.
+      const state=privateComposers.current;
+      for(const [key,scope] of draftScopes.current){
+        const content={text:state.drafts[key] || '',document_ids:(state.documents[key] || []).map(item=>item.id),skills:state.taskSkills[key] || [],space_ids:state.taskSpaces[key] || []};
+        if(content.text || content.document_ids.length || content.skills.length || content.space_ids.length)persistedDraft.captureScope(scope,content);
+      }
+      void refreshWorkspace(accepted);
+      void refreshModels(accepted);
+    } catch (e) { if(!accepted())return;booted.current = false;workspaceReadyRef.current=false;setWorkspaceReady(false);setConnection('Disconnected'); flash(errorText(e)); if (/401|authenticate|unauthoriz|token|pair/i.test(errorText(e))) setAuthNeeded(true); }
   }
   useEffect(() => {
     const ready = () => { booted.current = false; void bootstrap(); };
     window.addEventListener('pywebviewready', ready);
     const timer = setTimeout(() => void bootstrap(), 300);
-    return () => { clearTimeout(timer); window.removeEventListener('pywebviewready', ready); };
+    return () => { bootstrapGeneration.current++;clearTimeout(timer); window.removeEventListener('pywebviewready', ready); };
   }, []);
   useEffect(() => {
     let disposed = false;
@@ -407,7 +430,7 @@ export default function App() {
     if (navigate && run.chat_id) { setChatId(run.chat_id); if (run.chat_id !== chatId) setChat({ id: run.chat_id, project_id: run.project_id || projectId, model: run.model || settings.model, title: draft.slice(0, 60), messages: [] }); }
   }
   async function send(override?: string) {
-    if(!updateReadiness.canEdit())return;
+    if(!workspaceReady || !updateReadiness.canEdit())return;
     const text = (override || draft).trim(); if (!text || busy || processingAttachments) return;
     const user: Message = { role: 'user', content: text, images: images.length ? images : undefined };
     const submitted = {key:draftKey, fingerprint:composerFingerprint, draftScope:persistedDraft.key, draftContent:JSON.stringify(composerContent), navigation:navigation.current, projectId, chatId, settings:{...settings}, images:[...images], documents:documentAttachments.map(item=>item.id), spaces:[...(taskSpaces[draftKey] || [])], skills:[...(taskSkills[draftKey] || [])]};
@@ -587,7 +610,7 @@ export default function App() {
       {draft.startsWith('/') && !draft.includes(' ') && !slashDismissed && <SlashPalette query={draft} activeIndex={slashIndex} select={text => { setDraft(text); promptRef.current?.focus(); }} />}
       {images.length > 0 && <div className="attachment-strip">{images.map((image, index) => <div key={index}><img src={`data:image/jpeg;base64,${image}`} alt={`Attachment ${index + 1}`} /><IconButton label={`Remove attachment ${index + 1}`} onClick={() => setAttachments(prev => ({ ...prev, [draftKey]: images.filter((_, i) => i !== index) }))}><X size={12} /></IconButton></div>)}</div>}
       <textarea ref={promptRef} aria-label="Message Forge" aria-controls={draft.startsWith('/')&&!draft.includes(' ')&&!slashDismissed?'forge-slash-options':undefined} aria-activedescendant={draft.startsWith('/')&&!draft.includes(' ')&&!slashDismissed?`forge-slash-${slashIndex}`:undefined} placeholder={recording ? 'Listening… click the microphone to finish' : running ? 'Guide the current run…' : 'Ask Forge, or type / for commands'} value={draft} onChange={e => setDraft(e.target.value)} rows={hud ? 1 : 2} maxLength={72000} onKeyDown={e => {if(e.nativeEvent.isComposing)return; const commands=slashCommands.filter(([name])=>name.includes(draft.slice(1).toLowerCase())); if(draft.startsWith('/')&&!draft.includes(' ')&&!slashDismissed&&commands.length){if(e.key==='ArrowDown'||e.key==='ArrowUp'){e.preventDefault();setSlashIndex((slashIndex+(e.key==='ArrowDown'?1:-1)+commands.length)%commands.length);return;}if(e.key==='Escape'){e.preventDefault();setSlashDismissed(true);return;}if(e.key==='Enter'&&!e.shiftKey&&!commands.some(([name])=>draft===`/${name}`)){e.preventDefault();setDraft(`/${commands[slashIndex % commands.length][0]} `);return;}} if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (running) void steer(); else void send(); } }} />
-      <div className="composer-controls"><div className="composer-left"><IconButton label="Attach files" disabled={running} onClick={() => fileInput.current?.click()}><Plus size={19} /></IconButton><IconButton label={captureBusy ? 'Capturing screen' : 'Attach screenshot'} onClick={() => void capture()} disabled={running || captureBusy || !isNative()}><Maximize2 size={16} /></IconButton><ModelPicker models={models} value={settings.model} providerId={String(settings.provider_id || 'ollama')} select={name => void changeSettings({ model: name, adaptive_model_locked: true })} open={modelOpen} setOpen={setModelOpen} refresh={() => void refreshModels()} /><button className="permission-control" title="Permission profile" onClick={() => { setPage('settings'); setSettingsTab('permissions'); if (hud) void switchMode(false); }}><ShieldCheck size={13} /><span>{settings.permission_profile === 'full_access' ? 'Full access' : settings.permission_profile === 'deny_access' ? 'Chat only' : 'Ask'}</span></button></div><div className="composer-right"><IconButton label="Skills and notes" active={rightPanel && panelTab==='context'} onClick={() => {setRightPanel(!(rightPanel && panelTab==='context')); setPanelTab('context'); if(hud) void switchMode(false);}}><Sparkles size={17}/>{Boolean((taskSkills[draftKey] || []).length+(taskSpaces[draftKey] || []).length) && <span className="context-count">{(taskSkills[draftKey] || []).length+(taskSpaces[draftKey] || []).length}</span>}</IconButton><ContextControl settings={settings} onChange={delta=>changeSettings({...delta,adaptive_context_locked:true})} open={contextOpen} setOpen={value => { setContextOpen(value); if (value && hud && !peek) void switchMode(true, true); }} /><IconButton label={dictationBusy ? 'Preparing dictation' : transcribing ? 'Cancel transcription' : recording ? 'Stop dictation' : 'Start dictation'} active={recording} disabled={dictationBusy} onClick={() => void dictate()}>{dictationBusy ? <LoaderCircle size={17} className="spin" /> : recording ? <AudioLines size={17} className="pulse" /> : <Mic size={17} />}</IconButton><>{running && <button className="steer-button" title="Guide the current run (Enter)" disabled={busy || !draft.trim()} onClick={() => void steer()}><Waypoints size={14} /><span>{draft.startsWith('/') ? 'Command' : 'Steer'}</span></button>}<button className="send-button" aria-label={running ? 'Stop generation' : 'Send message'} title={running ? 'Stop (Shift+Escape)' : 'Send (Enter)'} disabled={!running && (busy || processingAttachments || !draft.trim() || (!settings.model && !draft.startsWith('/')) || !booted.current)} onClick={() => running ? void controlRun('cancel') : void send()}>{running ? <Square size={14} fill="currentColor" /> : <ArrowUp size={18} />}</button></></div></div>
+      <div className="composer-controls"><div className="composer-left"><IconButton label="Attach files" disabled={running} onClick={() => fileInput.current?.click()}><Plus size={19} /></IconButton><IconButton label={captureBusy ? 'Capturing screen' : 'Attach screenshot'} onClick={() => void capture()} disabled={running || captureBusy || !isNative()}><Maximize2 size={16} /></IconButton><ModelPicker models={models} value={settings.model} providerId={String(settings.provider_id || 'ollama')} select={name => void changeSettings({ model: name, adaptive_model_locked: true })} open={modelOpen} setOpen={setModelOpen} refresh={() => void refreshModels()} /><button className="permission-control" title="Permission profile" onClick={() => { setPage('settings'); setSettingsTab('permissions'); if (hud) void switchMode(false); }}><ShieldCheck size={13} /><span>{settings.permission_profile === 'full_access' ? 'Full access' : settings.permission_profile === 'deny_access' ? 'Chat only' : 'Ask'}</span></button></div><div className="composer-right"><IconButton label="Skills and notes" active={rightPanel && panelTab==='context'} onClick={() => {setRightPanel(!(rightPanel && panelTab==='context')); setPanelTab('context'); if(hud) void switchMode(false);}}><Sparkles size={17}/>{Boolean((taskSkills[draftKey] || []).length+(taskSpaces[draftKey] || []).length) && <span className="context-count">{(taskSkills[draftKey] || []).length+(taskSpaces[draftKey] || []).length}</span>}</IconButton><ContextControl settings={settings} onChange={delta=>changeSettings({...delta,adaptive_context_locked:true})} open={contextOpen} setOpen={value => { setContextOpen(value); if (value && hud && !peek) void switchMode(true, true); }} /><IconButton label={dictationBusy ? 'Preparing dictation' : transcribing ? 'Cancel transcription' : recording ? 'Stop dictation' : 'Start dictation'} active={recording} disabled={dictationBusy} onClick={() => void dictate()}>{dictationBusy ? <LoaderCircle size={17} className="spin" /> : recording ? <AudioLines size={17} className="pulse" /> : <Mic size={17} />}</IconButton><>{running && <button className="steer-button" title="Guide the current run (Enter)" disabled={busy || !draft.trim()} onClick={() => void steer()}><Waypoints size={14} /><span>{draft.startsWith('/') ? 'Command' : 'Steer'}</span></button>}<button className="send-button" aria-label={running ? 'Stop generation' : 'Send message'} title={running ? 'Stop (Shift+Escape)' : 'Send (Enter)'} disabled={!running && (busy || processingAttachments || !draft.trim() || (!settings.model && !draft.startsWith('/')) || !workspaceReady)} onClick={() => running ? void controlRun('cancel') : void send()}>{running ? <Square size={14} fill="currentColor" /> : <ArrowUp size={18} />}</button></></div></div>
     </div>
     <div className="draft-status"><small>{persistedDraft.status}</small>{persistedDraft.conflict && <button className="text-button" onClick={()=>void persistedDraft.reloadSaved()}>Reload saved draft</button>}{Boolean(draft || documentAttachments.length || (taskSkills[draftKey] || []).length || (taskSpaces[draftKey] || []).length) && <button className="text-button" disabled={processingAttachments} onClick={()=>void persistedDraft.discard()}>Discard draft</button>}</div><div className="composer-status"><span className={`composer-connection ${running ? 'status-running' : ''}`}><i />{dictationBusy ? 'Loading local dictation…' : live?.status || connection}{(live || lastRun) && <TaskStatus compact run={(live || lastRun)!.run} status={live?.status} notify={flash} resume={()=>void controlRun('resume')} pause={()=>void controlRun('pause')}/>}</span><span className="composer-metrics"><span>{tokenLabel(settings.context)} context</span><span aria-hidden="true">·</span><span className="metric-speed" aria-label="Generation speed in tokens per second">Tokens/s: {speedLabel}</span></span></div>
   </div>;

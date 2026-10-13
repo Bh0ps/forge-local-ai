@@ -20,6 +20,10 @@ If workspace layout cannot load or save, the restart notice offers an explicit
 retry. It requires a fresh acknowledgement for the current desktop or browser
 identity; a late reply from an older identity cannot change its saved state.
 
+Startup activates layout and draft persistence only after the current
+coordinator has loaded the workspace. Delayed responses from a previous browser
+or native connection cannot replace the current workspace or clear its readiness.
+
 Paired browser editors require an explicit disconnect before restarting. Forge
 does not infer that a browser session has no unsaved work because its tab is
 hidden or has stopped polling. Disconnecting does not erase its saved drafts.
