@@ -12,6 +12,7 @@ from inference_stream import (InferenceTimeouts, cancellable_inference, bounded_
                               FIRST_RESPONSE_TIMEOUT_SECONDS, GENERATION_IDLE_TIMEOUT_SECONDS,
                               OLLAMA_TOOL_IDLE_TIMEOUT_SECONDS, TOTAL_REQUEST_TIMEOUT_SECONDS)
 from prompt_compiler import AGENT_POLICY
+from forge_engine_auth import EngineAccessFailure
 
 BASE_DIR = Path(__file__).resolve().parent
 MAX_HISTORY_MESSAGES = 24
@@ -28,7 +29,7 @@ MAX_TOOL_CALLS = 32
 class OllamaRequestFailure(ValueError):
     """An engine failure with fixed public text, never its response body."""
     def __init__(self, status=None):
-        self.http_status=status if type(status) is int and 400<=status<=599 else None
+        self.http_status=status if type(status) is int and 300<=status<=599 else None
         self.category={401:'authentication',403:'access_denied',429:'quota'}.get(self.http_status,'provider_error')
         suffix=' (HTTP '+str(self.http_status)+')' if self.http_status else ''
         super().__init__('Ollama rejected the request'+suffix+'. Check the model and engine status, then retry.')
@@ -155,8 +156,9 @@ def _tool_calls(value, partial=False):
 
 
 class Core:
-    def __init__(self, base=None):
+    def __init__(self, base=None, *, request_headers=None):
         self.base = (base or os.getenv('OLLAMA_API_BASE', 'http://127.0.0.1:11434/api')).rstrip('/')
+        self._headers_callback = request_headers
         # No network request or model warm-up is performed during construction.
         self._stream_lock = threading.Lock()
 
@@ -178,10 +180,10 @@ class Core:
         try:
             result = response.json() if response.content else {}
         except ValueError:
-            if response.is_error:
+            if not response.is_success:
                 raise OllamaRequestFailure(response.status_code) from None
             raise ValueError('Ollama returned an invalid response. Try again.') from None
-        if response.is_error:
+        if not response.is_success:
             raise OllamaRequestFailure(response.status_code) from None
         if not isinstance(result, dict):
             raise ValueError('Ollama returned an invalid response. Try again.')
@@ -202,10 +204,24 @@ class Core:
     def request(self, method, path, payload=None):
         """Compatibility API used by model actions and the non-streaming web host."""
         try:
-            with httpx.Client(timeout=self._timeout(path), trust_env=False) as client:
-                return self._response_json(client.request(method, self.base + path, json=payload))
+            url = self.base + path
+            with httpx.Client(timeout=self._timeout(path), trust_env=False, follow_redirects=False) as client:
+                headers = self.request_headers(url)
+                options = {'headers': headers} if headers is not None else {}
+                return self._response_json(client.request(method, url, json=payload, **options))
         except httpx.HTTPError as exc:
             raise self._connection_error(exc) from None
+
+    def request_headers(self, url, cancel_event=None):
+        if self._headers_callback is None:return None
+        try:
+            headers = dict(self._headers_callback(url, cancel_event))
+            if set(headers)-{'Authorization'} or any(not isinstance(value,str)
+                    or len(value)>8199 or any(ord(char)<32 or ord(char)>126 for char in value)
+                    for value in headers.values()):raise ValueError()
+            return headers
+        except EngineAccessFailure:raise
+        except Exception:raise EngineAccessFailure('authentication') from None
 
     @staticmethod
     def _chat_payload(data, stream=False):
@@ -491,10 +507,12 @@ class Core:
                 raise ValueError('Ollama stopped before completing its response. Try again.')
 
         try:
-            yield from cancellable_inference(self.base + '/chat', payload, cancel_event, consume,
+            url = self.base + '/chat'
+            options = {'headers_factory': lambda: self.request_headers(url, cancel_event)} if self._headers_callback is not None else {}
+            yield from cancellable_inference(url, payload, cancel_event, consume,
                                              timeouts=self._inference_timeouts(buffered_tools=bool(payload.get('tools'))),
                                              provider='Ollama',
-                                             response_error=self._response_json)
+                                             response_error=self._response_json, require_success=True, **options)
         except httpx.HTTPError as exc:
             raise self._connection_error(exc) from None
         finally:

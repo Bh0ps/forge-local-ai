@@ -24,6 +24,7 @@ from tool_routing import catalog_search, select_schemas, validate_arguments, wir
 from forge_workflow import WorkflowCoordinator, verification_sources
 from forge_cadence import VerificationCadence,FILE_MUTATIONS
 from forge_provider_state import reasoning_details, INCOMPLETE_PROVIDER_RECOVERY
+from forge_engine_auth import EngineAccessFailure, EngineRunBindingFailure
 
 
 def native_tool_json_issue(provider,error,offered):
@@ -461,11 +462,36 @@ class RunManager:
         return {'id':run['id'],'chat_id':run['chat_id'],'status':run['status'],'mode':run['mode'],'request':run['request'],'settings':run['settings'],
                 'request_message_id':run['request_message_id'],'goal_id':run.get('goal_id'),'project_id':run.get('project_id'),'parent_id':run.get('parent_id')}
     def _launch(self,run):
+        try:admitted=self._bind_engine_run(run)
+        except EngineAccessFailure as failure:
+            self.store.update_run(run['id'],status='paused',recovery=str(failure),failure={**failure.diagnostics(),'provider_id':run['settings']['provider_id']})
+            raise
         automatic=getattr(getattr(self.service,'update_manager',None),'automatic_downloads',None)
         if automatic: automatic.changed('active_work')
         job={'cancel':threading.Event(),'pause':False,'approval':None,'generation_cancel':None,'finishing':False}
+        if admitted is not None:job['_admitted_provider']=admitted
         self.jobs[run['id']]=job
         thread=threading.Thread(target=self._run,args=(run['id'],job),daemon=True,name='Forge-run-'+run['id'][:8]); job['thread']=thread; thread.start()
+    def _bind_engine_run(self,run):
+        identifier=run.get('settings',{}).get('provider_id','ollama')
+        known=getattr(self.store,'_has_provider_run_binding',lambda identifier:False)(run['id'])
+        if not identifier or identifier in ('ollama','openrouter'):
+            if known:raise EngineRunBindingFailure()
+            return None
+        if known is None and self.store._provider_run_started(run['id']):raise EngineRunBindingFailure()
+        from forge_inference import OllamaProvider
+        try:provider=self.service.providers.provider(identifier)
+        except Exception:
+            if known:raise EngineRunBindingFailure() from None
+            raise
+        if not isinstance(provider,OllamaProvider):
+            if known:raise EngineRunBindingFailure()
+            return None
+        signature=self.service.providers.run_binding_signature(identifier,provider)
+        self.store._bind_provider_run(run['id'],identifier,signature)
+        if self.service.providers.run_binding_signature(identifier,provider)!=signature:
+            raise EngineRunBindingFailure()
+        return provider
     def poll(self,identifier,after=0):
         run,events,latest=self.store.poll_snapshot(identifier,after)
         cursor=events[-1]['seq'] if events else after
@@ -549,6 +575,11 @@ class RunManager:
             if chat.get('project_id')!=run.get('project_id'): raise ValueError('The chat moved to another project. Start a new run in its current project.')
             if run.get('goal_id') and self.store.goal(run['goal_id']).get('project_missing'): raise ValueError('Reconnect the original goal project before resuming.')
             if run['status'] not in ('paused','interrupted','failed'): raise ValueError('This run cannot be resumed.')
+            admitted=self._bind_engine_run(run)
+            if admitted is not None:
+                current=self.store.get_settings();initial=run.get('initial_preferences',current)
+                target=(data or {}).get('provider_id',current.get('provider_id') if current.get('provider_id')!=initial.get('provider_id') else run['settings']['provider_id'])
+                if target!=run['settings']['provider_id']:raise EngineRunBindingFailure()
             if run.get('retry_of') or run.get('assignment_id'):
                 assignment=run.get('assignment_id') or run['id']
                 if any((r.get('assignment_id') or r['id'])==assignment and r.get('attempt',1)>run.get('attempt',1) for r in self.store.runs()):
@@ -945,6 +976,7 @@ class RunManager:
             summary_system=COMPACTION_SYSTEM_PROMPT+' Return at most 120 words. Keep only concrete outcomes, unresolved work and next action; never copy prior_summary or nest checkpoint JSON.'
             summary_data={**run['settings'],'thinking':False,'tokens':1024,'temperature':0,
                 'messages':[{'role':'system','content':summary_system},{'role':'user','content':prompt}],'tools':[]}
+            if job.get('_admitted_provider') is not None:summary_data['_admitted_provider']=job['_admitted_provider']
             text=''; completed=False
             stream=self.service.providers.generate(summary_data,job['cancel'],run,'compaction',bool(run.get('parent_id')))
             try:
@@ -1009,8 +1041,11 @@ class RunManager:
         if run['status'] not in TERMINAL: raise ValueError('Compaction runs between completed rounds. Pause this run first.')
         if run.get('pending_calls') and run.get('next_tool',0)<len(run['pending_calls']):
             raise ValueError('Inspect interrupted tools and Resume before compacting this incomplete round.')
-        info=self.service.providers.provider(run['settings']['provider_id']).capabilities(run['settings']['model'])
-        job={'cancel':threading.Event()}; schemas=self.registry.schemas(run,info.get('capabilities',[]))
+        admitted=self._bind_engine_run(run)
+        info=(admitted or self.service.providers.provider(run['settings']['provider_id'])).capabilities(run['settings']['model'])
+        job={'cancel':threading.Event()}
+        if admitted is not None:job['_admitted_provider']=admitted
+        schemas=self.registry.schemas(run,info.get('capabilities',[]))
         self._compact(run,schemas,job,force=True); return {'ok':True}
     def _budget_totals(self,root):
         with self.store._connection() as db:
@@ -1446,15 +1481,17 @@ class RunManager:
             raise ValueError('Verification failures and source evidence repeated without progress. Saved check artifacts identify the failures. Change the repair approach or report a concrete blocker before Resume; completed actions will not be replayed.')
 
     def _run(self,identifier,job):
-        started=time.monotonic(); partial=''; thinking=''; partial_details=[]; partial_model=None; status='paused'; failure=None
+        started=time.monotonic(); partial=''; thinking=''; partial_details=[]; partial_model=None; status='paused'; failure=None;admitted=None
         run=self.store.run(identifier); initial_elapsed=run.get('elapsed_seconds',0)
         try:
             if run.get('mode')=='goal_review' and (run['settings']['provider_id']!='openrouter' or not run.get('readonly')): raise ValueError('Independent goal reviews require the read-only OpenRouter engine.')
-            provider=self.service.providers.provider(run['settings']['provider_id'])
+            admitted=job.get('_admitted_provider') or self._bind_engine_run(run)
+            if admitted is not None:job['_admitted_provider']=admitted
+            provider=admitted or self.service.providers.provider(run['settings']['provider_id'])
             effective_model=run.get('continuation_model') or run['settings']['model']
             if run.get('continuation_model') and hasattr(provider,'validate_continuation'):
                 provider.validate_continuation(effective_model,run['settings']['context'],('tools',))
-            info=self.service.providers.capabilities(run['settings']['provider_id'],effective_model) if hasattr(self.service.providers,'capabilities') else provider.capabilities(effective_model)
+            info=self.service.providers.capabilities(run['settings']['provider_id'],effective_model) if admitted is None and hasattr(self.service.providers,'capabilities') else provider.capabilities(effective_model)
             require_model_context(run['settings']['context'],info)
             if run.get('images') and 'vision' not in info.get('capabilities',[]): raise ValueError('This model does not advertise vision. Select a vision model to use images.')
             schemas=self.registry.schemas(run,info.get('capabilities',[])); names={s['function']['name']:s for s in schemas}
@@ -1538,6 +1575,7 @@ class RunManager:
                     self.store.event(identifier,'context',**run['context_snapshot'])
                     data={**run['settings'],'model':effective_model,'thinking':run['settings'].get('thinking',True) and (not run.get('output_retries') or info.get('reasoning',{}).get('mandatory') is True) and (run['settings']['provider_id']=='openrouter' or supports_thinking(effective_model,info)),
                           'messages':prepared_messages,'tools':offered_schemas,'token_breakdown':breakdown}
+                    if admitted is not None:data['_admitted_provider']=admitted
                     if run.get('mode')=='goal_review':
                         from forge_goal_review import review_response_format
                         data['response_format']=review_response_format(self.store,run)
@@ -1776,6 +1814,8 @@ class RunManager:
                     self._check_verification(run,outcomes,names)
                     if not job['cancel'].is_set(): self.store.update_run(identifier,phase='round_complete',pending_calls=[])
         except Exception as exc:
+            if admitted is not None and isinstance(exc,EngineAccessFailure) and exc.category=='configuration':
+                exc=EngineRunBindingFailure()
             failure=str(exc)[:2000]
             if partial_details and run['settings']['provider_id']=='openrouter' and getattr(exc,'category',None)!='refusal':
                 failure='The provider stream ended with incomplete reasoning state. '+INCOMPLETE_PROVIDER_RECOVERY

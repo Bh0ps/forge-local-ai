@@ -23,7 +23,8 @@ import psutil
 from context_window import validate_context, advertised_context_limit, require_model_context
 from forge_inference import memory_telemetry, OllamaProvider, ENGINE_PROFILES
 from tool_calls import ToolCallAccumulator
-from core import thinking_metadata, thinking_values
+from core import Core, thinking_metadata, thinking_values
+from forge_engine_auth import EngineAccessFailure
 from forge_tuning import (selected, thread_candidates, headroom_reason, compare, REPETITIONS,
                           MAX_REQUESTS, MAX_SECONDS, MIN_DECODE_GAIN)
 
@@ -33,9 +34,10 @@ class PerformanceUnavailable(ValueError):
 
 def _public_performance_failure(error,cancelled=False,metadata=False):
     category=getattr(error,'category',None)
-    category=category if category in ('authentication','quota','consent_required','access_denied','protocol','refusal') else 'metadata_unavailable' if metadata else 'operation_failed'
+    category=category if category in ('authentication','configuration','cancelled','quota','consent_required','access_denied','protocol','refusal') else 'metadata_unavailable' if metadata else 'operation_failed'
     if cancelled:category='cancelled'
     messages={'authentication':'Check the selected provider authentication before retrying.',
+        'configuration':'The selected engine connection changed. Review it before retrying.',
         'quota':'The selected provider quota is unavailable. Retry after it resets.',
         'consent_required':'Confirm the selected provider consent before retrying.',
         'access_denied':'Current permissions do not allow this performance operation.',
@@ -55,19 +57,21 @@ def calibration_facts(store,providers,settings,telemetry=None):
     """Read authoritative facts afresh; cached display records grant no authority."""
     identifier=settings.get('provider_id','ollama')
     provider=providers.provider(identifier)
+    admitted=settings.get('_admitted_provider')
+    if admitted is not None and admitted is not provider:raise EngineAccessFailure('configuration')
     signature=_provider_signature(providers,identifier)
     if not isinstance(provider,OllamaProvider) or getattr(provider,'remote_inference',False):
         raise ValueError('unsupported_engine')
     hostname=urlsplit(provider.core.base).hostname
     if hostname not in ('localhost','127.0.0.1','::1'):
         raise ValueError('server_hardware_unknown')
-    models=providers.models(identifier,refresh=True)
+    models=provider.models() if admitted is not None else providers.models(identifier,refresh=True)
     model=next((m for m in models if (m.get('name') or m.get('model'))==settings.get('model')),None)
     if model is None: raise ValueError('model_unavailable')
     digest=model.get('digest')
     if not isinstance(digest,str) or not re.fullmatch(r'(?:sha256:)?[0-9a-fA-F]{64}',digest):
         raise ValueError('immutable_identity_missing')
-    info=providers.capabilities(identifier,settings['model'],refresh=True)
+    info=provider.capabilities(settings['model']) if admitted is not None else providers.capabilities(identifier,settings['model'],refresh=True)
     try:require_model_context(settings['context'],info)
     except ValueError:raise ValueError('context_unavailable') from None
     requested=settings.get('thinking',False)
@@ -401,6 +405,7 @@ class PerformanceManager:
             if automatic:automatic.changed('active_work')
             cancel=threading.Event(); self.jobs[job['id']]={'cancel':cancel,'operation':operation,'generation':self.selection_generation}
             if operation=='tune':data={**data,'tuning_contract':tuning,'initial_facts':facts,'generation':self.selection_generation}
+            if isinstance(provider,OllamaProvider):settings={**settings,'_admitted_provider':provider}
             thread=threading.Thread(target=self._worker,args=(job,settings,data,cancel),daemon=True,name='Forge-performance')
             self.jobs[job['id']]['thread']=thread; thread.start(); return job
     def _probe(self,settings,case,cancel):
@@ -533,14 +538,17 @@ class PerformanceManager:
         try:
             job=self.store.save_entity('benchmarks',{**job,'status':'running'})
             if job['operation'] in ('warm','release'):
-                provider=self.service.providers.provider(settings['provider_id']); keep=0 if job['operation']=='release' else settings['keep_alive']
+                provider=settings.get('_admitted_provider') or self.service.providers.provider(settings['provider_id']); keep=0 if job['operation']=='release' else settings['keep_alive']
                 with self.service.providers.queue_for(settings['provider_id']).lease(cancel,True):
                     if cancel.is_set(): raise ValueError('Performance operation cancelled.')
                     began=time.monotonic()
                     final={}
                     try:
-                        final=self._resident_request(provider.core.base+'/generate',{'model':settings['model'],'keep_alive':keep,'stream':False,
-                            'options':{'num_ctx':settings['context'],'num_thread':settings['num_thread']}},cancel)
+                        url=provider.core.base+'/generate'
+                        headers_callback=getattr(provider.core,'_headers_callback',None)
+                        options={'headers_factory':lambda:provider.core.request_headers(url,cancel),'response_error':Core._response_json} if headers_callback is not None else {}
+                        final=self._resident_request(url,{'model':settings['model'],'keep_alive':keep,'stream':False,
+                            'options':{'num_ctx':settings['context'],'num_thread':settings['num_thread']}},cancel,**options)
                     finally:
                         self.store.record_usage({'id':uuid4().hex,'provider':settings['provider_id'],'model':settings['model'],'purpose':job['operation'],
                             'input_tokens':final.get('prompt_eval_count',0),'output_tokens':final.get('eval_count',0),
@@ -551,7 +559,7 @@ class PerformanceManager:
             elif job['operation']=='tune':
                 self._tune(job,settings,data,cancel)
             else:
-                provider=self.service.providers.provider(settings['provider_id']); info=provider.capabilities(settings['model'])
+                provider=settings.get('_admitted_provider') or self.service.providers.provider(settings['provider_id']); info=provider.capabilities(settings['model'])
                 cases=['first_request','warm_request']
                 if job['operation']=='calibrate': cases=['first_request']+['warm_request']*5+['long_prefill','repeated_prefix']
                 if data.get('tools',True) and 'tools' in info.get('capabilities',[]): cases.append('tools')
@@ -600,18 +608,24 @@ class PerformanceManager:
             self.store.save_entity('benchmarks',job)
             with self.lock:self.jobs.pop(job['id'],None)
     @staticmethod
-    def _resident_request(url,payload,cancel):
+    def _resident_request(url,payload,cancel,*,headers_factory=None,response_error=None):
         async def request():
             from inference_stream import FIRST_RESPONSE_TIMEOUT_SECONDS
-            async with httpx.AsyncClient(timeout=httpx.Timeout(FIRST_RESPONSE_TIMEOUT_SECONDS,connect=5),trust_env=False) as client:
-                task=asyncio.create_task(client.post(url,json=payload))
+            if cancel.is_set():raise ValueError('Performance operation cancelled.')
+            async with httpx.AsyncClient(timeout=httpx.Timeout(FIRST_RESPONSE_TIMEOUT_SECONDS,connect=5),trust_env=False,follow_redirects=False) as client:
+                if cancel.is_set():raise ValueError('Performance operation cancelled.')
+                headers=headers_factory() if headers_factory is not None else None
+                if cancel.is_set():raise ValueError('Performance operation cancelled.')
+                task=asyncio.create_task(client.post(url,json=payload,**({'headers':headers} if headers is not None else {})))
                 try:
                     while not task.done():
                         if cancel.is_set():
                             task.cancel()
                             raise ValueError('Performance operation cancelled. The engine may finish an already requested model load.')
                         await asyncio.wait({task},timeout=.05)
-                    response=await task;response.raise_for_status();return response.json()
+                    response=await task
+                    if response_error is not None:return response_error(response)
+                    response.raise_for_status();return response.json()
                 finally:
                     if not task.done():task.cancel()
                     await asyncio.gather(task,return_exceptions=True)

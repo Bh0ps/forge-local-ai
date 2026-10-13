@@ -78,7 +78,7 @@ class ForgeService:
             self.vault=CredentialVault(); self.integrations=IntegrationHub(self.store.home,vault=self.vault)
         except ImportError:
             self.vault=None; self.integrations=None
-        self.providers=ProviderPool(self.core,self.store,self.vault)
+        self.providers=ProviderPool(self.core,self.store,self.vault,stopped=lambda:bool(getattr(self,'stop_event',None) and self.stop_event.is_set()))
         self.jobs=RunManager(self); self.stop_event=threading.Event(); self.background=None; self.runtime=None
         self.performance_manager=None; self.model_manager=None; self.plan_lock=threading.RLock(); self.manager_lock=threading.RLock()
         self.worktree_lock=threading.RLock()
@@ -353,7 +353,7 @@ class ForgeService:
     def bootstrap(self):
         runs=self.store.runs(limit=200)
         from forge_workspace_ui import WorkspaceUI
-        return dict(version='5.1.4',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
+        return dict(version='5.1.5',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
                     chats=self.store.list_chats(),runs=runs,goals=[self.goal_view(goal,runs) for goal in self.store.active_goals()],
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -516,7 +516,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='5.1.4')
+                    self.update_manager=UpdateManager(self,current_version='5.1.5')
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)

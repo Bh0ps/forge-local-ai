@@ -5,6 +5,8 @@ import base64
 from hashlib import sha256
 import json
 import os
+import re
+from contextlib import closing
 from pathlib import Path
 import shutil
 import sqlite3
@@ -29,6 +31,11 @@ DEFAULTS = dict(context=32768, model='', provider_id='ollama', permission_profil
                 guided_execution=True,goal_cloud_guidance=False,
                 goal_limits={'minutes':60, 'tokens':100000, 'rounds':128, 'tools':256})
 TERMINAL = {'completed', 'cancelled', 'failed', 'paused', 'interrupted'}
+PROVIDER_BINDING_SCHEMA = ('CREATE TABLE IF NOT EXISTS provider_run_bindings('
+    'run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,'
+    'provider_id TEXT NOT NULL CHECK(length(provider_id) BETWEEN 1 AND 255),'
+    'format_version INTEGER NOT NULL CHECK(format_version=1),'
+    "signature TEXT NOT NULL CHECK(length(signature)=64 AND signature NOT GLOB '*[^0-9a-f]*'))")
 
 def encode(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
@@ -162,6 +169,7 @@ class ForgeStore(Store):
                 db.execute('CREATE TABLE IF NOT EXISTS provider_turn_state(message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,provider_id TEXT NOT NULL,model_id TEXT NOT NULL,state TEXT NOT NULL)')
                 db.execute('CREATE INDEX IF NOT EXISTS provider_turn_run ON provider_turn_state(run_id,message_id)')
                 db.execute('INSERT INTO forge_migrations VALUES(7,?)',(_now(),))
+        self._ensure_provider_bindings(backup=previous==7)
         if not self.entities('agents'):
             for role, instruction in (
                 ('Researcher','Research using primary sources. Cite sources and explain uncertainty. Do not edit the project.'),
@@ -169,6 +177,88 @@ class ForgeStore(Store):
                 ('Reviewer','Inspect changes and identify actionable correctness problems. Do not modify files.')):
                 self.save_entity('agents',dict(id=role.lower(),name=role,role=role.lower(),instructions=instruction,
                     model='',context=32768,tools=[],skills=[],enabled=True,tokens=25000,rounds=32))
+
+    def _ensure_provider_bindings(self, *, backup):
+        # Independently versioned, additive private journal. Delivered schema7
+        # clients can reopen the same workspace after a code rollback.
+        with self._connection() as db:
+            present=db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_run_bindings'").fetchone()
+        if present:return
+        if backup:
+            try:
+                destination=self.home/'backups'/('pre-provider-bindings-1-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f'))
+                destination.mkdir()
+                with closing(sqlite3.connect(self.db_path)) as source, closing(sqlite3.connect(destination/'forge.sqlite3')) as target:
+                    source.backup(target)
+                    if target.execute('PRAGMA integrity_check').fetchone()[0]!='ok':raise ValueError()
+            except (OSError,sqlite3.Error,ValueError):
+                raise ValueError('The workspace backup could not be verified. Private engine binding was not added.') from None
+        with self._connection(transaction='write') as db:db.execute(PROVIDER_BINDING_SCHEMA)
+
+    @staticmethod
+    def _provider_binding_table(db):
+        from forge_engine_auth import EngineRunBindingFailure
+        row=db.execute("SELECT sql FROM sqlite_master WHERE name='provider_run_bindings' AND type='table'").fetchone()
+        normalized=lambda text:' '.join(text.split()).replace(' IF NOT EXISTS','')
+        if not row or normalized(row[0])!=normalized(PROVIDER_BINDING_SCHEMA) or db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='provider_run_bindings'").fetchone():
+            raise EngineRunBindingFailure()
+
+    def _provider_run_binding(self, identifier):
+        from forge_engine_auth import EngineRunBindingFailure
+        try:
+            with self._connection() as db:
+                self._provider_binding_table(db)
+                row=db.execute('SELECT * FROM provider_run_bindings WHERE run_id=?',(identifier,)).fetchone()
+                if row and (row['format_version']!=1 or not isinstance(row['provider_id'],str)
+                        or not 1<=len(row['provider_id'])<=255 or not isinstance(row['signature'],str)
+                        or not re.fullmatch('[0-9a-f]{64}',row['signature'])):raise EngineRunBindingFailure()
+                return dict(row) if row else None
+        except EngineRunBindingFailure:raise
+        except (sqlite3.Error,TypeError,ValueError):raise EngineRunBindingFailure() from None
+
+    def _has_provider_run_binding(self, identifier):
+        # Unknown format is not evidence that a prior binding is absent.
+        try:
+            with self._connection() as db:
+                self._provider_binding_table(db)
+                return db.execute('SELECT 1 FROM provider_run_bindings WHERE run_id=?',(identifier,)).fetchone() is not None
+        except (sqlite3.Error,ValueError,TypeError):return None
+
+    def _provider_run_started(self, identifier):
+        from forge_engine_auth import EngineRunBindingFailure
+        try:
+            with self._connection() as db:
+                row=db.execute('SELECT data FROM runs WHERE id=?',(identifier,)).fetchone()
+                if not row:raise EngineRunBindingFailure()
+                run=json.loads(row[0])
+                return bool(run.get('rounds',0) or run.get('tools',0) or run.get('output_tokens',0)
+                    or run.get('pending_calls') or db.execute('SELECT 1 FROM invocations WHERE run_id=? LIMIT 1',(identifier,)).fetchone())
+        except (sqlite3.Error,ValueError,TypeError):raise EngineRunBindingFailure() from None
+
+    def _bind_provider_run(self, identifier, provider_id, signature):
+        from forge_engine_auth import EngineRunBindingFailure
+        if (not isinstance(provider_id,str) or not 1<=len(provider_id)<=255
+                or not isinstance(signature,str) or not re.fullmatch('[0-9a-f]{64}',signature)):
+            raise EngineRunBindingFailure()
+        try:
+            with self._connection(transaction='write') as db:
+                self._provider_binding_table(db)
+                saved=db.execute('SELECT * FROM provider_run_bindings WHERE run_id=?',(identifier,)).fetchone()
+                if saved:
+                    if saved['provider_id']!=provider_id or saved['format_version']!=1 or saved['signature']!=signature:
+                        raise EngineRunBindingFailure()
+                    return
+                row=db.execute('SELECT data FROM runs WHERE id=?',(identifier,)).fetchone()
+                if not row:raise EngineRunBindingFailure()
+                run=json.loads(row[0])
+                if (run.get('settings',{}).get('provider_id')!=provider_id or run.get('rounds',0)
+                        or run.get('tools',0) or run.get('output_tokens',0) or run.get('pending_calls')
+                        or db.execute('SELECT 1 FROM invocations WHERE run_id=? LIMIT 1',(identifier,)).fetchone()):
+                    raise EngineRunBindingFailure()
+                db.execute('INSERT INTO provider_run_bindings VALUES(?,?,1,?)',(identifier,provider_id,signature))
+        except EngineRunBindingFailure:raise
+        except (sqlite3.Error,TypeError,ValueError):raise EngineRunBindingFailure() from None
 
     @staticmethod
     def _chat(connection,chat_id):

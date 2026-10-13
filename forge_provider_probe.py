@@ -28,6 +28,7 @@ def validate_api_key(value):
 
 
 def probe_provider(service, data):
+    from forge_engine_auth import EngineAccessFailure
     from forge_provider_metadata import ProviderProbeRevoked, fetch_json, fetch_provider_metadata, require_current
     from forge_provider_presets import validate_preset
 
@@ -69,11 +70,15 @@ def probe_provider(service, data):
         if (saved.get('kind') == draft['kind'] and saved.get('url', '').rstrip('/') == url
                 and saved.get('credential_ref')):
             if not service.vault:
-                raise ValueError('Saved credentials are unavailable. Enter a key to test this connection.')
+                raise EngineAccessFailure('authentication')
             try:
                 token = validate_api_key(service.vault.get(saved['credential_ref']))
             except Exception:
-                raise ValueError('Saved credentials could not be read. Enter a key to test this connection.') from None
+                require_current(cancel, current)
+                raise EngineAccessFailure('authentication') from None
+            require_current(cancel, current)
+            if not token or any(ord(char) > 126 or ord(char) == 127 for char in token):
+                raise EngineAccessFailure('authentication')
     config = dict(url=url, kind=draft['kind'], preset_id=preset)
     catalog_url = ((url if url.endswith('/api') else url + '/api') + '/tags'
                    if draft['kind'] == 'ollama' else url + '/models')

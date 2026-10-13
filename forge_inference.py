@@ -17,6 +17,7 @@ from core import Core, AGENT_SYSTEM_PROMPT, MAX_STREAM_CHARACTERS, _tool_calls, 
 from context_window import estimated_prompt_tokens, prompt_budget
 from inference_stream import cancellable_inference, bounded_lines
 from forge_provider_state import reasoning_details
+from forge_engine_auth import BoundOllamaAuth, EngineAccessFailure, EngineRunBindingFailure, _signature
 
 
 class ProviderStreamFailure(ValueError):
@@ -331,13 +332,14 @@ class CompatibleProvider:
             raise ValueError(f'Local provider {detail}. Partial output is retained; check engine status and resume the run.') from None
 
 class ProviderPool:
-    def __init__(self,core,store,vault=None):
+    def __init__(self,core,store,vault=None,*,stopped=None):
         self.core=core; self.store=store; self.vault=vault; self.queue=InferenceQueue(); self.remote_queue=InferenceQueue(); self.ollama=OllamaProvider(core)
         self.instances={}; self.lock=threading.RLock(); self.resource_queues={}
         self.capability_cache={}
         self.model_cache={}
         self.metadata_epoch=0; self.metadata_revisions={}; self.metadata_pending={}
         self.metadata_wait_seconds=15
+        self.stopped=stopped or (lambda: False)
 
     def models(self,identifier='ollama',refresh=False):
         return self._metadata(identifier or 'ollama', None, refresh)
@@ -430,22 +432,47 @@ class ProviderPool:
         config=self.store.entity('providers',identifier)
         signature=json.dumps(config,sort_keys=True)
         with self.lock:
-            if self.instances.get(identifier,{}).get('signature')!=signature:
+            generation=(self.metadata_epoch,self.metadata_revisions.get(identifier,0))
+            previous=self.instances.get(identifier,{})
+            if previous.get('signature')!=signature or config.get('kind')=='ollama' and previous.get('binding_generation',generation)!=generation:
                 base=config['url'].rstrip('/')
                 if config.get('kind')=='openrouter':
                     from forge_openrouter import OpenRouterProvider
                     provider=OpenRouterProvider(config,self.vault)
-                else: provider=OllamaProvider(Core(base=base if base.endswith('/api') else base+'/api')) if config.get('kind')=='ollama' else CompatibleProvider(config,self.vault)
-                self.instances[identifier]={'signature':signature,'provider':provider}
+                elif config.get('kind')=='ollama':
+                    auth=BoundOllamaAuth(self.store,self.vault,identifier,config,
+                        current_generation=lambda:self._generation_current(identifier,generation),stopped=self.stopped)
+                    provider=OllamaProvider(Core(base=base if base.endswith('/api') else base+'/api',request_headers=auth.resolve))
+                else: provider=CompatibleProvider(config,self.vault)
+                self.instances[identifier]={'signature':signature,'provider':provider,'binding_generation':generation}
             return self.instances[identifier]['provider']
+    def _generation_current(self,identifier,generation):
+        with self.lock:return generation==(self.metadata_epoch,self.metadata_revisions.get(identifier,0))
+    def run_binding_signature(self,identifier,provider):
+        try:
+            if self.provider(identifier) is not provider:raise EngineRunBindingFailure()
+            with self.lock:generation=(self.metadata_epoch,self.metadata_revisions.get(identifier,0))
+            owner=getattr(getattr(provider.core,'_headers_callback',None),'__self__',None)
+            signature=owner.binding_signature() if isinstance(owner,BoundOllamaAuth) else _signature(self.store.entity('providers',identifier)).hex()
+            if not self._generation_current(identifier,generation) or self.provider(identifier) is not provider:
+                raise EngineRunBindingFailure()
+            return signature
+        except EngineRunBindingFailure:raise
+        except Exception:raise EngineRunBindingFailure() from None
     def configurations(self):
         return [dict(id='ollama',name='Ollama',kind='ollama',url=self.core.base,managed=False)]+self.store.entities('providers')
     def generate(self,data,cancel,run,purpose='main',background=False):
-        identifier=uuid4().hex; provider_id=data.get('provider_id','ollama'); provider=self.provider(provider_id)
+        identifier=uuid4().hex; provider_id=data.get('provider_id','ollama'); admitted=data.get('_admitted_provider')
+        try:provider=self.provider(provider_id)
+        except Exception:
+            if admitted is not None:raise EngineAccessFailure('configuration') from None
+            raise
         final={}; output_bytes=0; encoding_error=None; call_bytes=0; submitted=time.monotonic(); start=None; first=None; visible=None
         from forge_speed import TokenSpeedEstimator
         meter=TokenSpeedEstimator(); last_speed=0
         try:
+            if admitted is not None and admitted is not provider:
+                raise EngineAccessFailure('configuration')
             queue=self.queue_for(provider_id,provider)
             with queue.lease(cancel,background):
                 if provider_id=='openrouter':
@@ -488,6 +515,9 @@ class ProviderPool:
                         if packet.get(key):final[key]=packet[key]
                     if packet.get('done'): final={**final,**packet}
                     yield packet
+        except EngineAccessFailure:
+            final={'prompt_eval_count':0,'eval_count':0}
+            raise
         finally:
             finished=time.monotonic(); duration=max(0,finished-submitted); usage=final.get('usage') or {}
             if not isinstance(usage,dict): usage={}

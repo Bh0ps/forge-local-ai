@@ -101,7 +101,7 @@ async def bounded_error_response(response):
 
 
 def cancellable_inference(url, payload, cancel_event, consume, *, headers=None, timeouts=None,
-                          provider='Local engine', response_error=None):
+                          provider='Local engine', response_error=None, headers_factory=None, require_success=False):
     """Adapt an async HTTP consumer to synchronous callers with prompt Stop.
 
     ``consume(response, publish)`` validates protocol packets and publishes only
@@ -132,9 +132,16 @@ def cancellable_inference(url, payload, cancel_event, consume, *, headers=None, 
                     await asyncio.sleep(.02)
 
         async def receive():
-            async with httpx.AsyncClient(timeout=timeouts.http_timeout(), trust_env=False) as client:
-                async with client.stream('POST', url, json=payload, headers=headers) as response:
-                    if response.is_error:
+            if stopped.is_set() or cancel_event.is_set():
+                return
+            async with httpx.AsyncClient(timeout=timeouts.http_timeout(), trust_env=False, follow_redirects=False) as client:
+                if stopped.is_set() or cancel_event.is_set():
+                    return
+                request_headers = headers_factory() if headers_factory is not None else headers
+                if stopped.is_set() or cancel_event.is_set():
+                    return
+                async with client.stream('POST', url, json=payload, headers=request_headers) as response:
+                    if response.is_error or require_success and not response.is_success:
                         error_response = await bounded_error_response(response)
                         if response_error:
                             response_error(error_response)
