@@ -16,14 +16,18 @@ ready before the app exits. Navigation, changed work, failed confirmation or a
 late response cancels preparation. A stale response cannot cancel a newer
 attempt. Failed preparation keeps a clear recovery action in the current panel.
 
+If workspace layout cannot load or save, the restart notice offers an explicit
+retry. It requires a fresh acknowledgement for the current desktop or browser
+identity; a late reply from an older identity cannot change its saved state.
+
 Paired browser editors require an explicit disconnect before restarting. Forge
 does not infer that a browser session has no unsaved work because its tab is
 hidden or has stopped polling. Disconnecting does not erase its saved drafts.
 
 ![A synthetic paired-browser recovery check](../assets/demos/forge-5.1.3-recovery-check.png)
 
-The installer receives a one-use admission bound to the verified package,
-application identity and committed attempt. It rechecks that identity at the
+The gated in-app handoff gives the installer a one-use admission bound to the
+verified package, application identity and committed attempt. It rechecks it at the
 execution boundary. Cancellation can retry a failed journal write without
 reusing a proof for another attempt. An uncertain installation remains available
 for inspection instead of being reported as safely cancelled.

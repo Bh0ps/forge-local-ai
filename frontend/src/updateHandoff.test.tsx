@@ -10,6 +10,32 @@ let handles:ReturnType<typeof updateReadiness.register>[]=[];
 beforeEach(()=>{call.mockReset();call.mockImplementation(async(action:string)=>action==='update_handoff_begin'?{attempt_id:attempt,challenge}:action==='update_handoff_ack'?{phase:'prepared',confirmation}:action==='update_handoff_commit'?{attempt_id:attempt,phase:'committed'}:action==='update_handoff_abort'?{aborted:true,not_executed:true}:{});});
 afterEach(()=>{updateReadiness.aborted(attempt);handles.forEach(handle=>handle.detach());handles=[];updateReadiness.dismiss();});
 describe('explicit native restart handshake',()=>{
+  it('requires confirmed layout recovery and restores the restart trigger focus',async()=>{
+    const save=deferred<boolean>();let blocked=true;
+    handles.push(updateReadiness.register({inspect:()=>({reasons:blocked?['preferences_pending']:[]}),flushAndConfirm:async()=>({ok:true,receipts:[]})}));
+    const retry=vi.fn(()=>save.promise);
+    render(<><button>Restart fixture</button><UpdateHandoffSurface layoutRecovery={{error:'load',retrying:false,retry}}/></>);
+    const trigger=screen.getByRole('button',{name:'Restart fixture'});trigger.focus();
+    await act(async()=>requestUpdateRestart());
+    const action=screen.getByRole('button',{name:'Retry workspace layout'});action.focus();
+    fireEvent.click(action);expect(retry).toHaveBeenCalledOnce();expect(updateReadiness.getSnapshot().reason).toBe('preferences_pending');
+    blocked=false;await act(async()=>save.resolve(true));
+    expect(updateReadiness.getSnapshot().phase).toBe('idle');expect(document.activeElement).toBe(trigger);
+    expect(call.mock.calls.some(([name])=>name==='update_handoff_ack')).toBe(false);
+  });
+  it('keeps failed layout retries blocked and does not dismiss a newer failure',async()=>{
+    updateReadiness.blocked('preferences_pending');const late=deferred<boolean>(),retry=vi.fn().mockResolvedValueOnce(false).mockImplementationOnce(()=>late.promise);
+    render(<UpdateHandoffSurface layoutRecovery={{error:'save',retrying:false,retry}}/>);
+    await act(async()=>fireEvent.click(screen.getByRole('button',{name:'Retry workspace layout'})));
+    expect(updateReadiness.getSnapshot().reason).toBe('preferences_pending');
+    fireEvent.click(screen.getByRole('button',{name:'Retry workspace layout'}));
+    act(()=>{updateReadiness.dismiss();updateReadiness.blocked('preferences_pending');});
+    const newer=updateReadiness.getSnapshot();await act(async()=>late.resolve(true));expect(updateReadiness.getSnapshot()).toBe(newer);
+  });
+  it('shows a disabled, announced retry while layout recovery is pending',()=>{
+    updateReadiness.blocked('preferences_pending');render(<UpdateHandoffSurface layoutRecovery={{error:null,retrying:true,retry:vi.fn()}}/>);
+    const retry=screen.getByRole('button',{name:'Retrying workspace layout…'});expect(retry.getAttribute('aria-busy')).toBe('true');expect((retry as HTMLButtonElement).disabled).toBe(true);
+  });
   it('routes an explicit rollback through the same opaque saved-work acknowledgment and fence',async()=>{
     handles.push(updateReadiness.register({inspect:()=>({reasons:[]}),flushAndConfirm:async()=>({ok:true,receipts:[receipt]})}));await requestUpdateRestart('rollback');
     expect(call).toHaveBeenCalledWith('update_handoff_begin',{kind:'rollback'});const ack=call.mock.calls.find(([name])=>name==='update_handoff_ack')![1];const commit=call.mock.calls.find(([name])=>name==='update_handoff_commit')![1];expect(ack.receipts).toEqual([receipt]);expect(commit).toMatchObject({attempt_id:attempt,workspace_revision:ack.workspace_revision,participant_count:ack.participant_count});expect(call.mock.calls.some(([name])=>name==='update_rollback')).toBe(false);expect(updateReadiness.canEdit()).toBe(false);
