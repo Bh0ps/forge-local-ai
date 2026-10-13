@@ -56,6 +56,10 @@ Ollama and model downloads are separate. No cloud account is required.
 
 These images and animations use an isolated demo workspace with synthetic data.
 
+![Forge explaining a helper context pause while local work continues](assets/demos/forge-5.1.3-context-pause.png)
+
+![Forge checking saved work before a verified restart](assets/demos/forge-5.1.3-restart-check.png)
+
 ![Forge chat with saved task activity, skills and reference notes](assets/demos/forge-5.1.2-workspace-dark.png)
 
 ![Forge connection setup with a verified tool preview](assets/demos/forge-5.1.2-connections-dark.png)

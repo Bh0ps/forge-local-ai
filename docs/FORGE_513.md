@@ -20,6 +20,8 @@ Paired browser editors require an explicit disconnect before restarting. Forge
 does not infer that a browser session has no unsaved work because its tab is
 hidden or has stopped polling. Disconnecting does not erase its saved drafts.
 
+![A synthetic paired-browser recovery check](../assets/demos/forge-5.1.3-recovery-check.png)
+
 The installer receives a one-use admission bound to the verified package,
 application identity and committed attempt. It rechecks that identity at the
 execution boundary. Cancellation can retry a failed journal write without
@@ -45,6 +47,12 @@ Forge keeps the configured context and profile. It does not guess an alias or
 replay a completed tool action to work around a failed continuation. Optional
 helpers can become unavailable while local work continues; required assignments
 retain their blocked state.
+
+![A synthetic context-limit pause with local work completed](../assets/demos/forge-5.1.3-context-pause.png)
+
+These captures exercise the production UI with synthetic data. Task content and
+available versions are fixtures; no private workspace or external account is
+shown.
 
 ## Downloads, trust and recovery
 
