@@ -38,6 +38,18 @@ function Read-ForgeSmokeReport {
     }
     return $value
 }
+function Test-ForgeHandoffFloor {
+    param([object]$Floor)
+    if ($null -eq $Floor -or $Floor.feature_available -isnot [bool] -or $Floor.phase -isnot [string] -or $Floor.phase -ne 'idle') { return $false }
+    $expected = if ($Floor.feature_available) { 'helper_failed' } else { 'handoff_unavailable' }
+    if ($Floor.reason -isnot [string] -or $Floor.reason -ne $expected -or $Floor.participant_count -isnot [int] -and $Floor.participant_count -isnot [long] -or
+            $Floor.participant_count -lt 0 -or $Floor.participant_count -gt 512) { return $false }
+    foreach ($name in @('trusted_main','fence_installed','invalid_attempt_rejected','typed_block','trust_floor_blocked',
+            'no_attempt','no_preparation','no_helper','no_restart')) {
+        if ($Floor.$name -isnot [bool] -or $Floor.$name -ne $true) { return $false }
+    }
+    return $true
+}
 function Write-ForgeSmokeDiagnostics {
     param([object]$SmokeData, [string]$Gate, [object]$ExitCode,
           [string]$ReportState='unrecorded', [object]$CheckpointData=$null, [string]$CheckpointState='unrecorded')
@@ -49,6 +61,8 @@ function Write-ForgeSmokeDiagnostics {
     # Only fixed labels, check statuses and exact known error messages leave the report.
     $knownErrors = @{
         'React workspace did not render its composer.' = 'workspace-render'
+        'Handoff smoke requires pristine un-staged disposable state.' = 'handoff-fixture-state'
+        'Native handoff trust-floor smoke failed.' = 'handoff-trust-floor'
         'Forge did not launch with its workspace maximized.' = 'window-state'
         'The packaged starter library was not prepared correctly.' = 'library-initialization'
         'The Library navigation is missing.' = 'library-navigation'
@@ -100,7 +114,7 @@ function Write-ForgeSmokeDiagnostics {
         'Integration failed (TypeError). Check the endpoint, authentication and server availability.' = 'integration-type'
         'Integration failed (OSError). Check the endpoint, authentication and server availability.' = 'integration-os'
     }
-    $phases = @('workspace-ready','workspace-size','library','host-lifecycle','research-start','research-navigate',
+    $phases = @('workspace-ready','workspace-size','handoff-floor','library','host-lifecycle','research-start','research-navigate',
         'research-load','research-input-target','research-type','research-button-target','research-click','research-verify',
         'research-screenshot','builder-start','builder-navigation','builder-input-target','builder-button-target',
         'builder:preview_inspect','builder:preview_type','builder:preview_click','builder:preview_viewport',
@@ -131,16 +145,25 @@ function Write-ForgeSmokeDiagnostics {
     $states=@('missing','invalid','unsafe','too-large','ready','unrecorded')
     if ($states -notcontains $ReportState) { $ReportState='unrecorded' }
     if ($states -notcontains $CheckpointState) { $CheckpointState='unrecorded' }
-    $gates=@('process-timeout','report-missing','report-invalid','lifecycle-browser','library','builder-preview','standalone-preview')
+    $gates=@('process-timeout','report-missing','report-invalid','lifecycle-browser','handoff-floor','library','builder-preview','standalone-preview')
     if ($gates -notcontains $Gate) { $Gate='unclassified' }
     if ($ExitCode -isnot [int] -and $ExitCode -isnot [long]) { $ExitCode=$null }
     $toolFailure='unrecorded'
     if (@('not-executed','outcome-unknown','refused') -contains $SmokeData.tool_failure) { $toolFailure=$SmokeData.tool_failure }
     $researchViewCreated=$null
     if ($SmokeData.research_view_created -is [bool]) { $researchViewCreated=$SmokeData.research_view_created }
+    $handoffFeature=$null; $handoffReason='unrecorded'; $handoffPhase='unrecorded'; $handoffParticipants=$null
+    $floor=$SmokeData.handoff_seed
+    if ($floor.feature_available -is [bool]) { $handoffFeature=$floor.feature_available }
+    if ($floor.reason -is [string] -and @('handoff_unavailable','helper_failed') -contains $floor.reason) { $handoffReason=$floor.reason }
+    if ($floor.phase -is [string] -and $floor.phase -eq 'idle') { $handoffPhase='idle' }
+    if (($floor.participant_count -is [int] -or $floor.participant_count -is [long]) -and
+            $floor.participant_count -ge 0 -and $floor.participant_count -le 512) { $handoffParticipants=$floor.participant_count }
     $summary = [ordered]@{ gate=$Gate; phase=$phase; process_exit=$ExitCode; error_present=$hasError;
         error_category=$category; error_type=$errorType; safe_error=$message; report_state=$ReportState;
         tool_failure=$toolFailure; research_view_created=$researchViewCreated;
+        handoff_feature_available=$handoffFeature; handoff_reason=$handoffReason; handoff_phase=$handoffPhase;
+        handoff_participant_count=$handoffParticipants;
         checkpoint_state=$CheckpointState; checkpoint_phase=$checkpointPhase;
         checkpoint_error_type=$checkpointErrorType; checkpoint_error_category=$checkpointErrorCategory; checks=[ordered]@{
             ready=(Check-Status $SmokeData.ready ($SmokeData.ready -eq 'complete'))
@@ -153,6 +176,13 @@ function Write-ForgeSmokeDiagnostics {
             discover_cards=(Check-Status $SmokeData.library.discover_cards ($SmokeData.library.discover_cards -ge 24))
             restored=(Check-Status $SmokeData.full_restores_maximized ($SmokeData.full_restores_maximized -eq $true))
             close_hides=(Check-Status $SmokeData.close_hides ($SmokeData.close_hides -eq $true))
+            handoff_floor=(Check-Status $floor (Test-ForgeHandoffFloor $floor))
+            handoff_main=(Check-Status $floor.trusted_main ($floor.trusted_main -is [bool] -and $floor.trusted_main -eq $true))
+            handoff_fence=(Check-Status $floor.invalid_attempt_rejected ($floor.invalid_attempt_rejected -is [bool] -and $floor.invalid_attempt_rejected -eq $true))
+            handoff_no_attempt=(Check-Status $floor.no_attempt ($floor.no_attempt -is [bool] -and $floor.no_attempt -eq $true))
+            handoff_no_preparation=(Check-Status $floor.no_preparation ($floor.no_preparation -is [bool] -and $floor.no_preparation -eq $true))
+            handoff_no_helper=(Check-Status $floor.no_helper ($floor.no_helper -is [bool] -and $floor.no_helper -eq $true))
+            handoff_no_restart=(Check-Status $floor.no_restart ($floor.no_restart -is [bool] -and $floor.no_restart -eq $true))
             research=(Check-Status $SmokeData.native_browser.fixture_updated ($SmokeData.native_browser.fixture_updated -eq $true))
             research_bridge=(Check-Status $SmokeData.native_browser.bridge_exposed ($SmokeData.native_browser.bridge_exposed -eq 'undefined'))
             preview=(Check-Status $SmokeData.native_preview.fixture_updated ($SmokeData.native_preview.fixture_updated -eq $true))
@@ -196,7 +226,7 @@ $checkpoint = Join-Path $folder 'native-smoke-checkpoint.json'
 $script:ForgeSmokeDiagnosticPath = Join-Path $folder 'native-smoke-diagnostics.json'
 $info = New-Object System.Diagnostics.ProcessStartInfo
 $info.FileName = $target
-$info.Arguments = '--smoke-test --native-browser-smoke'
+$info.Arguments = '--smoke-test --native-browser-smoke --handoff-smoke'
 $info.UseShellExecute = $false
 $info.CreateNoWindow = $true
 $info.EnvironmentVariables['FORGE_DATA_DIR'] = Join-Path $folder 'state'
@@ -214,7 +244,8 @@ if ($partial.state -eq 'missing') { Write-ForgeSmokeDiagnostics $null 'report-mi
 if ($partial.state -ne 'ready') { Write-ForgeSmokeDiagnostics $null 'report-invalid' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native smoke report is invalid.' }
 $result = $partial.data
 if ($result.error -or $result.title -ne 'Forge' -or -not $result.close_hides -or -not $result.native_browser.fixture_updated -or $result.native_browser.bridge_exposed -ne 'undefined') { Write-ForgeSmokeDiagnostics $result 'lifecycle-browser' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native lifecycle/browser smoke failed. See the disposable report.' }
+if (-not (Test-ForgeHandoffFloor $result.handoff_seed)) { Write-ForgeSmokeDiagnostics $result 'handoff-floor' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native handoff trust-floor smoke failed. See the disposable report.' }
 if (-not $result.library.rendered -or $result.library.starter_skills -ne 24 -or $result.library.discover_cards -lt 24) { Write-ForgeSmokeDiagnostics $result 'library' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Packaged library smoke failed. See the disposable report.' }
 if (-not $result.native_preview.fixture_updated -or -not $result.native_preview.separate_controller -or -not $result.native_preview.separate_profile -or $result.native_preview.bridge_exposed -ne 'undefined' -or -not $result.native_preview.snapshot_guarded -or -not $result.native_preview.viewport_verified -or -not $result.native_preview.diagnostics_captured -or $result.native_preview.screenshot_bytes -le 1000 -or -not $result.native_preview.stopped) { Write-ForgeSmokeDiagnostics $result 'builder-preview' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Isolated native Builder preview smoke failed. See the disposable report.' }
 if (-not $result.native_standalone_preview.pane_visible -or -not $result.native_standalone_preview.fixture_updated -or -not $result.native_standalone_preview.without_builder -or $result.native_standalone_preview.bridge_exposed -ne 'undefined' -or $result.native_standalone_preview.screenshot_bytes -le 1000) { Write-ForgeSmokeDiagnostics $result 'standalone-preview' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native standalone plan preview smoke failed. See the disposable report.' }
-Write-Host 'Native workspace, library, HUD, background close, research browser and isolated Builder preview fixtures passed.'
+Write-Host 'Native workspace, handoff trust floor, library, HUD, background close, research browser and isolated Builder preview fixtures passed.'

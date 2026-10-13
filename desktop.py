@@ -24,7 +24,7 @@ SMOKE_PHASES = frozenset({'startup-imports', 'startup-imports-ready', 'logging-s
     'singleton-start', 'singleton-ready', 'service-start', 'service-ready', 'http-start', 'http-ready',
     'background-start', 'background-ready', 'host-hooks-start', 'host-hooks-ready', 'window-create',
     'window-created', 'webview-start', 'startup-failed', 'smoke-failed', 'smoke-complete',
-    'workspace-ready', 'workspace-size', 'library', 'host-lifecycle', 'research-start', 'research-navigate',
+    'workspace-ready', 'workspace-size', 'handoff-floor', 'library', 'host-lifecycle', 'research-start', 'research-navigate',
     'research-load', 'research-input-target', 'research-type', 'research-button-target', 'research-click',
     'research-verify', 'research-screenshot', 'builder-start', 'builder-navigation', 'builder-input-target',
     'builder-button-target', 'builder:preview_inspect', 'builder:preview_type', 'builder:preview_click',
@@ -122,6 +122,116 @@ def _smoke_checkpoint(phase, *, error_type=None, error_category='none'):
     if ('--smoke-test' in sys.argv and '--forge-update' not in sys.argv
             and '--forge-update-protocol-smoke' not in sys.argv and _ACTIVE_SMOKE_CHECKPOINT is not None):
         _ACTIVE_SMOKE_CHECKPOINT.write(phase, error_type=error_type, error_category=error_category)
+
+
+def _smoke_handoff_pristine(api):
+    """Read owned disposable evidence; never changes native update authority."""
+    from forge_native_controller import NativeController
+    from forge_native_handoff import NativeAuthority
+    from forge_update_handoff import HandoffCoordinator
+    from forge_updates import UpdateManager
+    try:
+        configured = os.environ.get('FORGE_DATA_DIR')
+        service = api._service
+        home = Path(os.path.abspath(service.store.home))
+        if (not configured or home != Path(os.path.abspath(configured)) or not _SmokeCheckpoint._plain(home)
+                or type(api._update_authority) is not NativeAuthority or api._closing is not False
+                or api._quit_complete is not None):
+            raise ValueError()
+        with service.admission_lock:
+            authority = api._update_authority
+            with authority.lock:
+                if authority._attempt is not None or authority.status() != {'phase': 'idle', 'locked': False}:
+                    raise ValueError()
+            controller = api._update_controller
+            manager = service.update_manager
+            if type(manager) is not UpdateManager or manager.service is not service or manager.home != service.store.home:
+                raise ValueError()
+            with manager.lock:
+                if (manager.applying is not False or manager.shutting_down is not False or manager.inspection_required is not False
+                        or manager.state.get('state') != 'idle'
+                        or manager.thread is not None and manager.thread.is_alive() is not False
+                        or manager.state.get('verified') is not None and manager.state.get('verified') is not False
+                        or any(manager.state.get(key) is not None for key in ('downloaded', 'signature', 'operation_id'))):
+                    raise ValueError()
+            if controller is not None and (type(controller) is not NativeController or controller.manager is not manager
+                    or controller.authority is not authority or any(getattr(controller, key) is not None
+                        for key in ('attempt', 'reservation', 'prepared', 'transport', 'commit', 'stopped_receipt', 'abort_worker'))):
+                raise ValueError()
+            native = manager.native_handoff
+            if native is not None and (type(native) is not HandoffCoordinator or native.manager is not manager
+                    or native.authority is not authority or native.active is not None):
+                raise ValueError()
+            root = home / 'runtimes' / 'updates'
+            if manager.root != root or not _SmokeCheckpoint._plain(root):
+                raise ValueError()
+            operations = root / 'operations'
+            try:
+                operations.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if not _SmokeCheckpoint._plain(operations) or any(operations.iterdir()):
+                    raise ValueError()
+            backups = home / 'backups'
+            if not _SmokeCheckpoint._plain(backups) or any(path.name.startswith('update-') for path in backups.iterdir()):
+                raise ValueError()
+        return {'no_attempt': True, 'no_preparation': True, 'no_helper': True, 'no_restart': True}
+    except Exception:
+        raise ValueError('Handoff smoke requires pristine un-staged disposable state.') from None
+
+
+def _smoke_handoff_setup(api):
+    """Disable public update checks only in a fresh, explicit disposable smoke home."""
+    try:
+        service = api._service
+        configured = os.environ.get('FORGE_DATA_DIR')
+        home = Path(os.path.abspath(service.store.home))
+        if not configured or home != Path(os.path.abspath(configured)) or not _SmokeCheckpoint._plain(home):
+            raise ValueError()
+        with service.admission_lock:
+            if service.background is not None or service.store.entities('updates'):
+                raise ValueError()
+            with service.store._connection() as db:
+                # Presence queries inspect no conversation content or names.
+                if any(db.execute('SELECT 1 FROM ' + table + ' LIMIT 1').fetchone()
+                        for table in ('chats', 'runs', 'projects')):
+                    raise ValueError()
+            service.dispatch('update_status', {})
+            _smoke_handoff_pristine(api)
+            service.dispatch('settings', {'update_checks': False})
+    except Exception:
+        raise ValueError('Handoff smoke requires pristine un-staged disposable state.') from None
+
+
+def _smoke_handoff_floor(api):
+    """The opt-in smoke uses normal main-window admission, with no staged release."""
+    import forge_native_handoff
+    _smoke_handoff_pristine(api)
+    try:
+        enabled = forge_native_handoff.HANDOFF_ENABLED
+        if type(enabled) is not bool or api._native_binding() is None:
+            raise ValueError()
+        fence = api._window.evaluate_js("(()=>{const f=window.__forgeUpdateReadiness;if(!f)return null;const value=f.check({attempt_id:'" +
+            '0' * 32 + "',workspace_revision:0,participant_count:0});return {installed:true,invalid_attempt_rejected:value.ok===false,phase:value.phase,participants:value.participant_count};})()")
+        if (not isinstance(fence, dict) or fence.get('installed') is not True
+                or fence.get('invalid_attempt_rejected') is not True or fence.get('phase') != 'idle'
+                or type(fence.get('participants')) is not int or not 0 <= fence['participants'] <= forge_native_handoff.MAX_PARTICIPANTS):
+            raise ValueError()
+        blocked = api.call('update_handoff_begin', {})
+        reason = 'helper_failed' if enabled else 'handoff_unavailable'
+        if (not isinstance(blocked, dict) or blocked.get('reason') != reason or blocked.get('phase') != 'failed'
+                or any(blocked.get(key) is not True for key in ('blocked', 'aborted', 'not_executed'))
+                or any(key in blocked for key in ('error', 'attempt_id', 'challenge', 'confirmation'))):
+            raise ValueError()
+        unchanged = _smoke_handoff_pristine(api)
+        if api._native_binding() is None:
+            raise ValueError()
+        return {'feature_available': enabled, 'trusted_main': True, 'fence_installed': True,
+            'invalid_attempt_rejected': True, 'phase': 'idle', 'participant_count': fence['participants'],
+            'typed_block': True, 'trust_floor_blocked': True, 'reason': reason, **unchanged}
+    except Exception:
+        raise ValueError('Native handoff trust-floor smoke failed.') from None
 
 
 class Bridge:
@@ -982,6 +1092,8 @@ def main():
     try:
         _smoke_checkpoint('service-start')
         service = api._ensure_service()
+        if '--smoke-test' in sys.argv and '--handoff-smoke' in sys.argv:
+            _smoke_handoff_setup(api)
         _smoke_checkpoint('service-ready')
         _smoke_checkpoint('http-start')
         app = create_app(service=service, auth=api._pairing)
@@ -1059,21 +1171,9 @@ def main():
                     while api._window.evaluate_js("!!document.querySelector('dialog[open]')") and time.monotonic() < deadline:
                         time.sleep(.05)
                     if '--handoff-smoke' in sys.argv:
-                        import forge_native_handoff
-                        if forge_native_handoff.HANDOFF_ENABLED:
-                            raise ValueError('Closed-capability smoke must not perform an authenticated update.')
-                        fence = api._window.evaluate_js("(()=>{const f=window.__forgeUpdateReadiness;if(!f)return null;const value=f.check({attempt_id:'" +
-                            '0' * 32 + "',workspace_revision:0,participant_count:0});return {installed:true,invalid_attempt_rejected:value.ok===false,phase:value.phase,participants:value.participant_count};})()")
-                        blocked = api.call('update_handoff_begin', {})
-                        if (not fence or not fence['invalid_attempt_rejected'] or
-                                blocked.get('reason') != 'handoff_unavailable' or blocked.get('not_executed') is not True):
-                            raise ValueError('The native update capability or renderer fence is not closed.')
-                        result['handoff_seed'] = {'trusted_main': api._native_binding() is not None,
-                            'fence_installed': fence['installed'], 'invalid_attempt_rejected': True,
-                            'phase': fence['phase'], 'participant_count': fence['participants'],
-                            'typed_block': True, 'no_restart': not api._closing}
-                        if not result['handoff_seed']['trusted_main']:
-                            raise ValueError('Only the actual main document may own native update authority.')
+                        result['smoke_phase'] = 'handoff-floor'
+                        _smoke_checkpoint(result['smoke_phase'])
+                        result['handoff_seed'] = _smoke_handoff_floor(api)
                     result['smoke_phase'] = 'library'
                     _smoke_checkpoint(result['smoke_phase'])
                     starters = [skill for skill in api.call('skills')['skills'] if skill.get('builtin')]

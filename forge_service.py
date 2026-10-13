@@ -1,5 +1,6 @@
 """Authoritative coordinator shared by native, HUD and authenticated HTTP clients."""
 from datetime import datetime,timedelta,timezone
+from contextlib import contextmanager
 import ipaddress
 import json
 import os
@@ -46,6 +47,18 @@ READ_ACTIONS=READ_ACTIONS|frozenset(('skills_search','skills_resource_read','ski
 READ_ACTIONS=READ_ACTIONS|frozenset(('draft_get','submission_get','builder_runtime_get',
     'ai_workflow_status','ai_workflow_self_test_status','ui_layout_get','run_activity','run_diagnostics_export'))
 
+# These controls wait for a native worker/UI callback. Admission must remain
+# available to that callback; a pending lease instead keeps update snapshots
+# from overtaking queued or executing work. Status only reads owned snapshots.
+NATIVE_IO_ACTIONS=frozenset(('browser_native_open','browser_native_show','browser_native_resize',
+    'browser_native_hide','browser_native_navigate','browser_native_back','browser_native_forward',
+    'browser_native_reload','browser_native_close','preview_browser_show','preview_browser_resize',
+    'preview_browser_hide','preview_browser_reload','preview_browser_viewport','preview_browser_inspect',
+    'preview_browser_capture','preview_browser_screenshot','preview_browser_diagnostics','preview_browser_click',
+    'preview_browser_type','preview_browser_key','preview_browser_select','preview_browser_scroll',
+    'preview_browser_wait','preview_stop','project_delete','emergency_stop'))
+NATIVE_CONTROL_ACTIONS=NATIVE_IO_ACTIONS|frozenset(('browser_native_status','preview_browser_status'))
+
 class AgentLaunchRejected(ValueError):
     """Preflight failed before any worktree, child or remote request was created."""
     not_executed=True
@@ -66,6 +79,7 @@ class ForgeService:
         self.agent_lock=threading.RLock()
         self.schedule_lock=threading.RLock()
         self.admission_lock=threading.RLock()
+        self._native_io_pending=0
         self.memory_manager=None; self.channel_manager=None; self.setup_manager=None; self.update_manager=None; self.openrouter_manager=None; self.github_manager=None
         self.interaction_manager=None
         self.builder_manager=None; self._command_sessions=None
@@ -344,6 +358,11 @@ class ForgeService:
     def dispatch(self,action,data=None):
         data={} if data is None else data
         if not isinstance(data,dict): raise ValueError('Expected an object.')
+        if action.startswith(('browser_native_','preview_browser_')) and action not in NATIVE_CONTROL_ACTIONS:
+            raise ValueError('Unknown native browser control.')
+        if action in NATIVE_IO_ACTIONS:
+            with self._native_io_lease(action):
+                return self._dispatch(action,data)
         if action in READ_ACTIONS or action in ('pause','cancel','goal_pause','approve') or action=='settings' and not data:
             return self._dispatch(action,data)
         # The updater acquires this same gate before its snapshot; a request
@@ -359,6 +378,24 @@ class ForgeService:
                     'hf_download','hf_import','hf_retry','runtime_install','runtime_validate','runtime_start','ai_workflow_verify','pull'):
                 automatic.changed('active_work')
             return self._dispatch(action,data)
+
+    @contextmanager
+    def _native_io_lease(self,action):
+        with self.admission_lock:
+            self._check_native_io_admission(action)
+            self._native_io_pending=getattr(self,'_native_io_pending',0)+1
+        try:
+            yield
+        finally:
+            with self.admission_lock:
+                self._native_io_pending-=1
+
+    def _check_native_io_admission(self,action):
+        manager=getattr(self,'update_manager',None)
+        stopped=getattr(self,'stop_event',None)
+        if action!='emergency_stop' and ((stopped is not None and stopped.is_set()) or manager and
+                (manager.applying or getattr(manager,'shutting_down',False))):
+            raise ValueError('Native browser work is paused while Forge closes or prepares an update.')
 
     def _dispatch(self,action,data):
         if action in ('start_chat','command','plan_build','builder_start','builder_start_goal') and data.get('client_submission_id'):
@@ -468,9 +505,16 @@ class ForgeService:
                 if callable(callback): callback(result['deleted'])
             return result
         if action=='project_delete':
-            if self.builder_manager and hasattr(self.builder_manager,'close_project'): self.builder_manager.close_project(data['id'])
             from forge_chats import dispatch_chat
-            return dispatch_chat(self,action,data)
+            # Commit revocation before draining native previews. The pending
+            # lease prevents update preparation, while a new preview cannot
+            # resolve the removed project during its cleanup.
+            with self.admission_lock:
+                self._check_native_io_admission(action)
+                result=dispatch_chat(self,action,data)
+            if self.builder_manager and hasattr(self.builder_manager,'close_project'):
+                self.builder_manager.close_project(result['deleted'])
+            return result
         if action=='get_chat':
             from forge_workspace_ui import WorkspaceUI
             return WorkspaceUI(self.store).chat(data['id'],data.get('limit',200))

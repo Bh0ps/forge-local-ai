@@ -19,6 +19,8 @@ from uuid import uuid4
 import httpx
 
 from project_tools import ProjectTools
+from forge_store import encode
+from storage import _now
 
 
 class _StaticHandler(SimpleHTTPRequestHandler):
@@ -72,8 +74,33 @@ class PreviewManager:
         # PIDs in persisted records are evidence, never process ownership.
         for record in self.store.entities('previews'):
             if record.get('status') in ('starting', 'ready', 'running', 'stopping'):
-                self.store.save_entity('previews', {**record, 'status': 'interrupted',
-                    'url': None, 'error': 'Coordinator restarted. Start a fresh preview.'})
+                self._patch_status(record, {'status': 'interrupted', 'url': None,
+                    'error': 'Coordinator restarted. Start a fresh preview.'},
+                    states=('starting', 'ready', 'running', 'stopping'))
+
+    def _patch_status(self, expected, changes, *, states=None, detached=True):
+        """Patch an existing operation without replaying its stale scope record."""
+        if set(changes) - {'status', 'url', 'error'}:
+            raise ValueError('Only preview status fields may be patched.')
+        with self.store._connection(transaction='write') as db:
+            row = db.execute("SELECT data FROM entities WHERE kind='previews' AND id=?", (expected['id'],)).fetchone()
+            if row is None:
+                return None
+            current = json.loads(row[0])
+            identity = ('id', 'session_id', 'run_id', 'builder_id', 'mode', 'cwd', 'url')
+            if any(current.get(key) != expected.get(key) for key in identity):
+                return None
+            owner = expected.get('project_id')
+            same_owner = current.get('project_id') == owner
+            if same_owner and current.get('detached_project_id') != expected.get('detached_project_id'):
+                return None
+            detached_owner = (detached and owner is not None and current.get('project_id') is None
+                and current.get('detached_project_id') == owner)
+            if not (same_owner or detached_owner) or states is not None and current.get('status') not in states:
+                return None
+            result = {**current, **changes, 'updated_at': _now()}
+            db.execute("UPDATE entities SET data=? WHERE kind='previews' AND id=?", (encode(result), expected['id']))
+        return result
 
     def attach_browser(self, ui_dispatch):
         with self.lock:
@@ -186,18 +213,24 @@ class PreviewManager:
                         response = client.get(record['url'], follow_redirects=False)
                     if response.status_code < 500:
                         with self.lock:
-                            if identifier in self.active:
-                                item['record'] = self.store.save_entity('previews', {**record, 'status': 'ready'})
+                            if self.active.get(identifier) is item:
+                                updated = self._patch_status(record, {'status': 'ready'}, states=('starting',), detached=False)
+                                if updated is not None:
+                                    item['record'] = updated
                         return
             except (OSError, KeyError, httpx.HTTPError, psutil.Error):
                 pass
             self.closed.wait(.2)
         with self.lock:
             item = self.active.get(identifier)
-            if item:
-                self.service.command_sessions.stop(item['record']['session_id'])
-                item['record'] = self.store.save_entity('previews', {**item['record'], 'status': 'failed', 'error': error})
-                self.active.pop(identifier, None)
+            record = dict(item['record']) if item else None
+        if item:
+            self.service.command_sessions.stop(record['session_id'])
+            with self.lock:
+                if self.active.get(identifier) is item:
+                    self._patch_status(record, {'status': 'failed', 'url': None, 'error': error},
+                        states=('starting', 'ready', 'running'))
+                    self.active.pop(identifier, None)
 
     def status(self, identifier=None, project_id=None):
         records = self.store.entities('previews')
@@ -206,16 +239,21 @@ class PreviewManager:
             with self.lock:
                 item = self.active.get(identifier)
                 owned = item is not None
-            if owned and record.get('session_id'):
-                session = self.service.command_sessions.status(record['session_id'])
+                owned_record = dict(item['record']) if item else None
+            if owned and owned_record.get('session_id'):
+                session = self.service.command_sessions.status(owned_record['session_id'])
                 if session['status'] not in ('starting', 'running', 'stopping'):
                     with self.lock:
-                        self.active.pop(identifier, None)
-                    record = self.store.save_entity('previews', {**record, 'status': 'failed', 'url': None,
-                        'error': 'Preview process exited. Inspect logs, then start a fresh preview.'})
-            if not owned and record['status'] in ('starting', 'ready'):
-                record = self.store.save_entity('previews', {**record, 'status': 'interrupted', 'url': None})
-            return record
+                        if self.active.get(identifier) is item:
+                            self._patch_status(owned_record, {'status': 'failed', 'url': None,
+                                'error': 'Preview process exited. Inspect logs, then start a fresh preview.'},
+                                states=('starting', 'ready', 'running'))
+                            self.active.pop(identifier, None)
+            if not owned:
+                with self.lock:
+                    if identifier not in self.active:
+                        self._patch_status(record, {'status': 'interrupted', 'url': None}, states=('starting', 'ready'))
+            return self.store.entity('previews', identifier)
         records = [r for r in records if not project_id or r['project_id'] == project_id][-30:][::-1]
         return {'previews': [self.status(r['id']) if r['id'] in self.active else r for r in records]}
 
@@ -233,13 +271,19 @@ class PreviewManager:
     def stop(self, identifier):
         with self.lock:
             item = self.active.pop(identifier, None)
-            record = self.store.entity('previews', identifier)
+            try:
+                record = self.store.entity('previews', identifier)
+            except ValueError:
+                if item is None:
+                    raise
+                record = dict(item['record'])
+            owned_record = dict(item['record']) if item else record
             browser = None
             if self.browser_preview == identifier:
                 self.browser_preview = None
                 browser = self.browser
             # Publish revocation before any blocking host/process calls.
-            self.store.save_entity('previews', {**record, 'status': 'stopping', 'url': None})
+            stopping = self._patch_status(owned_record, {'status': 'stopping', 'url': None})
         errors = []
         if browser and hasattr(browser, 'cancelled'):
             browser.cancelled.set()
@@ -248,8 +292,8 @@ class PreviewManager:
                 if item.get('server'):
                     item['server'].shutdown()
                     item['server'].server_close()
-                elif record.get('session_id'):
-                    self.service.command_sessions.stop(record['session_id'])
+                elif owned_record.get('session_id'):
+                    self.service.command_sessions.stop(owned_record['session_id'])
             except Exception as exc:
                 errors.append(str(exc)[:400])
         if browser:
@@ -262,8 +306,11 @@ class PreviewManager:
                         browser.dispatch('hide')
             except Exception as exc:
                 errors.append(str(exc)[:400])
-        return self.store.save_entity('previews', {**record, 'status': 'stopped', 'url': None,
-            **({'error': 'Preview stopped; browser cleanup reported: ' + '; '.join(errors)} if errors else {})})
+        if stopping is not None:
+            self._patch_status(stopping, {'status': 'stopped', 'url': None,
+                **({'error': 'Preview stopped; browser cleanup reported: ' + '; '.join(errors)} if errors else {})},
+                states=('stopping', 'failed', 'interrupted', 'stopped'))
+        return self.store.entity('previews', identifier)
 
     def browser_action(self, action, data, context=None):
         # Opening a native pane waits for the workspace to render it. That

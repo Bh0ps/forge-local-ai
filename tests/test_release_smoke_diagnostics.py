@@ -135,7 +135,7 @@ $ErrorActionPreference='Stop'
 $tokens=$null; $errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile($env:FORGE_SMOKE_TEST_SCRIPT,[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Smoke script syntax is invalid.' }
-$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in @('Read-ForgeSmokeReport','Write-ForgeSmokeDiagnostics')},$true) | ForEach-Object { Invoke-Expression $_.Extent.Text }
+$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in @('Read-ForgeSmokeReport','Test-ForgeHandoffFloor','Write-ForgeSmokeDiagnostics')},$true) | ForEach-Object { Invoke-Expression $_.Extent.Text }
 $root=$env:FORGE_SMOKE_TEST_ROOT
 $raw=Join-Path $root 'raw.json'
 $script:ForgeSmokeDiagnosticPath=Join-Path $root 'safe.json'
