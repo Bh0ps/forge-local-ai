@@ -2,7 +2,8 @@
 
 Browser/coordinator requests cannot construct these grants. Renderer messages
 contain only attempt IDs, revisions, counts and coordinator-issued receipts.
-The shipped capability stays closed until the packaged protocol is validated.
+The owning native window prepares each grant. The frozen helper requires
+authenticated inherited pipes before it can access local state.
 """
 from __future__ import annotations
 
@@ -19,7 +20,7 @@ import time
 from typing import Any
 
 
-HANDOFF_ENABLED = False
+HANDOFF_ENABLED = True
 UNAVAILABLE = 'In-app installation is unavailable in this version. Save your work and use the manual installer.'
 MAX_PARTICIPANTS = 512
 MAX_RECEIPTS = 1024
@@ -728,8 +729,8 @@ def _helper_session(channel, *, preflight=None, commit=None, abort=None,
 
 
 def helper_entry():
-    # This early gate deliberately precedes arguments, home/vault loading and
-    # native/coordinator startup. Packaged validation opens it in a later step.
+    # A disabled capability exits before arguments, home/vault loading and
+    # native/coordinator startup. Enabled helpers still require frozen pipes.
     if not HANDOFF_ENABLED:
         raise SystemExit(UNAVAILABLE)
     import sys

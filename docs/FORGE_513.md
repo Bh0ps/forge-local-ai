@@ -30,7 +30,7 @@ hidden or has stopped polling. Disconnecting does not erase its saved drafts.
 
 ![A synthetic paired-browser recovery check](../assets/demos/forge-5.1.3-recovery-check.png)
 
-The gated in-app handoff gives the installer a one-use admission bound to the
+The in-app handoff gives the installer a one-use admission bound to the
 verified package, application identity and committed attempt. It rechecks it at the
 execution boundary. Cancellation can retry a failed journal write without
 reusing a proof for another attempt. An uncertain installation remains available
@@ -99,9 +99,12 @@ checks the exact requested tag. Windows executables still do not have an
 Authenticode certificate.
 
 The 5.1.2 seed requires a manual installation of this preview. Automatic checking
-does not imply unattended installation. In-app apply and rollback remain closed
-until the packaged authenticated forward and rollback checks have passed; the
-release notes state the resulting capability and observed validation.
+does not imply unattended installation. This preview enables native in-app
+installation and restore after a packaged authenticated forward-and-rollback
+rehearsal. Both helpers became ready before native departure, both renderer
+acknowledgements were checked, and synthetic history, drafts, attachments and
+model files survived both relaunches. Restore requires a verified previous
+backup. Paired browser sessions must disconnect first.
 
 No database migration is added. Schema-7 workspaces, model files and credentials
 remain in their existing locations. Keep the private installation and state

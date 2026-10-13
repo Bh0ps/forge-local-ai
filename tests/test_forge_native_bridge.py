@@ -322,7 +322,8 @@ def test_native_update_status_preserves_renderable_operation_failures(bridge, fl
     assert flow.manager.state['error'] == error
 
 
-def test_default_handoff_gate_refuses_before_service_window_or_home_loading(bridge, monkeypatch):
+def test_explicitly_closed_handoff_gate_refuses_before_service_window_or_home_loading(bridge, monkeypatch):
+    monkeypatch.setattr('forge_native_handoff.HANDOFF_ENABLED', False)
     instance, _, _ = bridge
     instance._ensure_service = lambda: pytest.fail('Closed capability cannot touch coordinator state')
     for action in ('update_handoff_begin', 'update_handoff_close_children', 'update_handoff_disconnect_editors'):
