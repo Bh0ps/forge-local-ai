@@ -19,6 +19,109 @@ from forge_host import (EmergencyHotkey, HostLifecycle, PairingAuthority,
                         SingleCoordinator, data_directory, set_startup)
 
 log = logging.getLogger('forge')
+_ACTIVE_SMOKE_CHECKPOINT = None
+SMOKE_PHASES = frozenset({'startup-imports', 'startup-imports-ready', 'logging-start', 'logging-ready',
+    'singleton-start', 'singleton-ready', 'service-start', 'service-ready', 'http-start', 'http-ready',
+    'background-start', 'background-ready', 'host-hooks-start', 'host-hooks-ready', 'window-create',
+    'window-created', 'webview-start', 'startup-failed', 'smoke-failed', 'smoke-complete',
+    'workspace-ready', 'workspace-size', 'library', 'host-lifecycle', 'research-start', 'research-navigate',
+    'research-load', 'research-input-target', 'research-type', 'research-button-target', 'research-click',
+    'research-verify', 'research-screenshot', 'builder-start', 'builder-navigation', 'builder-input-target',
+    'builder-button-target', 'builder:preview_inspect', 'builder:preview_type', 'builder:preview_click',
+    'builder:preview_viewport', 'builder:preview_diagnostics', 'builder:preview_screenshot',
+    'standalone-start', 'standalone-open', 'standalone-input-target', 'standalone-button-target', 'standalone-screenshot'})
+SMOKE_ERROR_TYPES = frozenset({'ValueError', 'RuntimeError', 'TimeoutError', 'StopIteration', 'KeyError',
+    'TypeError', 'AttributeError', 'OSError', 'FileNotFoundError', 'PermissionError', 'BrowserGuard',
+    'JavascriptException', 'WebViewException', 'ImportError', 'ModuleNotFoundError'})
+
+
+class _SmokeCheckpoint:
+    """Fixed smoke-only labels; this writer never receives exception text or state."""
+    def __init__(self, home, report):
+        self.root = self.path = self.home = None
+        try:
+            if not isinstance(home, str) or not home or not isinstance(report, str) or not report:
+                return
+            root = Path(os.path.abspath(report)).parent
+            data = Path(os.path.abspath(home))
+            if data.parent != root or data.name != 'state' or not self._plain(root):
+                return
+            try:
+                data.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if not self._plain(data): return
+            self.root, self.path, self.home = root, root / 'native-smoke-checkpoint.json', data
+        except Exception:
+            pass
+
+    @staticmethod
+    def _plain(path, *, file=False):
+        import stat
+        current = path
+        first = True
+        while True:
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                if not (first and file):
+                    return False
+            else:
+                if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
+                    return False
+                if first and file:
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        return False
+                elif not stat.S_ISDIR(info.st_mode):
+                    return False
+            if current.parent == current:
+                return True
+            first = False
+            current = current.parent
+
+    def write(self, phase, *, error_type=None, error_category='none'):
+        temporary = None
+        try:
+            if (self.path is None or phase not in SMOKE_PHASES
+                    or error_category not in ('none', 'startup-failure', 'smoke-failure')
+                    or not self._plain(self.path, file=True)):
+                return False
+            try:
+                self.home.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                if not self._plain(self.home): return False
+            payload = {'schema': 1, 'phase': phase, 'error_type':
+                None if error_type is None else error_type if error_type in SMOKE_ERROR_TYPES else 'unclassified',
+                'error_category': error_category}
+            raw = (json.dumps(payload, separators=(',', ':'), sort_keys=True) + '\n').encode('utf-8')
+            if len(raw) > 2048:
+                return False
+            import tempfile
+            with tempfile.NamedTemporaryFile(dir=self.root, prefix='.smoke-checkpoint-', delete=False) as handle:
+                temporary = Path(handle.name)
+                handle.write(raw)
+            if not self._plain(self.path, file=True) or not self._plain(temporary, file=True):
+                return False
+            os.replace(temporary, self.path)
+            temporary = None
+            return True
+        except Exception:
+            return False
+        finally:
+            if temporary is not None:
+                try:
+                    if self._plain(temporary, file=True): temporary.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+
+def _smoke_checkpoint(phase, *, error_type=None, error_category='none'):
+    if ('--smoke-test' in sys.argv and '--forge-update' not in sys.argv
+            and '--forge-update-protocol-smoke' not in sys.argv and _ACTIVE_SMOKE_CHECKPOINT is not None):
+        _ACTIVE_SMOKE_CHECKPOINT.write(phase, error_type=error_type, error_category=error_category)
 
 
 class Bridge:
@@ -794,18 +897,26 @@ def _tray(api):
 
 
 def main():
-    if '--smoke-test' in sys.argv and not os.getenv('FORGE_DATA_DIR'):
-        raise ValueError('Native smoke requires an explicit disposable FORGE_DATA_DIR.')
     if '--forge-update' in sys.argv:
         from forge_native_handoff import helper_entry
         return helper_entry()
     if '--forge-update-protocol-smoke' in sys.argv:
         from forge_native_handoff import protocol_smoke_entry
         return protocol_smoke_entry()
+    if '--smoke-test' in sys.argv and not os.getenv('FORGE_DATA_DIR'):
+        raise ValueError('Native smoke requires an explicit disposable FORGE_DATA_DIR.')
+    if '--smoke-test' in sys.argv:
+        global _ACTIVE_SMOKE_CHECKPOINT
+        _ACTIVE_SMOKE_CHECKPOINT = _SmokeCheckpoint(os.getenv('FORGE_DATA_DIR'), os.getenv('LOCAL_AI_SMOKE_PATH'))
+        _smoke_checkpoint('startup-imports')
     import webview
     import uvicorn
     from model_manager import create_app
+    _smoke_checkpoint('startup-imports-ready')
+    _smoke_checkpoint('logging-start')
     directory = setup_logging()
+    _smoke_checkpoint('logging-ready')
+    _smoke_checkpoint('singleton-start')
     singleton = SingleCoordinator(directory)
     if not singleton.acquire():
         if os.name == 'nt':
@@ -825,10 +936,14 @@ def main():
                 user.SetForegroundWindow(hwnd)
         singleton.close()
         return
+    _smoke_checkpoint('singleton-ready')
     api = Bridge()
     sock = None
     try:
+        _smoke_checkpoint('service-start')
         service = api._ensure_service()
+        _smoke_checkpoint('service-ready')
+        _smoke_checkpoint('http-start')
         app = create_app(service=service, auth=api._pairing)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind(('127.0.0.1', int(os.getenv('FORGE_PORT', '0'))))
@@ -838,22 +953,29 @@ def main():
         api._lifecycle.server = server
         server_thread = threading.Thread(target=lambda: server.run(sockets=[sock]), name='forge-coordinator-http', daemon=True)
         server_thread.start()
+        _smoke_checkpoint('http-ready')
+        _smoke_checkpoint('background-start')
         background = getattr(service, 'start_background', None)
         if background:
             background()
+        _smoke_checkpoint('background-ready')
+        _smoke_checkpoint('host-hooks-start')
         shortcut = service.dispatch('settings', {}).get('emergency_shortcut', 'Ctrl+Alt+Shift+S')
         api._hotkey = EmergencyHotkey(api._emergency_stop, shortcut)
         api._hotkey.start()
         _tray(api)
         from forge_update_monitor import start_native_update_monitor
         start_native_update_monitor(service)
+        _smoke_checkpoint('host-hooks-ready')
         webview.settings['ALLOW_FILE_URLS'] = False
         webview.settings['OPEN_DEVTOOLS_IN_DEBUG'] = False
+        _smoke_checkpoint('window-create')
         api._window = webview.create_window('Forge', url=api._server_url, js_api=api,
                                            width=1180, height=820, min_size=(360, 150),
                                            maximized=True,
                                            hidden='--background' in sys.argv,
                                            background_color='#171717', text_select=True)
+        _smoke_checkpoint('window-created')
         api._visible = '--background' not in sys.argv
         api._window.events.closing += api._on_closing
         api._window.events.shown += api.restrict_navigation
@@ -868,6 +990,7 @@ def main():
         if '--smoke-test' in sys.argv:
             def smoke():
                 result = {'smoke_phase': 'workspace-ready'}
+                _smoke_checkpoint('workspace-ready')
                 try:
                     deadline = time.monotonic() + 25
                     while time.monotonic() < deadline:
@@ -880,6 +1003,7 @@ def main():
                     if not result.get('ui', {}).get('composer') or not result['ui']['textarea']:
                         raise ValueError('React workspace did not render its composer.')
                     result['smoke_phase'] = 'workspace-size'
+                    _smoke_checkpoint(result['smoke_phase'])
                     result['launch_maximized'] = api._native(lambda form: str(form.WindowState) == 'Maximized')
                     if not result['launch_maximized']:
                         raise ValueError('Forge did not launch with its workspace maximized.')
@@ -911,6 +1035,7 @@ def main():
                         if not result['handoff_seed']['trusted_main']:
                             raise ValueError('Only the actual main document may own native update authority.')
                     result['smoke_phase'] = 'library'
+                    _smoke_checkpoint(result['smoke_phase'])
                     starters = [skill for skill in api.call('skills')['skills'] if skill.get('builtin')]
                     if len(starters) != 24 or not all(skill['enabled'] and skill['automatic'] for skill in starters):
                         raise ValueError('The packaged starter library was not prepared correctly.')
@@ -927,6 +1052,7 @@ def main():
                     result['library'] = {'starter_skills': len(starters), 'discover_cards': cards, 'rendered': True}
                     api._window.evaluate_js("document.querySelector('.new-chat').click()")
                     result['smoke_phase'] = 'host-lifecycle'
+                    _smoke_checkpoint(result['smoke_phase'])
                     result.update(hud=api.mode('hud'), peek=api.mode('hud', True), full=api.mode('full'),
                                   pin=api.pin(True), unpin=api.pin(False), host=api.call('host_status'),
                                   projects=api.call('projects'), size=api._native(lambda form: [form.Width, form.Height]))
@@ -966,6 +1092,7 @@ def main():
                             'model': current['model'], 'audio_memory_only': True}
                     if '--native-browser-smoke' in sys.argv:
                         result['smoke_phase'] = 'research-start'
+                        _smoke_checkpoint(result['smoke_phase'])
                         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
                         class Fixture(BaseHTTPRequestHandler):
                             def do_GET(self):
@@ -992,26 +1119,34 @@ def main():
                                     raise ValueError(outcome.get('error', 'Native browser fixture failed'))
                                 return outcome
                             result['smoke_phase'] = 'research-navigate'
+                            _smoke_checkpoint(result['smoke_phase'])
                             tool('browser_navigate', {'url': url})
                             result['smoke_phase'] = 'research-load'
+                            _smoke_checkpoint(result['smoke_phase'])
                             deadline = time.monotonic() + 20
                             while browser.native.status()['loading'] and time.monotonic() < deadline:
                                 time.sleep(.1)
                             inspected = tool('browser_inspect', {})
                             result['smoke_phase'] = 'research-input-target'
+                            _smoke_checkpoint(result['smoke_phase'])
                             field = next(t for t in inspected['targets'] if t['tag'] == 'input')
                             result['smoke_phase'] = 'research-type'
+                            _smoke_checkpoint(result['smoke_phase'])
                             tool('browser_type', {'snapshot_id': inspected['snapshot_id'], 'selector': field['selector'], 'text': 'Native WebView2 works'})
                             inspected = tool('browser_inspect', {})
                             result['smoke_phase'] = 'research-button-target'
+                            _smoke_checkpoint(result['smoke_phase'])
                             button = next(t for t in inspected['targets'] if t['tag'] == 'button')
                             result['smoke_phase'] = 'research-click'
+                            _smoke_checkpoint(result['smoke_phase'])
                             tool('browser_click', {'snapshot_id': inspected['snapshot_id'], 'selector': button['selector']})
                             inspected = tool('browser_inspect', {})
                             result['smoke_phase'] = 'research-verify'
+                            _smoke_checkpoint(result['smoke_phase'])
                             if 'Native WebView2 works' not in inspected['text']:
                                 raise ValueError('Native form edit/click did not update the fixture.')
                             result['smoke_phase'] = 'research-screenshot'
+                            _smoke_checkpoint(result['smoke_phase'])
                             capture = tool('browser_screenshot', {})
                             result['native_browser'] = dict(engine='WebView2', bridge_exposed=browser.native.view.evaluate('typeof window.pywebview'),
                                 fixture_updated=True, screenshot_bytes=Path(capture['artifact']).stat().st_size,
@@ -1023,6 +1158,7 @@ def main():
                         # Exercise the separately owned preview controller, not
                         # merely the research browser's shared DOM tools.
                         result['smoke_phase'] = 'builder-start'
+                        _smoke_checkpoint(result['smoke_phase'])
                         manager = service.get_builder()
                         project = service.create_project({'name': 'Disposable preview fixture', 'git': False})
                         brief = manager.save({'project_id': project['id'], 'title': 'Native preview fixture',
@@ -1040,6 +1176,7 @@ def main():
                             # before looking for Builder, then wait for React to render.
                             api._window.evaluate_js("document.querySelector('button[aria-label=\"Close workspace panel\"]')?.click();document.querySelector('button[aria-label=\"Open sidebar\"]')?.click();true")
                             result['smoke_phase'] = 'builder-navigation'
+                            _smoke_checkpoint(result['smoke_phase'])
                             opened = False; deadline = time.monotonic()+10
                             api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='Tools');button?.click();return true;})()")
                             while not opened and time.monotonic()<deadline:
@@ -1065,6 +1202,7 @@ def main():
                             preview_run = {'id': 'preview-native-smoke', 'project_id': project['id'], 'settings': service.store.get_settings()}
                             def preview_tool(name, arguments):
                                 result['smoke_phase'] = 'builder:' + name
+                                _smoke_checkpoint(result['smoke_phase'])
                                 try:
                                     outcome = manager.execute(preview_run, name, {'id': preview['id'], **arguments}, cancel)
                                     if outcome.get('ok') is False: raise ValueError(outcome.get('error', 'Preview fixture failed.'))
@@ -1088,10 +1226,12 @@ def main():
                                     raise
                             inspected = preview_tool('preview_inspect', {})
                             result['smoke_phase'] = 'builder-input-target'
+                            _smoke_checkpoint(result['smoke_phase'])
                             target = next(t for t in inspected['targets'] if t['tag']=='input')
                             preview_tool('preview_type', {'snapshot_id': inspected['snapshot_id'], 'selector': target['selector'], 'text': 'Isolated preview works'})
                             inspected = preview_tool('preview_inspect', {})
                             result['smoke_phase'] = 'builder-button-target'
+                            _smoke_checkpoint(result['smoke_phase'])
                             target = next(t for t in inspected['targets'] if t['tag']=='button')
                             arguments = {'id': preview['id'], 'snapshot_id': inspected['snapshot_id'], 'selector': target['selector']}
                             rejected = manager.execute({**preview_run,'id':'other-preview-run'}, 'preview_click', arguments, cancel)
@@ -1121,6 +1261,7 @@ def main():
                         # The actual workspace must discover that identity while
                         # preview_open waits for its guarded native pane to appear.
                         result['smoke_phase'] = 'standalone-start'
+                        _smoke_checkpoint(result['smoke_phase'])
                         standalone_run = {'id':'standalone-native-smoke','project_id':project['id'],
                             'settings':service.store.get_settings()}
                         standalone = manager.execute(standalone_run,'preview_start',{'cwd':'site','mode':'static'},cancel)
@@ -1130,6 +1271,7 @@ def main():
                             while not api._window.evaluate_js("document.body.innerText.includes('Disposable preview fixture')") and time.monotonic()<deadline:
                                 time.sleep(.05)
                             result['smoke_phase'] = 'standalone-open'
+                            _smoke_checkpoint(result['smoke_phase'])
                             manager.execute(standalone_run,'preview_open',{'id':standalone['id']},cancel)
                             deadline=time.monotonic()+10
                             while (not manager.previews.browser.status().get('visible') or manager.previews.browser.status().get('loading')) and time.monotonic()<deadline:
@@ -1139,11 +1281,13 @@ def main():
                             manager.execute(standalone_run,'preview_viewport',{'id':standalone['id']},cancel)
                             inspected=manager.execute(standalone_run,'preview_inspect',{'id':standalone['id']},cancel)
                             result['smoke_phase'] = 'standalone-input-target'
+                            _smoke_checkpoint(result['smoke_phase'])
                             target=next(t for t in inspected['targets'] if t['tag']=='input')
                             manager.execute(standalone_run,'preview_type',{'id':standalone['id'],'snapshot_id':inspected['snapshot_id'],
                                 'selector':target['selector'],'text':'Standalone preview works'},cancel)
                             inspected=manager.execute(standalone_run,'preview_inspect',{'id':standalone['id']},cancel)
                             result['smoke_phase'] = 'standalone-button-target'
+                            _smoke_checkpoint(result['smoke_phase'])
                             target=next(t for t in inspected['targets'] if t['tag']=='button')
                             manager.execute(standalone_run,'preview_click',{'id':standalone['id'],'snapshot_id':inspected['snapshot_id'],
                                 'selector':target['selector']},cancel)
@@ -1151,6 +1295,7 @@ def main():
                             if 'Standalone preview works' not in inspected['text']:
                                 raise ValueError('Standalone preview controls did not update the fixture.')
                             result['smoke_phase'] = 'standalone-screenshot'
+                            _smoke_checkpoint(result['smoke_phase'])
                             capture=manager.execute(standalone_run,'preview_screenshot',{'id':standalone['id']},cancel)
                             result['native_standalone_preview']={'pane_visible':True,'fixture_updated':True,
                                 'without_builder':standalone.get('builder_id') is None,
@@ -1161,11 +1306,15 @@ def main():
                 except Exception as exc:
                     result['error_type'] = type(exc).__name__
                     result['error'] = str(exc)
+                    _smoke_checkpoint('smoke-failed', error_type=type(exc).__name__, error_category='smoke-failure')
                 finally:
                     destination = os.getenv('LOCAL_AI_SMOKE_PATH')
                     if destination:
                         Path(destination).write_text(json.dumps(result), encoding='utf-8')
+                    if 'error' not in result:
+                        _smoke_checkpoint('smoke-complete')
                     api.quit()
+            _smoke_checkpoint('webview-start')
             webview.start(smoke, **options)
         else:
             webview.start(**options)
@@ -1181,7 +1330,8 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except Exception:
+    except Exception as exc:
+        _smoke_checkpoint('startup-failed', error_type=type(exc).__name__, error_category='startup-failure')
         log.exception('Fatal startup failure')
         if os.name == 'nt':
             import ctypes
