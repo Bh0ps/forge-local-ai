@@ -24,6 +24,7 @@ UNAVAILABLE = 'In-app installation is unavailable in this version. Save your wor
 MAX_PARTICIPANTS = 512
 MAX_RECEIPTS = 1024
 MAX_FRAME = 65536
+_DEFAULT_PROTOCOL_TIMEOUT = object()
 TOKEN = re.compile(r'[0-9a-f]{64}\Z')
 ATTEMPT = re.compile(r'[0-9a-f]{32}\Z')
 REASONS = frozenset({'handoff_unavailable', 'workspace_loading', 'workspace_changed',
@@ -448,10 +449,22 @@ class PipeChannel:
     def read(self, timeout=15, *, cancel=None):
         if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 30:
             raise HandoffRejected()
-        deadline = self.clock() + timeout
+        return self._read_until(self.clock() + timeout, cancel=cancel)
+
+    def _read_ready(self, deadline, *, cancel=None):
+        # Only retained-helper verification gets a longer read budget. AUTH,
+        # control and COMMITTED reads retain their existing protocol bounds.
+        if (type(deadline) not in (int, float) or not math.isfinite(deadline)
+                or not 0 < deadline - self.clock() <= 45):
+            raise HandoffRejected('helper_failed')
+        return self._read_until(deadline, cancel=cancel)
+
+    def _read_until(self, deadline, *, cancel=None):
         with self.read_lock:
             while True:
                 if cancel is not None and cancel.is_set():
+                    raise HandoffRejected('helper_failed')
+                if self.clock() >= deadline:
                     raise HandoffRejected('helper_failed')
                 newline = self.pending.find(b'\n')
                 if newline >= 0:
@@ -467,7 +480,7 @@ class PipeChannel:
                     if not isinstance(value, dict):
                         raise HandoffRejected()
                     return value
-                if len(self.pending) >= MAX_FRAME or self.clock() >= deadline:
+                if len(self.pending) >= MAX_FRAME:
                     raise HandoffRejected('helper_failed')
                 try:
                     available = self.available(self.reader)
@@ -548,8 +561,31 @@ class NativeHelperReady:
 
 class HelperTransport:
     """Only the verified owned helper process is stopped on failed handoff."""
-    def __init__(self, bootstrap, auth, *, popen=subprocess.Popen, timeout=15):
-        self.bootstrap, self.auth, self.timeout = bootstrap, dict(auth), timeout
+    def __init__(self, bootstrap, auth, *, popen=subprocess.Popen,
+                 timeout=_DEFAULT_PROTOCOL_TIMEOUT, ready_timeout=None, clock=time.monotonic):
+        custom_timeout = timeout is not _DEFAULT_PROTOCOL_TIMEOUT
+        self.timeout = timeout if custom_timeout else 15
+        # Explicit legacy timeout callers keep the same budget for both reads.
+        self.ready_timeout = (self.timeout if custom_timeout else 45) if ready_timeout is None else ready_timeout
+        if (type(self.timeout) not in (int, float) or not math.isfinite(self.timeout) or not 0 < self.timeout <= 30
+                or type(self.ready_timeout) not in (int, float) or not math.isfinite(self.ready_timeout)
+                or not 0 < self.ready_timeout <= 45):
+            raise HandoffRejected()
+        self.bootstrap, self.auth, self.clock = bootstrap, dict(auth), clock
+        from forge_update_handoff import NativeBootstrap, NativePrepared, NativeReservation
+        if (type(bootstrap) is NativeBootstrap and type(bootstrap.prepared) is NativePrepared
+                and type(bootstrap.prepared.reservation) is NativeReservation):
+            self.ready_expires = bootstrap.prepared.reservation.expires
+            if type(self.ready_expires) not in (int, float) or not math.isfinite(self.ready_expires):
+                raise HandoffRejected()
+            if self.clock() >= self.ready_expires:
+                raise HandoffRejected('confirmation_expired')
+        elif custom_timeout and self.ready_timeout <= 30:
+            # Short inert transport fixtures have no native reservation. The
+            # shipped default always requires the private owned expiry.
+            self.ready_expires = None
+        else:
+            raise HandoffRejected()
         self.cancel = threading.Event()
         self.ready = None
         self.commit_sent = False
@@ -563,19 +599,42 @@ class HelperTransport:
             self.process = popen(list(command), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, bufsize=0,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-            self.channel = PipeChannel(self.process.stdout, self.process.stdin)
+            self.channel = PipeChannel(self.process.stdout, self.process.stdin, clock=self.clock)
             self.channel.write(self.auth)
         except Exception:
             self.stop()
             raise HandoffRejected('helper_failed') from None
 
     def await_ready(self):
-        value = self.channel.read(self.timeout, cancel=self.cancel)
-        if not matching_peer(value, self.auth, 'READY', self.process.pid):
-            raise HandoffRejected('helper_failed')
-        self.ready = NativeHelperReady(self.auth['operation_id'], self.auth['session'],
-            self.auth['nonce'], self.process.pid, self)
-        return self.ready
+        clock = getattr(self, 'clock', time.monotonic)
+        expires = getattr(self, 'ready_expires', None)
+        deadline = clock() + getattr(self, 'ready_timeout', self.timeout)
+        if expires is not None:
+            deadline = min(deadline, expires)
+        try:
+            if self.cancel.is_set():
+                raise HandoffRejected('helper_failed')
+            if expires is not None and clock() >= expires:
+                raise HandoffRejected('confirmation_expired')
+            if deadline - clock() > 30:
+                value = self.channel._read_ready(deadline, cancel=self.cancel)
+            else:
+                value = self.channel.read(deadline - clock(), cancel=self.cancel)
+            # Buffered or delayed replies never extend this attempt's authority.
+            if self.cancel.is_set():
+                raise HandoffRejected('helper_failed')
+            if expires is not None and clock() >= expires:
+                raise HandoffRejected('confirmation_expired')
+            if clock() >= deadline or not matching_peer(value, self.auth, 'READY', self.process.pid):
+                raise HandoffRejected('helper_failed')
+            self.ready = NativeHelperReady(self.auth['operation_id'], self.auth['session'],
+                self.auth['nonce'], self.process.pid, self)
+            return self.ready
+        except Exception:
+            self.cancel.set()
+            if expires is not None and clock() >= expires:
+                raise HandoffRejected('confirmation_expired') from None
+            raise
 
     def commit(self, ready, *, admit=None):
         if ready is not self.ready or self.cancel.is_set() or self.commit_sent:
