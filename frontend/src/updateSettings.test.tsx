@@ -1,6 +1,9 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { UpdateSettings } from './updateSettings';
+import { UpdateHandoffSurface } from './updateHandoff';
+import { updateReadiness } from './updateReadiness';
+const attempt='a'.repeat(32);
 
 const current = { current_version: '5.1.1', state: 'current', automatic_install_available: false,
   signing_setup_required: true, message: 'Unsigned fixture preview.', checked_at: 1_000_000 };
@@ -19,9 +22,27 @@ function bridge(status: unknown, checking: unknown = { ...current, state: 'check
 }
 const statusCalls = (call: ReturnType<typeof bridge>) => call.mock.calls.filter(([action]) => action === 'update_status').length;
 
-afterEach(() => { vi.useRealTimers(); });
+afterEach(() => { updateReadiness.aborted(attempt);updateReadiness.dismiss();vi.useRealTimers(); });
 
 describe('update settings', () => {
+  it('returns focus to the enabled Install trigger after confirmed prepared cancellation',async()=>{
+    const ready={...current,state:'ready',automatic_install_available:true,safe_handoff_available:true,verified_download_available:true,verified:true,release:{version:'5.1.4',size:20,trust_mode:'ed25519'}};let finish!:(value:unknown)=>void;
+    bridge(ready,undefined,{update_handoff_begin:{attempt_id:attempt,challenge:'b'.repeat(64)},update_handoff_ack:{phase:'prepared',confirmation:'c'.repeat(64)},update_handoff_commit:()=>new Promise(resolve=>{finish=resolve;}),update_handoff_abort:()=>{finish({attempt_id:attempt,blocked:true,phase:'failed'});return {attempt_id:attempt,aborted:true,not_executed:true};}});
+    render(<><UpdateSettings notify={vi.fn()}/><UpdateHandoffSurface/></>);const button=await screen.findByRole('button',{name:'Install & restart'});button.focus();fireEvent.click(button);await screen.findByText('Preparing the verified restart. Forge will stay open until it is ready.');expect((button as HTMLButtonElement).disabled).toBe(true);
+    await act(async()=>fireEvent.click(screen.getByRole('button',{name:'Keep working'})));await waitFor(()=>expect((button as HTMLButtonElement).disabled).toBe(false));expect(updateReadiness.canEdit()).toBe(true);expect(document.activeElement).toBe(button);
+  });
+  it('keeps user-selected focus after cancellation while a late commit response settles',async()=>{
+    const ready={...current,state:'ready',automatic_install_available:true,safe_handoff_available:true,verified_download_available:true,verified:true,release:{version:'5.1.4',size:20,trust_mode:'ed25519'}};let finish!:(value:unknown)=>void;
+    bridge(ready,undefined,{update_handoff_begin:{attempt_id:attempt,challenge:'b'.repeat(64)},update_handoff_ack:{phase:'prepared',confirmation:'c'.repeat(64)},update_handoff_commit:()=>new Promise(resolve=>{finish=resolve;}),update_handoff_abort:{attempt_id:attempt,aborted:true,not_executed:true}});
+    render(<><UpdateSettings notify={vi.fn()}/><button>Continue elsewhere</button><UpdateHandoffSurface/></>);const button=await screen.findByRole('button',{name:'Install & restart'});button.focus();fireEvent.click(button);await screen.findByText('Preparing the verified restart. Forge will stay open until it is ready.');await act(async()=>fireEvent.click(screen.getByRole('button',{name:'Keep working'})));expect(updateReadiness.canEdit()).toBe(true);
+    const other=screen.getByRole('button',{name:'Continue elsewhere'});other.focus();await act(async()=>finish({attempt_id:attempt,blocked:true,phase:'failed'}));await waitFor(()=>expect((button as HTMLButtonElement).disabled).toBe(false));expect(document.activeElement).toBe(other);
+  });
+  it('restores focus only after a lost abort reply is later confirmed over native status',async()=>{
+    const ready={...current,state:'ready',automatic_install_available:true,safe_handoff_available:true,verified_download_available:true,verified:true,release:{version:'5.1.4',size:20,trust_mode:'ed25519'}};
+    bridge(ready,undefined,{update_handoff_begin:{attempt_id:attempt,challenge:'b'.repeat(64)},update_handoff_ack:{phase:'prepared',confirmation:'c'.repeat(64)},update_handoff_commit:{attempt_id:attempt,blocked:true,phase:'failed',reason:'helper_failed'},update_handoff_abort:()=>Promise.reject(new Error('Synthetic lost reply')),update_handoff_status:{attempt_id:attempt,aborted:true,not_executed:true,phase:'failed'}});
+    render(<><UpdateSettings notify={vi.fn()}/><UpdateHandoffSurface/></>);const button=await screen.findByRole('button',{name:'Install & restart'});button.focus();fireEvent.click(button);await screen.findByRole('button',{name:'Confirm cancellation'});await waitFor(()=>expect((button as HTMLButtonElement).disabled).toBe(false));expect(updateReadiness.canEdit()).toBe(false);expect(document.activeElement).not.toBe(button);
+    await act(async()=>window.dispatchEvent(new CustomEvent('forge:update-handoff',{detail:{attempt_id:attempt}})));expect(updateReadiness.canEdit()).toBe(true);expect(document.activeElement).toBe(button);
+  });
   it('offers explicit previous-version recovery only for a native authenticated completed operation',async()=>{
     const call=bridge({...current,state:'installed',safe_rollback_available:true,operation_id:'synthetic-completed-operation'},undefined,{update_handoff_begin:{blocked:true,reason:'native_input'}});render(<UpdateSettings notify={vi.fn()}/>);const button=await screen.findByRole('button',{name:'Restore previous version & restart',hidden:true});fireEvent.click(screen.getByText('Recovery'));fireEvent.click(button);
     await waitFor(()=>expect(call).toHaveBeenCalledWith('update_handoff_begin',{kind:'rollback'}));expect(call.mock.calls.some(([action])=>['update_apply','update_rollback'].includes(action))).toBe(false);expect(screen.getByText('Forge will confirm your saved work and verify the retained installation backup before restoring it. Your Forge data stays on this computer.')).toBeTruthy();
