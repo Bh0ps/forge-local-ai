@@ -1,13 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUpRight, Download, FileDown, LoaderCircle, PackageCheck, RefreshCw, ShieldAlert, ShieldCheck, X } from 'lucide-react';
+import { ArrowUpRight, Download, FileDown, History, LoaderCircle, PackageCheck, RefreshCw, ShieldAlert, ShieldCheck, X } from 'lucide-react';
 import { api, errorText } from './api';
 import { Badge, ErrorNotice, Field, Toggle } from './components';
 import type { Settings } from './types';
 import { useWorkspaceVisibility } from './workspaceVisibility';
 import './updateSettings.css';
+import { requestUpdateRestart } from './updateHandoff';
+import { isNative } from './api';
 
 interface Update {
   state?: string; current_version: string; automatic_install_available: boolean; verified_download_available?: boolean; install_block_reason?: string;
+  safe_handoff_available?: boolean; safe_rollback_available?: boolean;
   signing_setup_required: boolean; inspection_required?: boolean; publisher_proof_configured?: boolean; message: string;
   release?: { version: string; size: number; url?: string; html_url?: string; prerelease?: boolean;
     trust_mode?: 'ed25519' | 'authenticode' | 'manual'; verification_error?: string };
@@ -30,6 +33,7 @@ export function UpdateSettings({ notify, settings = {}, onChange }: {
   const [status, setStatus] = useState<Update>();
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [pendingAction, setPendingAction] = useState('');
   const [savingPreference, setSavingPreference] = useState(false), [exporting, setExporting] = useState(false);
+  const [installing,setInstalling]=useState(false),installPending=useRef(false);
   const visible = useWorkspaceVisibility();
   const mounted = useRef(true), generation = useRef(0), actionPending = useRef(false), preferencePending = useRef(false), exportPending = useRef(false);
   const channel = settings.update_channel === 'stable' ? 'stable' : 'preview';
@@ -90,6 +94,7 @@ export function UpdateSettings({ notify, settings = {}, onChange }: {
     } catch (exception) { if (mounted.current) setError(errorText(exception)); }
     finally { exportPending.current = false; if (mounted.current) setExporting(false); }
   }
+  async function restart(kind:'apply'|'rollback'='apply'){if(installPending.current)return;installPending.current=true;setInstalling(true);try{await requestUpdateRestart(kind);}finally{installPending.current=false;if(mounted.current)setInstalling(false);}}
   const release = status?.release;
   const releaseLink = publicLink(release?.html_url, releasesPage), downloadLink = publicLink(release?.url, releaseLink);
   const operationError = error || status?.operation_error || status?.error;
@@ -98,6 +103,8 @@ export function UpdateSettings({ notify, settings = {}, onChange }: {
   const freshCheckNeeded = Boolean(release && (status?.state === 'error' || status?.last_check_failed));
   const manual = release?.trust_mode === 'manual' || Boolean(release?.verification_error) || signatureMismatch || freshCheckNeeded;
   const canDownload = Boolean(release && (status?.verified_download_available ?? status?.automatic_install_available) && !manual && !status?.inspection_required);
+  const canInstall=Boolean(isNative() && status?.safe_handoff_available===true && status?.automatic_install_available && status?.verified && canDownload && status.state==='ready');
+  const canRestore=Boolean(isNative() && status?.safe_rollback_available===true && typeof status.operation_id==='string' && status.operation_id.length>0);
   const publisherProof = release?.trust_mode === 'ed25519' || (!release?.trust_mode && status?.signature?.mode === 'ed25519');
   const trusted = canDownload || release?.trust_mode === 'ed25519' || release?.trust_mode === 'authenticode';
   const verificationTitle = manual || !trusted ? 'Manual installation' : publisherProof ?
@@ -139,12 +146,13 @@ export function UpdateSettings({ notify, settings = {}, onChange }: {
         {canDownload && !status?.verified && <button type="button" className="secondary" disabled={busy || active} onClick={() => void action('update_download')}>
           <Download size={14} />Download & verify</button>}
         {active && <button type="button" className="text-button" disabled={busy} onClick={() => void action('update_cancel')}><X size={13} />Cancel</button>}
+        {canInstall && <button type="button" className="primary" disabled={busy || active || installing} onClick={()=>void restart()}>{installing?'Checking saved work…':'Install & restart'}</button>}
       </div>
-      {release && !manual && trusted && <small className="update-install-note">In-app installation is unavailable in this version. Save your work before installing manually.</small>}
+      {release && !manual && trusted && <small className="update-install-note">{canInstall ? 'Forge will confirm your saved work before restarting.' : 'In-app installation is unavailable in this version. Save your work before installing manually.'}</small>}
       <div className="update-links"><a href={releaseLink} target="_blank" rel="noopener noreferrer">Release notes <ArrowUpRight size={12} /></a>
         {release && <a href={downloadLink} target="_blank" rel="noopener noreferrer">Download installer <Download size={12} /></a>}</div>
       <small>{status?.checked_at ? `Last checked ${new Date(status.checked_at * 1000).toLocaleString()}` : 'No update check yet.'}</small>
-      {status?.operation_id && <details><summary>Recovery</summary><p className="muted">In-app restore is unavailable in this version. Inspect retained backups before any manual repair.</p></details>}
+      {status?.operation_id && <details><summary>Recovery</summary><p className="muted">{canRestore ? 'Forge will confirm your saved work and verify the retained installation backup before restoring it. Your Forge data stays on this computer.' : 'In-app restore is unavailable in this version. Inspect retained backups before any manual repair.'}</p>{canRestore && <button type="button" className="secondary" disabled={busy || active || installing} onClick={()=>void restart('rollback')}><History size={14}/>{installing?'Checking saved work…':'Restore previous version & restart'}</button>}</details>}
     </section>
     <h2>Diagnostics</h2>
     <section className="settings-card update-settings-card"><p className="muted">Share app and system versions, configuration and counts. Conversations, credentials and private paths stay on this computer.</p>

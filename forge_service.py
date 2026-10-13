@@ -80,7 +80,17 @@ class ForgeService:
                     if not self.integrations: return []
                     project=self.store.get_project(project_id) if project_id else None
                     return self.integrations.discover_skills(project)
-                self.draft_manager=DraftManager(self.store,catalog)
+                def confirm(drafts,data):
+                    if 'attempt_id' not in data and 'delivery_ids' in data:
+                        with self.admission_lock:
+                            if self.stop_event.is_set() or self.update_manager and (
+                                    self.update_manager.applying or self.update_manager.shutting_down):
+                                raise ValueError('Forge is preparing an update. Saved speech confirmation is paused.')
+                            return drafts.confirm_deliveries(data,getattr(self,'host_dictation_guard',None))
+                    manager=self.update_manager
+                    if manager is None: raise ValueError('Native workspace confirmation is unavailable.')
+                    return manager.confirm_draft(drafts,data)
+                self.draft_manager=DraftManager(self.store,catalog,confirm)
             return self.draft_manager
 
     def get_submissions(self):
@@ -322,7 +332,7 @@ class ForgeService:
     def bootstrap(self):
         runs=self.store.runs(limit=200)
         from forge_workspace_ui import WorkspaceUI
-        return dict(version='5.1.2',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
+        return dict(version='5.1.3',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
                     chats=self.store.list_chats(),runs=runs,goals=[self.goal_view(goal,runs) for goal in self.store.active_goals()],
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -347,7 +357,7 @@ class ForgeService:
         if action in ('start_chat','command','plan_build','builder_start','builder_start_goal') and data.get('client_submission_id'):
             return self.get_submissions().admit(action,data,lambda clean:self._dispatch(action,clean))
         if action=='submission_get': return self.get_submissions().get(data)
-        if action in ('draft_get','draft_save','draft_clear'): return self.get_drafts().dispatch(action,data)
+        if action in ('draft_get','draft_save','draft_clear','draft_confirm'): return self.get_drafts().dispatch(action,data)
         if action.startswith('ai_workflow_'): return self.get_ai_workflow().dispatch(action,data)
         if action=='bootstrap': return self.bootstrap()
         if action=='settings':
@@ -415,7 +425,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='5.1.2')
+                    self.update_manager=UpdateManager(self,current_version='5.1.3')
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)
@@ -442,7 +452,11 @@ class ForgeService:
         if action=='chats': return {'chats':self.store.list_chats(data.get('project_id'),archived=None if data.get('archived')=='all' else data.get('archived',False))}
         if action in ('chat_move','chat_archive','chat_delete'):
             from forge_chats import dispatch_chat
-            return dispatch_chat(self,action,data)
+            result=dispatch_chat(self,action,data)
+            if action=='chat_delete' and result.get('ok') is True:
+                callback=getattr(self,'host_chat_input_deleted',None)
+                if callable(callback): callback(result['deleted'])
+            return result
         if action=='project_delete':
             if self.builder_manager and hasattr(self.builder_manager,'close_project'): self.builder_manager.close_project(data['id'])
             from forge_chats import dispatch_chat
@@ -1280,7 +1294,10 @@ class ForgeService:
         # UTC roundtrip normalizes nonexistent spring-forward local times.
         return candidate.astimezone(timezone.utc)
     def schedule_run(self,schedule,source_key=None):
-        with self.schedule_lock: return self._schedule_run(schedule,source_key)
+        with self.admission_lock:
+            if self.update_manager and self.update_manager.applying:
+                raise ValueError('Forge is preparing an update. Scheduled work is paused until restart.')
+            with self.schedule_lock: return self._schedule_run(schedule,source_key)
     def _schedule_run(self,schedule,source_key=None):
         if source_key:
             with self.store._connection() as db:
@@ -1300,8 +1317,12 @@ class ForgeService:
         else: result=self.jobs.start(data)
         self.store.update_run(result['id'],schedule_id=schedule['id']); return result
     def tick_schedules(self,now=None):
-        with self.schedule_lock:
-            return self._tick_schedules(now)
+        # Admission always precedes the schedule lock, including background
+        # ticks, so a handoff closes durable occurrence writes without inversion.
+        with self.admission_lock:
+            if self.update_manager and self.update_manager.applying: return
+            with self.schedule_lock:
+                return self._tick_schedules(now)
     def _tick_schedules(self,now=None):
         current=now or datetime.now(timezone.utc)
         for schedule in self.store.entities('schedules'):

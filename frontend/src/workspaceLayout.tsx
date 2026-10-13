@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, isNative } from './api';
+import { updateReadiness, useReadinessParticipant } from './updateReadiness';
 
 export interface WorkspaceLayout {sidebar_open:boolean;sidebar_width:number;right_panel_open:boolean;right_panel_width:number;right_panel_tab:string;collapsed_project_ids:string[];}
 export const DEFAULT_LAYOUT: WorkspaceLayout = {sidebar_open:true,sidebar_width:260,right_panel_open:false,right_panel_width:320,right_panel_tab:'activity',collapsed_project_ids:[]};
@@ -20,13 +21,16 @@ export function layoutClientId() {
 export function useWorkspaceLayout(enabled:boolean,notify:(message:string)=>void) {
   const [layout,setLayout]=useState<WorkspaceLayout>(DEFAULT_LAYOUT), [ready,setReady]=useState(false), [transportRevision,setTransportRevision]=useState(0);
   const touched=useRef(false), latest=useRef(layout), lastSaved=useRef(''), client=useRef(''), queue=useRef(Promise.resolve()), mounted=useRef(true);
+  const scopeGeneration=useRef(0);
   latest.current=layout;
+  const failed=useRef(false);
+  useReadinessParticipant({inspect:()=>({reasons:enabled && !ready ? ['preferences_pending'] : failed.current ? ['preferences_pending'] : []}),flushAndConfirm:async()=>{save(latest.current);await queue.current;return !failed.current && JSON.stringify(latest.current)===lastSaved.current ? {ok:true,receipts:[]} : {ok:false,reason:'preferences_pending'};}});
   useEffect(()=>{mounted.current=true;const nativeReady=()=>{if(client.current && client.current!==layoutClientId())setTransportRevision(value=>value+1);};window.addEventListener('pywebviewready',nativeReady);return()=>{mounted.current=false;window.removeEventListener('pywebviewready',nativeReady);};},[]);
-  useEffect(()=>{if(!enabled)return;let active=true;client.current=layoutClientId();void api<WorkspaceLayout>('ui_layout_get',{client_id:client.current}).then(saved=>{if(!active)return;const next=normalizeLayout(saved || {});lastSaved.current=JSON.stringify(next);if(!touched.current)setLayout(next);setReady(true);}).catch(()=>{if(active){lastSaved.current=JSON.stringify(DEFAULT_LAYOUT);setReady(true);}});return()=>{active=false;};},[enabled,transportRevision]);
-  const save=(captured:WorkspaceLayout)=>{const encoded=JSON.stringify(captured);if(encoded===lastSaved.current)return;queue.current=queue.current.catch(()=>{}).then(async()=>{if(JSON.stringify(latest.current)!==encoded)return;try{await api('ui_layout_save',{client_id:client.current,layout:captured});lastSaved.current=encoded;}catch{if(mounted.current)notify('Workspace layout could not be saved.');}});};
+  useEffect(()=>{if(!enabled)return;let active=true;const identity=layoutClientId(),generation=++scopeGeneration.current;if(client.current && client.current!==identity)touched.current=false;client.current=identity;setReady(false);lastSaved.current='';void api<WorkspaceLayout>('ui_layout_get',{client_id:identity}).then(saved=>{if(!active || generation!==scopeGeneration.current || identity!==layoutClientId())return;const next=normalizeLayout(saved || {});lastSaved.current=JSON.stringify(next);failed.current=false;if(!touched.current)setLayout(next);setReady(true);}).catch(()=>{if(active && generation===scopeGeneration.current){failed.current=true;setReady(false);notify('Workspace layout could not be loaded. Retry before restarting.');}});return()=>{active=false;};},[enabled,transportRevision]);
+  const save=(captured:WorkspaceLayout)=>{const encoded=JSON.stringify(captured),identity=client.current,generation=scopeGeneration.current;if(encoded===lastSaved.current || !ready)return;queue.current=queue.current.catch(()=>{}).then(async()=>{if(JSON.stringify(latest.current)!==encoded || identity!==client.current || identity!==layoutClientId() || generation!==scopeGeneration.current)return;try{await api('ui_layout_save',{client_id:identity,layout:captured});if(identity===client.current && identity===layoutClientId() && generation===scopeGeneration.current){lastSaved.current=encoded;failed.current=false;}}catch{failed.current=true;if(mounted.current)notify('Workspace layout could not be saved.');}});};
   useEffect(()=>{if(!ready)return;const timer=setTimeout(()=>save(layout),300);return()=>clearTimeout(timer);},[layout,ready]);
   useEffect(()=>()=>{if(client.current && touched.current)save(latest.current);},[]);
-  const update=(delta:Partial<WorkspaceLayout>)=>{touched.current=true;setLayout(previous=>normalizeLayout({...previous,...delta}));};
+  const update=(delta:Partial<WorkspaceLayout>)=>{if(!updateReadiness.canEdit())return;updateReadiness.changed();touched.current=true;setLayout(previous=>normalizeLayout({...previous,...delta}));};
   return {layout,update,ready};
 }
 export function ResizeHandle({label,value,min,max,change,reverse=false}: {label:string;value:number;min:number;max:number;change:(value:number)=>void;reverse?:boolean}) {

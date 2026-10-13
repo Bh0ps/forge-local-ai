@@ -5,6 +5,7 @@ sends context to a provider, or persists an unsent image.
 """
 from hashlib import sha256
 import json
+import re
 
 from storage import _now
 
@@ -14,9 +15,10 @@ KINDS = {'chat', 'new_chat', 'builder'}
 
 
 class DraftManager:
-    def __init__(self, store, skill_catalog=None):
+    def __init__(self, store, skill_catalog=None, confirm_callback=None):
         self.store = store
         self.skill_catalog = skill_catalog
+        self.confirm_callback = confirm_callback
 
     @staticmethod
     def _identifier(value, required=False):
@@ -166,6 +168,88 @@ class DraftManager:
                            (identity, json.dumps(record, ensure_ascii=False, allow_nan=False)))
         return self._response(record, scope, available)
 
+    def confirmation_state(self, data):
+        """Private snapshot for restart receipts; never returned by dispatch.
+
+        A read transaction binds scope ownership, the draft revision/content,
+        and saved references to one SQLite snapshot. Skills are checked again
+        at every handoff fence rather than treating a prior catalogue as trust.
+        """
+        scope = self.scope(data)
+        expected = data.get('expected_revision')
+        if type(expected) is not int or expected < 0:
+            raise ValueError('Supply the draft revision read by this window.')
+        with self.store._connection(transaction='read') as db:
+            if scope['project_id'] and not db.execute('SELECT 1 FROM projects WHERE id=?', (scope['project_id'],)).fetchone():
+                raise ValueError('This draft scope is unavailable.')
+            if scope['kind'] == 'chat':
+                row = db.execute('SELECT project_id FROM chats WHERE id=?', (scope['chat_id'],)).fetchone()
+                if not row or row['project_id'] != scope['project_id']:
+                    raise ValueError('This draft scope is unavailable.')
+            dependencies = []
+            if scope['kind'] == 'builder':
+                row = db.execute("SELECT data FROM entities WHERE kind='builders' AND id=?", (scope['builder_id'],)).fetchone()
+                builder = json.loads(row['data']) if row else None
+                if not builder or builder.get('project_id') != scope['project_id']:
+                    raise ValueError('This draft scope is unavailable.')
+                dependencies.append(builder)
+            row = db.execute("SELECT data FROM entities WHERE kind='drafts' AND id=?", (self.key(scope),)).fetchone()
+            record = json.loads(row['data']) if row else {}
+            if type(record.get('revision', 0)) is not int or record.get('revision', 0) != expected:
+                raise ValueError(CONFLICT)
+            if record and (record.get('scope') != scope or record.get('version') != 1 or record.get('id') != self.key(scope)):
+                raise ValueError('This draft scope is unavailable.')
+            content = self.content(record.get('content') or {}, scope)
+            for field, kind in (('document_ids', 'documents'), ('space_ids', 'spaces')):
+                for identifier in content[field]:
+                    row = db.execute('SELECT data FROM entities WHERE kind=? AND id=?', (kind, identifier)).fetchone()
+                    item = json.loads(row['data']) if row else None
+                    if not item or item.get('project_id') and item['project_id'] != scope['project_id'] or (
+                            kind == 'spaces' and item.get('project_ids') and scope['project_id'] not in item['project_ids']):
+                        raise ValueError('A saved draft reference is unavailable.')
+                    dependencies.append(item)
+        if content['skills']:
+            if not self.skill_catalog or self._stale(scope, {'skills': content['skills']}):
+                raise ValueError('A saved draft skill is unavailable.')
+        digest = sha256(json.dumps([scope, expected, content, dependencies], sort_keys=True,
+            separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+        return {'scope': scope, 'expected_revision': expected, 'digest': digest}
+
+    def confirm(self, data):
+        if self.confirm_callback is None:
+            raise ValueError('Native workspace confirmation is unavailable.')
+        # The coordinator callback supplies its admission gate and live attempt.
+        # It must compute confirmation_state inside that same gate.
+        return self.confirm_callback(self, data)
+
+    def confirm_deliveries(self, data, guard):
+        """Ordinary saved speech receipt, with no native restart authority.
+
+        The service calls this while holding its admission gate. A renderer may
+        edit or discard speech before saving, but cannot confirm another scope,
+        an unsaved revision, or an unknown native delivery identifier.
+        """
+        allowed = {'scope', 'kind', 'scope_kind', 'project_id', 'chat_id', 'builder_id',
+                   'expected_revision', 'delivery_ids'}
+        if not isinstance(data, dict) or set(data) - allowed:
+            raise ValueError('Use a saved draft delivery confirmation.')
+        values = data.get('delivery_ids')
+        if (not isinstance(values, list) or not 1 <= len(values) <= 16
+                or any(not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value) for value in values)
+                or len(set(values)) != len(values) or type(data.get('expected_revision')) is not int
+                or data['expected_revision'] < 1):
+            raise ValueError('Use the saved draft revision and exact delivery identifiers.')
+        if not callable(guard):
+            raise ValueError('Saved speech confirmation is unavailable.')
+        snapshot = self.confirmation_state(data)
+        try:
+            accepted = guard(snapshot, tuple(values))
+        except Exception:
+            raise ValueError('Saved speech confirmation is unavailable. Preserve your draft and retry.') from None
+        if accepted is not True:
+            raise ValueError('Saved speech does not match this draft scope. Preserve your draft and retry.')
+        return {'ok': True, 'confirmed': True}
+
     def dispatch(self, action, data):
         if action == 'draft_get':
             return self.get(data)
@@ -173,4 +257,6 @@ class DraftManager:
             return self.save(data)
         if action == 'draft_clear':
             return self.save(data, clear=True)
+        if action == 'draft_confirm':
+            return self.confirm(data)
         raise ValueError('Unknown draft operation.')

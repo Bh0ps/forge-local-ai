@@ -42,6 +42,16 @@ class Bridge:
         self._visible = True
         self._visibility_seq = 0
         self._visibility_guard = None
+        from forge_native_handoff import NativeAuthority
+        self._update_authority = NativeAuthority()
+        self._update_controller = None
+        self._update_controller_lock = threading.Lock()
+        self._native_input = None
+        self._native_admission = threading.RLock()
+        self._native_pending = 0
+        self._native_session = None
+        self._navigation_generation = 0
+        self._trusted_loaded = False
 
     def _ensure_service(self):
         if self._service is None:
@@ -65,7 +75,263 @@ class Bridge:
             self._service.get_builder().previews.attach_browser(self._native)
         if self._lifecycle is None:
             self._lifecycle = HostLifecycle(self._service, self._pairing)
+        admission = getattr(self._service, 'admission_lock', None)
+        if admission is not None and hasattr(self._pairing, 'bind_update_admission'):
+            self._pairing.bind_update_admission(admission, self._pairing_allowed)
+            self._service.update_editor_guard = self._pairing.no_active_editors
+        with self._native_admission:
+            if self._native_input is None:
+                from forge_native_input import NativeInputGuard
+                self._native_input = NativeInputGuard(self._service.host_dictation)
+        self._service.host_dictation_guard = self._native_input.confirm
+        self._service.update_native_input_guard = self._update_input_idle
+        self._service.host_dictation_dispatch = self._dictation_dispatch
+        self._service.host_chat_input_deleted = self._native_input.discard_chat
         return self._service
+
+    def _pairing_allowed(self):
+        manager = getattr(self._service, 'update_manager', None)
+        if manager is None:
+            return not self._closing and not self._update_locked()
+        return (not self._closing and not self._update_locked() and getattr(manager, 'applying', None) is False
+                and getattr(manager, 'shutting_down', None) is False)
+
+    def _update_locked(self):
+        return self._update_authority.status().get('locked') is True
+
+    def _admit_native(self, authorize=None):
+        from contextlib import nullcontext
+        gate = getattr(self._service, 'admission_lock', None)
+        with gate if gate is not None else nullcontext():
+            with self._native_admission:
+                if authorize is not None and (not callable(authorize) or authorize() is not True):
+                    raise ValueError('Pair this browser in Forge Settings.')
+                if self._closing or self._update_locked():
+                    raise ValueError('Native input is paused while Forge confirms a restart.')
+                manager = getattr(self._service, 'update_manager', None)
+                if manager and (manager.applying or manager.shutting_down):
+                    raise ValueError('Native input is paused while Forge confirms a restart.')
+                self._native_pending += 1
+        released = False
+        def release():
+            nonlocal released
+            with self._native_admission:
+                if not released:
+                    released = True
+                    self._native_pending -= 1
+        return release
+
+    def _native_operation(self, scope=None, authorize=None):
+        from contextlib import contextmanager, nullcontext
+        @contextmanager
+        def operation():
+            release = self._admit_native(authorize)
+            try:
+                with self._native_input.operation(scope) if self._native_input else nullcontext():
+                    yield
+            finally:
+                release()
+        return operation()
+
+    def _dictation_dispatch(self, action, data, *, authorize=None):
+        # The HTTP host uses this same private callback. Authorization is
+        # rechecked at admission, so an already-queued revoked browser request
+        # cannot start a late native producer after explicit disconnection.
+        from contextlib import nullcontext
+        service = self._service
+        speech = service.host_dictation
+        if action == 'dictation_status':
+            gate = getattr(service, 'admission_lock', None)
+            with gate if gate is not None else nullcontext():
+                if authorize is not None and authorize() is not True:
+                    raise ValueError('Pair this browser in Forge Settings.')
+                result = speech.status()
+            return self._native_input.decorate(result) if self._native_input else result
+        scope = None
+        if action in ('dictation_start', 'dictation_upload') and data.get('draft_scope') is not None:
+            scope = service.get_drafts().scope(data['draft_scope'])
+        with self._native_operation(scope, authorize):
+            state = speech.status()['state']
+            if action in ('dictation_start', 'dictation_upload') and state not in (
+                    'starting', 'recording', 'stopping', 'transcribing', 'installing') and hasattr(service.store, 'get_settings'):
+                speech.select_model(service.store.get_settings().get('dictation_model', 'base'))
+            result = speech.dispatch(action.removeprefix('dictation_'), data)
+            if action == 'dictation_install' and data.get('model'):
+                service.dispatch('settings', {'dictation_model': data['model']})
+        return self._native_input.decorate(result) if self._native_input else result
+
+    def _child_pages(self):
+        pages = []
+        browser = getattr(getattr(getattr(self._service, 'integrations', None), 'browser', None), 'native', None)
+        if browser and getattr(browser, 'view', None) is not None:
+            pages.append(browser.view)
+        builder = getattr(self._service, 'builder', None)
+        if builder is None:
+            builder = getattr(self._service, 'builder_manager', None)
+        previews = getattr(builder, 'previews', None)
+        preview_browser = getattr(previews, 'browser', None)
+        if preview_browser and getattr(preview_browser, 'view', None) is not None:
+            pages.append(preview_browser.view)
+        return pages
+
+    def _update_input_idle(self):
+        try:
+            with self._native_admission:
+                if self._closing or self._native_pending != 0:
+                    return False
+            if self._child_pages():
+                return False
+            return self._native_input is not None and self._native_input.idle() is True
+        except Exception:
+            return False
+
+    def _native_binding(self):
+        from forge_native_handoff import NativeBinding
+        import psutil
+        import secrets
+        if (not getattr(sys, 'frozen', False) or self._closing or not self._trusted_loaded
+                or self._window is None or getattr(self._window, '_js_api', None) is not self):
+            return None
+        with self._native_admission:
+            generation = self._navigation_generation
+            if self._native_session is None:
+                self._native_session = secrets.token_hex(32)
+        try:
+            source = self._native(lambda form: str(form.webview.Source), _update_safe=True)
+            target, expected = urlsplit(source), urlsplit(self._server_url)
+            if ((target.scheme, target.hostname, target.port) != (expected.scheme, expected.hostname, expected.port)
+                    or target.path not in ('', '/') or target.query or target.fragment):
+                return None
+            parent = psutil.Process(os.getpid())
+            with self._native_admission:
+                if generation != self._navigation_generation or not self._trusted_loaded or self._closing:
+                    return None
+                return NativeBinding(self, self._native_session, str(self._window.uid), generation,
+                    self._server_url, os.getpid(), parent.create_time())
+        except Exception:
+            return None
+
+    def _renderer_fence(self, request):
+        result, completed = {}, threading.Event()
+        def check():
+            try:
+                script = 'window.__forgeUpdateReadiness?.check(' + json.dumps(request) + ')'
+                result['value'] = self._window.evaluate_js(script)
+            except Exception:
+                pass
+            finally:
+                completed.set()
+        threading.Thread(target=check, name='Forge-update-renderer-fence', daemon=True).start()
+        if not completed.wait(5):
+            return None
+        return result.get('value')
+
+    def _emit_handoff(self, value):
+        def emit():
+            try:
+                if self._window is not None and not self._closing:
+                    self._window.evaluate_js("window.dispatchEvent(new CustomEvent('forge:update-handoff',{detail:" +
+                        json.dumps(value) + '}));true')
+            except Exception:
+                pass
+        threading.Thread(target=emit, name='Forge-update-handoff-status', daemon=True).start()
+
+    def _handoff_call(self, action, data):
+        import forge_native_handoff
+        if not forge_native_handoff.HANDOFF_ENABLED:
+            return forge_native_handoff.unavailable()
+        self._ensure_service()
+        if action == 'update_handoff_close_children':
+            return self._close_update_children(data)
+        if action == 'update_handoff_disconnect_editors':
+            return self._disconnect_update_editors(data)
+        self._ensure_update_controller()
+        if action == 'update_handoff_begin' and self._child_pages():
+            return {**forge_native_handoff.unavailable(), 'reason': 'native_input'}
+        return self._update_controller.dispatch(action, data)
+
+    def _ensure_update_controller(self):
+        with self._update_controller_lock:
+            if self._update_controller is None:
+                self._service.dispatch('update_status', {})
+                from forge_native_controller import NativeController
+                self._update_controller = NativeController(self._service.update_manager, self._update_authority,
+                    binding=self._native_binding, input_idle=self._update_input_idle,
+                    fence=self._renderer_fence, depart=self._handoff_depart, emit=self._emit_handoff)
+        return self._update_controller
+
+    def _native_update_status(self, controller, binding):
+        result = controller.manager.native_status(binding)
+        available = False
+        if (result.get('safe_handoff_available') is True and not self._closing
+                and result.get('inspection_required') is not True):
+            try:
+                from forge_updates import load_operation
+                data = load_operation(controller.manager.home, result.get('operation_id'))
+                available = (data['state'] == 'installed' and data.get('trust_mode', 'authenticode') in ('ed25519', 'authenticode')
+                    and data['version'] == controller.manager.current_version)
+            except Exception:
+                pass
+        # An offer is not authority. Native reservation/prepare verifies the
+        # retained/current publisher proofs and exact operation before action.
+        return {**result, 'safe_rollback_available': available}
+
+    def _close_update_children(self, data):
+        from forge_native_handoff import HandoffRejected
+        if data or self._native_binding() is None or self._update_locked():
+            raise HandoffRejected('native_input')
+        def close(form):
+            from System.Windows.Forms import MessageBox, MessageBoxButtons, MessageBoxIcon, DialogResult
+            pages = self._child_pages()
+            if not pages:
+                return {'closed': True, 'cancelled': False}
+            answer = MessageBox.Show(form,
+                'Close the open browser and preview pages? Unsaved page input will be discarded. Your Forge drafts stay open.',
+                'Close browser work', MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
+            if answer != DialogResult.Yes:
+                return {'closed': False, 'cancelled': True}
+            for page in pages:
+                page.dispose()
+            return {'closed': not self._child_pages(), 'cancelled': False}
+        return self._native(close)
+
+    def _disconnect_update_editors(self, data):
+        from forge_native_handoff import HandoffRejected
+        if data or self._native_binding() is None or self._update_locked():
+            raise HandoffRejected('paired_editor')
+        def disconnect(form):
+            from System.Windows.Forms import MessageBox, MessageBoxButtons, MessageBoxIcon, DialogResult
+            answer = MessageBox.Show(form,
+                'Save any work in paired browser windows first. Disconnect all paired windows now? Their unsaved input is not saved by this action.',
+                'Disconnect paired windows', MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
+            if answer != DialogResult.Yes:
+                return {'disconnected': False, 'cancelled': True}
+            # Session revocation is atomic with new pairing admission. No
+            # token, origin, editor identity or browser content is returned.
+            with self._service.admission_lock:
+                self._pairing.close()
+            return {'disconnected': True, 'cancelled': False}
+        return self._native(disconnect)
+
+    def _handoff_depart(self, controller, grant, transport):
+        # This private callback cannot be requested through bridge JSON. The
+        # owned helper has acknowledged READY and COMMITTED; admission is final.
+        with self._native_admission:
+            if (self._closing or controller is not self._update_controller or self._native_pending
+                    or not self._trusted_loaded or self._navigation_generation != grant.binding.navigation
+                    or self._native_session != grant.binding.session or self._window is None
+                    or getattr(self._window, '_js_api', None) is not self
+                    or str(self._window.uid) != grant.binding.window_id):
+                return False
+            self._update_authority.pipe_admission(grant, transport)
+            self._closing = True
+        self._quit_owned()
+        return True
+
+    def _emergency_stop(self):
+        if self._update_controller is not None:
+            self._update_controller.invalidate()
+        return self._lifecycle.emergency_stop()
 
     def call(self, action, data=None):
         try:
@@ -78,30 +344,34 @@ class Bridge:
                 # Publisher verification does not prove that window-only work
                 # is durable. This seed cannot acknowledge a safe native handoff.
                 raise ValueError('In-app installation and restore are unavailable in this version. Save your work and use the public installer for a manual update.')
+            if action.startswith('update_handoff_'):
+                return self._handoff_call(action, data)
             service = self._ensure_service()
+            if action == 'update_status':
+                import forge_native_handoff
+                if forge_native_handoff.HANDOFF_ENABLED and self._native_binding() is not None:
+                    controller = self._ensure_update_controller()
+                    return self._native_update_status(controller, self._native_binding())
+            if self._update_locked() and action not in ('host_status', 'update_status', 'dictation_status',
+                    'draft_get', 'draft_confirm', 'emergency_stop'):
+                from forge_service import READ_ACTIONS
+                if action not in READ_ACTIONS:
+                    raise ValueError('Forge is confirming a restart. Cancel the restart before changing work.')
             if action == 'artifact_save_as':
                 # Only an explicit user download opens this dialog. Agent tools
                 # cannot choose arbitrary filesystem destinations.
                 import webview
                 artifact = service.get_builder().documents.download(data)
-                destination = self._window.create_file_dialog(webview.FileDialog.SAVE, save_filename=artifact['name'])
-                if not destination:
-                    return {'cancelled': True}
-                target = Path(destination[0] if isinstance(destination, (tuple, list)) else destination)
-                raw = base64.b64decode(artifact['content_base64'], validate=True)
-                target.write_bytes(raw)
+                with self._native_operation():
+                    destination = self._window.create_file_dialog(webview.FileDialog.SAVE, save_filename=artifact['name'])
+                    if not destination:
+                        return {'cancelled': True}
+                    target = Path(destination[0] if isinstance(destination, (tuple, list)) else destination)
+                    raw = base64.b64decode(artifact['content_base64'], validate=True)
+                    target.write_bytes(raw)
                 return {'ok': True, 'path': str(target), 'sha256': artifact['sha256']}
             if action.startswith('dictation_'):
-                state = service.host_dictation.status()['state']
-                sync = (action in ('dictation_start', 'dictation_upload') and
-                        state not in ('starting', 'recording', 'stopping', 'transcribing', 'installing') or
-                        action == 'dictation_status' and state in ('idle', 'ready', 'error', 'cancelled'))
-                if sync and hasattr(service.store, 'get_settings'):
-                    service.host_dictation.select_model(service.store.get_settings().get('dictation_model', 'base'))
-                result = service.host_dictation.dispatch(action.removeprefix('dictation_'), data)
-                if action == 'dictation_install' and data.get('model'):
-                    service.dispatch('settings', {'dictation_model': data['model']})
-                return result
+                return self._dictation_dispatch(action, data)
             if action == 'host_status':
                 return {'native': True, 'mode': self._mode, 'pinned': self._pin,
                         **self._visibility_status(),
@@ -117,20 +387,20 @@ class Bridge:
             if action == 'quit':
                 return self.quit()
             if action == 'emergency_stop':
-                return self._lifecycle.emergency_stop()
+                return self._emergency_stop()
             if action == 'settings' and data.get('emergency_shortcut'):
                 EmergencyHotkey.parse(data['emergency_shortcut'])
             result = service.dispatch(action, data)
             if action == 'settings' and data.get('emergency_shortcut') and self._hotkey:
                 self._hotkey.stop()
-                self._hotkey = EmergencyHotkey(self._lifecycle.emergency_stop, data['emergency_shortcut'])
+                self._hotkey = EmergencyHotkey(self._emergency_stop, data['emergency_shortcut'])
                 self._hotkey.start()
             return result
         except Exception as exc:
             log.warning('Action %s failed: %s', action, type(exc).__name__)
             return {'error': str(exc)[:1000]}
 
-    def _native(self, operation):
+    def _native(self, operation, *, _update_safe=False):
         """Bridge calls run on workers; marshal WinForms operations to its UI thread."""
         from webview.platforms.winforms import BrowserView
         from System import Action
@@ -140,15 +410,23 @@ class Bridge:
         if form is None:
             raise RuntimeError('Window is unavailable.')
         result, done = {}, threading.Event()
+        release = (lambda: None) if _update_safe else self._admit_native()
         def run():
             try:
+                if not _update_safe and self._update_locked():
+                    raise ValueError('Native input is paused while Forge confirms a restart.')
                 result['value'] = operation(form)
             except Exception as exc:
                 result['error'] = exc
             finally:
+                release()
                 done.set()
         if form.InvokeRequired:
-            form.BeginInvoke(Action(run))
+            try:
+                form.BeginInvoke(Action(run))
+            except Exception:
+                release()
+                raise
             if not done.wait(5):
                 raise TimeoutError('Window update timed out.')
         else:
@@ -159,6 +437,8 @@ class Bridge:
 
     def pin(self, value):
         try:
+            if self._update_locked():
+                raise ValueError('Cancel the restart before changing the window.')
             if type(value) is not bool:
                 raise ValueError('Pin expects a boolean.')
             self._pin = value
@@ -171,6 +451,8 @@ class Bridge:
         if mode not in ('full', 'hud'):
             return {'error': 'Unknown window mode'}
         try:
+            if self._update_locked():
+                raise ValueError('Cancel the restart before changing the window.')
             if mode == 'hud':
                 browser = getattr(getattr(getattr(self._service, 'integrations', None), 'browser', None), 'native', None)
                 if browser and browser.view and hasattr(browser.view, 'hide'):
@@ -225,7 +507,8 @@ class Bridge:
     def choose_project(self):
         try:
             import webview
-            paths = self._window.create_file_dialog(webview.FileDialog.FOLDER)
+            with self._native_operation():
+                paths = self._window.create_file_dialog(webview.FileDialog.FOLDER)
             if not paths:
                 return {'cancelled': True}
             path = Path(paths[0])
@@ -236,7 +519,8 @@ class Bridge:
     def choose_plugin(self):
         try:
             import webview
-            paths = self._window.create_file_dialog(webview.FileDialog.FOLDER)
+            with self._native_operation():
+                paths = self._window.create_file_dialog(webview.FileDialog.FOLDER)
             return {'path': paths[0]} if paths else {'cancelled': True}
         except Exception as exc:
             return {'error': str(exc)}
@@ -245,7 +529,14 @@ class Bridge:
         return self.call('dictation_' + str(action), data)
 
     def screenshot(self):
+        if self._update_locked():
+            return {'error': 'Cancel the restart before taking a screenshot.'}
+        try:
+            release = self._admit_native()
+        except Exception as exc:
+            return {'error': str(exc)}
         if not self._capture_lock.acquire(blocking=False):
+            release()
             return {'error': 'Capture is already running.'}
         try:
             from PIL import ImageGrab
@@ -267,6 +558,7 @@ class Bridge:
                 except Exception:
                     log.exception('Restore after capture failed')
             self._capture_lock.release()
+            release()
 
     def show(self):
         try:
@@ -278,7 +570,7 @@ class Bridge:
                                         if self._mode == 'full' and self._full_maximized
                                         else FormWindowState.Normal)
                 form.Activate()
-            self._native(focus)
+            self._native(focus, _update_safe=True)
             self._refresh_visibility()
         except Exception:
             log.exception('Could not show Forge')
@@ -299,8 +591,20 @@ class Bridge:
             expected = urlsplit(self._server_url)
             def guard(sender, args):
                 try:
+                    with self._native_admission:
+                        self._navigation_generation += 1
+                        self._trusted_loaded = False
+                        self._update_authority.update_binding(None)
+                    if self._update_locked():
+                        args.Cancel = True
+                        if self._update_controller:
+                            self._update_controller.invalidate()
+                        else:
+                            self._update_authority.invalidate()
+                        return
                     target = urlsplit(str(args.Uri))
-                    if (target.scheme, target.hostname, target.port) != (expected.scheme, expected.hostname, expected.port):
+                    if ((target.scheme, target.hostname, target.port) != (expected.scheme, expected.hostname, expected.port)
+                            or target.path not in ('', '/') or target.query):
                         args.Cancel = True
                         if target.scheme in ('http', 'https'):
                             import webbrowser
@@ -309,7 +613,7 @@ class Bridge:
                     args.Cancel = True
             self._navigation_guard = guard
             form.webview.NavigationStarting += guard
-        return self._native(attach)
+        return self._native(attach, _update_safe=True)
 
     def _visibility_status(self):
         with self._visibility_lock:
@@ -341,11 +645,15 @@ class Bridge:
         # overwrite a later hide/restore transition with a newer sequence.
         try:
             return self._native(lambda form: self._publish_visibility(
-                bool(form.Visible and str(form.WindowState) != 'Minimized'), snapshot=snapshot))
+                bool(form.Visible and str(form.WindowState) != 'Minimized'), snapshot=snapshot), _update_safe=True)
         except Exception:
             log.debug('Native visibility snapshot unavailable', exc_info=True)
 
     def _on_loaded(self):
+        self.restrict_navigation()
+        with self._native_admission:
+            self._trusted_loaded = True
+        self._update_authority.update_binding(self._native_binding())
         self._refresh_visibility(snapshot=True)
 
     def _on_visibility_event(self):
@@ -354,6 +662,8 @@ class Bridge:
     def _on_closing(self):
         if self._closing:
             return True
+        if self._update_controller is not None and self._update_locked():
+            self._update_controller.invalidate()
         if self._tray is not None:
             self._window.hide()
             self._publish_visibility(False)
@@ -369,7 +679,16 @@ class Bridge:
     def quit(self):
         if self._closing:
             return {'ok': True}
+        if self._update_locked():
+            if self._update_controller is not None:
+                self._update_controller.invalidate()
+            return {'ok': False, 'error': 'Cancel the restart and confirm cancellation before quitting Forge.'}
         self._closing = True
+        self._update_authority.update_binding(None)
+        self._quit_owned()
+        return {'ok': True}
+
+    def _quit_owned(self):
         if self._service and getattr(self._service, 'host_dictation', None):
             self._service.host_dictation.cancel()
         if self._lifecycle:
@@ -380,7 +699,6 @@ class Bridge:
             self._tray.stop()
         if self._window:
             self._window.destroy()
-        return {'ok': True}
 
 
 def setup_logging():
@@ -407,7 +725,7 @@ def _tray(api):
             picture = Image.new('RGBA', (64, 64), '#171717')
             ImageDraw.Draw(picture).polygon([(32, 7), (55, 32), (32, 57), (9, 32)], fill='#ed813b')
         menu = pystray.Menu(pystray.MenuItem('Open Forge', lambda icon, item: api.show(), default=True),
-                            pystray.MenuItem('Stop all agents', lambda icon, item: api._lifecycle.emergency_stop()),
+                            pystray.MenuItem('Stop all agents', lambda icon, item: api._emergency_stop()),
                             pystray.MenuItem('Quit Forge', lambda icon, item: api.quit()))
         api._tray = pystray.Icon('Forge', picture, 'Forge — local AI workspace', menu)
         api._tray.run_detached()
@@ -427,7 +745,11 @@ def main():
     if '--smoke-test' in sys.argv and not os.getenv('FORGE_DATA_DIR'):
         raise ValueError('Native smoke requires an explicit disposable FORGE_DATA_DIR.')
     if '--forge-update' in sys.argv:
-        raise SystemExit('In-app installation is unavailable in this version. Save your work and use the manual installer.')
+        from forge_native_handoff import helper_entry
+        return helper_entry()
+    if '--forge-update-protocol-smoke' in sys.argv:
+        from forge_native_handoff import protocol_smoke_entry
+        return protocol_smoke_entry()
     import webview
     import uvicorn
     from model_manager import create_app
@@ -468,7 +790,7 @@ def main():
         if background:
             background()
         shortcut = service.dispatch('settings', {}).get('emergency_shortcut', 'Ctrl+Alt+Shift+S')
-        api._hotkey = EmergencyHotkey(api._lifecycle.emergency_stop, shortcut)
+        api._hotkey = EmergencyHotkey(api._emergency_stop, shortcut)
         api._hotkey.start()
         _tray(api)
         from forge_update_monitor import start_native_update_monitor
@@ -520,6 +842,22 @@ def main():
                     deadline = time.monotonic() + 5
                     while api._window.evaluate_js("!!document.querySelector('dialog[open]')") and time.monotonic() < deadline:
                         time.sleep(.05)
+                    if '--handoff-smoke' in sys.argv:
+                        import forge_native_handoff
+                        if forge_native_handoff.HANDOFF_ENABLED:
+                            raise ValueError('Closed-capability smoke must not perform an authenticated update.')
+                        fence = api._window.evaluate_js("(()=>{const f=window.__forgeUpdateReadiness;if(!f)return null;const value=f.check({attempt_id:'" +
+                            '0' * 32 + "',workspace_revision:0,participant_count:0});return {installed:true,invalid_attempt_rejected:value.ok===false,phase:value.phase,participants:value.participant_count};})()")
+                        blocked = api.call('update_handoff_begin', {})
+                        if (not fence or not fence['invalid_attempt_rejected'] or
+                                blocked.get('reason') != 'handoff_unavailable' or blocked.get('not_executed') is not True):
+                            raise ValueError('The native update capability or renderer fence is not closed.')
+                        result['handoff_seed'] = {'trusted_main': api._native_binding() is not None,
+                            'fence_installed': fence['installed'], 'invalid_attempt_rejected': True,
+                            'phase': fence['phase'], 'participant_count': fence['participants'],
+                            'typed_block': True, 'no_restart': not api._closing}
+                        if not result['handoff_seed']['trusted_main']:
+                            raise ValueError('Only the actual main document may own native update authority.')
                     result['smoke_phase'] = 'library'
                     starters = [skill for skill in api.call('skills')['skills'] if skill.get('builtin')]
                     if len(starters) != 24 or not all(skill['enabled'] and skill['automatic'] for skill in starters):

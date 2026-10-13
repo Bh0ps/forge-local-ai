@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import nullcontext
 import hashlib
 import hmac
+import math
 import os
 from pathlib import Path
 import secrets
@@ -25,6 +27,33 @@ class PairingAuthority:
         self._codes = {}
         self._sessions = {}
         self._attempts = {}
+        self._update_admission_lock = None
+        self._update_pair_allowed = None
+
+    def bind_update_admission(self, lock, allowed):
+        """Host-only wiring; pairing and native admission share one lock order."""
+        if not callable(getattr(lock, 'acquire', None)) or not callable(allowed):
+            raise ValueError('Pairing update admission is unavailable.')
+        with self._lock:
+            if self._update_admission_lock is not None and self._update_admission_lock is not lock:
+                raise ValueError('Pairing update admission is already bound.')
+            self._update_admission_lock, self._update_pair_allowed = lock, allowed
+
+    def no_active_editors(self):
+        """Content-free readiness: any unexpired session may own unsaved work."""
+        with self._lock:
+            try:
+                now = self.clock()
+                if type(now) not in (int, float) or not math.isfinite(now):
+                    return False
+                for value in self._sessions.values():
+                    if (not isinstance(value, dict) or type(value.get('expires_at')) not in (int, float)
+                            or not math.isfinite(value['expires_at'])):
+                        return False
+                self._sessions = {key: value for key, value in self._sessions.items() if value['expires_at'] > now}
+                return not bool(self._sessions)
+            except Exception:
+                return False
 
     def issue(self):
         code = secrets.token_hex(5).upper()
@@ -42,6 +71,18 @@ class PairingAuthority:
         return {'session': session, 'client_proof': proof}
 
     def _pair(self, code, client, origin=None, proof=None):
+        admission = self._update_admission_lock
+        with admission if admission is not None else nullcontext():
+            if self._update_pair_allowed is not None:
+                try:
+                    allowed = self._update_pair_allowed()
+                except Exception:
+                    allowed = False
+                if allowed is not True:
+                    raise ValueError('Pairing is paused while Forge confirms a restart. Try again after cancellation.')
+            return self._pair_admitted(code, client, origin, proof)
+
+    def _pair_admitted(self, code, client, origin, proof):
         now = self.clock()
         with self._lock:
             attempts, reset = self._attempts.get(client, (0, now + 60))

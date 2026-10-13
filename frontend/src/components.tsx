@@ -4,11 +4,13 @@ import ReactMarkdown, { type Components } from 'react-markdown';
 import { api, bytesLabel, friendlyModel, isNative, native, tokenLabel } from './api';
 import type { Message, Model, RunEvent } from './types';
 import { ThinkingDisclosure } from './thinkingDisclosure';
+import { useDialogReadiness } from './updateReadiness';
 
 export function IconButton({ label, children, onClick, disabled, active, className = '' }: { label: string; children: React.ReactNode; onClick?: () => void; disabled?: boolean; active?: boolean; className?: string }) {
   return <button type="button" className={`icon-button ${active ? 'selected' : ''} ${className}`} aria-label={label} title={label} aria-pressed={active} onClick={onClick} disabled={disabled}>{children}</button>;
 }
 export function Modal({ title, children, close, wide = false }: { title: string; children: React.ReactNode; close: () => void; wide?: boolean }) {
+  useDialogReadiness();
   const ref = useRef<HTMLDialogElement>(null), titleId = useId();
   useEffect(() => { const trigger = document.activeElement as HTMLElement | null; ref.current?.showModal(); return () => {ref.current?.close(); if (trigger?.isConnected) trigger.focus();}; }, []);
   return <dialog ref={ref} aria-labelledby={titleId} className={`modal ${wide ? 'wide' : ''}`} onCancel={close} onClick={e => { if (e.target === e.currentTarget) close(); }}><header><h2 id={titleId}>{title}</h2><IconButton label="Close dialog" onClick={close}><X size={18} /></IconButton></header>{children}</dialog>;

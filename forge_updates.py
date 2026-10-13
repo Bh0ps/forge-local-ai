@@ -299,7 +299,7 @@ async def _get_bytes(client, url, limit, cancel=None, progress=None, consume=Non
 
 
 class UpdateManager:
-    def __init__(self, service, current_version='5.1.2', install_dir=None, trust_policy=None,
+    def __init__(self, service, current_version='5.1.3', install_dir=None, trust_policy=None,
                  client_factory=None, verifier=authenticode, *, proof_policy=None, _allow_installation=False):
         # The seed release authenticates downloads, but cannot yet acknowledge
         # every native workspace draft/attachment before shutting its host down.
@@ -328,6 +328,7 @@ class UpdateManager:
         self.thread_stop_event = None
         self.monitor = None
         self.applying = False
+        self.native_handoff = None
         self.inspection_required = False
         try: self.state = self.store.entity('updates', 'current')
         except ValueError: self.state = {'id': 'current', 'state': 'idle'}
@@ -339,10 +340,21 @@ class UpdateManager:
                 operation = load_operation(self.home, self.state['operation_id'])
                 if operation['state'] in ('installed', 'rolled_back'):
                     self._save(state=operation['state'], verified=False)
+                elif operation['state'] == 'cancelled' and operation.get('handoff', {}).get('not_executed') is True:
+                    self._save(state='cancelled', verified=False, operation_id=None,
+                        error='Restart stopped before installation. Your work was retained.')
                 elif operation['state'] in ('applying', 'rollback_blocked'):
                     self.inspection_required = True
                     self._save(state='interrupted', verified=False,
                         error=operation.get('error') or 'The previous installer outcome is unknown. Inspect the retained installer and backup, then repair Forge manually. Automatic retry is blocked.')
+                elif operation['state'] in ('prepared', 'rollback_prepared') and operation.get('handoff'):
+                    if operation['handoff'].get('phase') == 'prepared':
+                        self._save(state='interrupted', verified=False, operation_id=None,
+                            error='The previous restart stopped before installation. Check again; your work was retained.')
+                    else:
+                        self.inspection_required = True
+                        self._save(state='interrupted', verified=False,
+                            error='The previous restart outcome needs inspection. The retained installer and backup were preserved.')
             except (ValueError, OSError, KeyError):
                 self.inspection_required = True
                 self._save(state='error', error='Update journal could not be verified. Inspect the retained backups.')
@@ -379,6 +391,7 @@ class UpdateManager:
                 'channel': self.state.get('channel') if self.state.get('channel') in UPDATE_CHANNELS else 'stable',
                 'inspection_required': self.inspection_required,
                 'verified_download_available': bool(supported and not self.inspection_required),
+                'safe_handoff_available': False,
                 'automatic_install_available': bool(self._installation_enabled and supported and self.install_dir and not self.inspection_required),
                 'install_block_reason': None if self._installation_enabled else
                     'Workspace readiness is not supported in this version. Use the manual installer.',
@@ -716,6 +729,9 @@ class UpdateManager:
 
     def apply(self):
         self._require_installation()
+        return self._prepare_apply()
+
+    def _prepare_apply(self):
         with self._quiesce():
             if self.applying: raise ValueError('An update is already prepared.')
             self._idle(); release, package = self._package()
@@ -769,6 +785,9 @@ class UpdateManager:
 
     def rollback(self):
         self._require_installation()
+        return self._prepare_rollback()
+
+    def _prepare_rollback(self):
         # Rollback is an explicit user decision, and uses the same helper/quiesce
         # path. A committed rollback never executes a downloaded older installer.
         with self._quiesce():
@@ -800,6 +819,57 @@ class UpdateManager:
     def _require_installation(self):
         if not self._installation_enabled:
             raise ValueError('In-app installation and rollback are unavailable in this version. Use the manual installer.')
+
+    def bind_native_authority(self, authority):
+        from forge_native_handoff import NativeAuthority
+        from forge_update_handoff import HandoffCoordinator
+        if not isinstance(authority, NativeAuthority):
+            raise ValueError('A trusted native authority is required.')
+        with self.admission_lock:
+            if self.shutting_down or self.native_handoff is not None:
+                raise ValueError('Native handoff authority is already bound or closing.')
+            self.native_handoff = HandoffCoordinator(self, authority)
+
+    def _native(self):
+        import forge_native_handoff
+        if not forge_native_handoff.HANDOFF_ENABLED or self.native_handoff is None:
+            raise forge_native_handoff.HandoffRejected('handoff_unavailable')
+        return self.native_handoff
+
+    def native_status(self, binding):
+        result = self.status()
+        try:
+            native = self._native()
+            available = native.authority.binding_valid(binding) and not self.shutting_down and not self.inspection_required
+        except ValueError:
+            available = False
+        result['safe_handoff_available'] = bool(available)
+        result['automatic_install_available'] = bool(available and result['verified_download_available'] and self.install_dir)
+        if available:
+            result['install_block_reason'] = None
+            result['message'] = 'Restart is available after Forge confirms that your work is saved.'
+        return result
+
+    def confirm_draft(self, drafts, data):
+        return self._native().confirm_draft(drafts, data)
+
+    def native_reserve(self, binding, action='apply'):
+        return self._native().reserve(binding, action)
+
+    def native_prepare(self, grant, ack):
+        return self._native().prepare(grant, ack)
+
+    def native_launch(self, grant, prepared):
+        return self._native().launch(grant, prepared)
+
+    def native_commit(self, grant, prepared, ready):
+        return self._native().commit(grant, prepared, ready)
+
+    def native_abort(self, attempt_id, *, stopped_helper=None):
+        return self._native().abort(attempt_id, stopped_helper=stopped_helper)
+
+    def native_cancel_reservation(self, reservation):
+        return self._native().cancel_reservation(reservation)
 
     def diagnostics_export(self):
         # Allowlist rather than attempting to redact arbitrary logs or prompts.
@@ -843,6 +913,8 @@ class UpdateManager:
         with self.admission_lock:
             self.shutting_down = True
             self.cancel_event.set()
+        if self.native_handoff:
+            self.native_handoff.authority.invalidate('workspace_changed')
         if self.monitor: self.monitor.stop()
         if self.thread: self.thread.join(timeout=2)
 
@@ -870,7 +942,11 @@ def load_operation(home, identifier):
     if not isinstance(identifier, str) or not re.fullmatch(r'[0-9a-f]{32}', identifier): raise ValueError('Invalid update operation.')
     home = plain_path(home)
     path = plain_path(home / 'runtimes/updates/operations' / (identifier + '.json'))
+    if not path.is_file() or path.stat().st_size > 16 * 1024 * 1024:
+        raise ValueError('Update operation journal is unavailable or oversized.')
     data = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(data, dict) or 'handoff' in data and not isinstance(data['handoff'], dict):
+        raise ValueError('Update operation journal is invalid.')
     if data.get('id') != identifier or Path(data.get('home', '')).resolve() != home: raise ValueError('Update operation belongs to another workspace.')
     backup = plain_path(data.get('backup', ''))
     if backup != home / 'backups' / ('update-' + identifier): raise ValueError('Invalid rollback backup location.')
@@ -935,9 +1011,9 @@ def retire_obsolete_files(root, old_build, new_build):
         path.unlink()
 
 
-def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=None, verifier=authenticode,
-                runner=None, wait_seconds=60, proof_policy=None):
-    """Native early-entry helper. Does not create a coordinator or migrate state."""
+def helper_preflight(home, operation_id, parent_pid, *, install_dir=None, publishers=None,
+                     verifier=authenticode, proof_policy=None):
+    """Authenticate every input before READY, without waiting or mutations."""
     home = plain_path(home); data = load_operation(home, operation_id)
     if install_dir is not None:
         expected = plain_path(install_dir)  # explicit isolated helper/test host
@@ -950,15 +1026,6 @@ def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=
         raise ValueError('Update target differs from the per-user Forge installation.')
     if type(parent_pid) is not int or parent_pid != data['parent_pid'] or parent_pid <= 0:
         raise ValueError('Update parent process differs from its prepared intent.')
-    deadline = time.monotonic() + wait_seconds
-    while psutil.pid_exists(parent_pid):
-        try:
-            if psutil.Process(parent_pid).create_time() != data.get('parent_created'):
-                break  # PID was reused; never wait for or stop an unrelated app.
-        except psutil.NoSuchProcess:
-            break
-        if time.monotonic() >= deadline: raise ValueError('Forge did not quit. No update was applied.')
-        time.sleep(.1)
     backup = Path(data['backup'])
     previous = backup / 'installation'
     verify_tree(previous, data['previous_files'])
@@ -997,9 +1064,51 @@ def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=
     elif mode == 'ed25519':
         verify_build(read_record(expected / BUILD_NAME), pins, root=expected,
                      expected_version=data['version'], expected_source=data['source_commit'], installed=True)
+    return {'home': home, 'data': data, 'expected': expected, 'backup': backup, 'previous': previous,
+        'policy': policy, 'mode': mode, 'pins': pins, 'rollback': rollback,
+        'old_build': old_build if mode == 'ed25519' else None,
+        'package': package if not rollback else None,
+        'release_proof': release_proof if mode == 'ed25519' and not rollback else None}
+
+
+def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=None, verifier=authenticode,
+                runner=None, wait_seconds=60, proof_policy=None, _native_admission=None):
+    """Foundation helper. The native entry also requires the private pipe grant."""
+    if _native_admission is not None:
+        from forge_update_handoff import _InstallerAdmission
+        if type(_native_admission) is not _InstallerAdmission:
+            raise ValueError('Authenticated native installer admission is required.')
+        _native_admission.require_current()
+    data = load_operation(home, operation_id)
+    if type(parent_pid) is not int or parent_pid != data['parent_pid'] or parent_pid <= 0:
+        raise ValueError('Update parent process differs from its prepared intent.')
+    deadline = time.monotonic() + wait_seconds
+    while psutil.pid_exists(parent_pid):
+        try:
+            if psutil.Process(parent_pid).create_time() != data.get('parent_created'):
+                break
+        except psutil.NoSuchProcess:
+            break
+        if time.monotonic() >= deadline: raise ValueError('Forge did not quit. No update was applied.')
+        time.sleep(.1)
+    plan = helper_preflight(home, operation_id, parent_pid, install_dir=install_dir,
+        publishers=publishers, verifier=verifier, proof_policy=proof_policy)
+    home, data, expected, backup, previous = (plan[name] for name in ('home', 'data', 'expected', 'backup', 'previous'))
+    policy, mode, pins, rollback = (plan[name] for name in ('policy', 'mode', 'pins', 'rollback'))
+    old_build, package, release_proof = (plan[name] for name in ('old_build', 'package', 'release_proof'))
     operation = home / 'runtimes/updates/operations' / (operation_id + '.json')
+    if _native_admission is not None:
+        _native_admission.check(data)
     rollback_snapshot = retain_rollback_state(home, data) if rollback else None
+    if _native_admission is not None:
+        _native_admission.check(data)
     data['state'] = 'applying'; atomic_text(operation, encode(data))
+    if _native_admission is not None:
+        _native_admission.wrote_applying(data)
+        # This fence is after every preflight/snapshot/journal I/O and before
+        # runner or rollback admission. Refusal cannot enter recovery that
+        # rewinds work or classify an unattempted installer as executed.
+        _native_admission.check(data, applying=True, admit=True)
     try:
         if not rollback:
             command = [str(package), '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOCLOSEAPPLICATIONS', '/DIR=' + str(expected)]

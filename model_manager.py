@@ -89,8 +89,12 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
         return legacy or authority.valid_browser(token(request), request.headers.get('x-forge-client-proof', ''),
                                                   str(request.base_url).rstrip('/'))
 
-    async def dispatch(action, data):
+    async def dispatch(action, data, request=None):
         if action.startswith('dictation_'):
+            native = getattr(service, 'host_dictation_dispatch', None)
+            if callable(native):
+                return await run_in_threadpool(native, action, data,
+                    authorize=(lambda: authorized(request)) if request is not None else (lambda: False))
             dictation = getattr(service, 'host_dictation', None)
             if dictation is None:
                 from dictation import Dictation
@@ -152,7 +156,7 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
         if error is not None:
             return error
         try:
-            return JSONResponse(await dispatch(action, data))
+            return JSONResponse(await dispatch(action, data, request))
         except (ValueError, httpx.HTTPError) as exc:
             return JSONResponse({'error': str(exc)[:1000]}, status_code=400)
 
@@ -203,7 +207,7 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
 
     @app.get('/api/v1/health')
     def health():
-        return {'app': 'Forge', 'version': '5.1.2', 'pairing_required': not legacy}
+        return {'app': 'Forge', 'version': '5.1.3', 'pairing_required': not legacy}
 
     @app.get('/')
     def index():

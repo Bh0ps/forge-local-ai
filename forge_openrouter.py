@@ -29,13 +29,17 @@ CONDITION_FIELDS = frozenset(('min_prompt_tokens', 'utc_start', 'utc_end', 'utc_
 
 class OpenRouterFailure(ValueError):
     """A local, scrubbed error; remote error messages never gain this type."""
-    def __init__(self,message,*,category='configuration',http_status=None):
+    def __init__(self,message,*,category='configuration',http_status=None,
+                 continuation_reason=None,requested_context=None,model_context_limit=None):
         super().__init__(message)
         self.category=category;self.http_status=http_status
+        from forge_cloud_failure import continuation_diagnostics
+        self.continuation=continuation_diagnostics({'category':category,'continuation_reason':continuation_reason,
+            'requested_context':requested_context,'model_context_limit':model_context_limit})
 
     def diagnostics(self):
         return {'provider_id':'openrouter','category':self.category,
-            **({'http_status':self.http_status} if self.http_status is not None else {})}
+            **({'http_status':self.http_status} if self.http_status is not None else {}),**self.continuation}
 
 
 def _zero(value):
@@ -181,13 +185,13 @@ class OpenRouterProvider(CompatibleProvider):
         """A router response cannot authorize guessing a paid or aliased model."""
         entry=next((m for m in self.models(refresh=True) if m['name']==model and model!=FREE_ROUTER),None)
         if entry is None:
-            raise OpenRouterFailure('The free router returned no exact advertised free model for this reasoning continuation. Start a fresh scoped assignment; no tool from this response ran.',category='continuation_unavailable')
+            raise OpenRouterFailure('The free router returned no exact advertised free model for this reasoning continuation. Start a fresh scoped assignment; no tool from this response ran.',category='continuation_unavailable',continuation_reason='model_unavailable')
         info={'capabilities':entry['capabilities'],'model_info':{'openrouter.context_length':entry['context_length']}}
         try:require_model_context(context,info)
         except ValueError:
-            raise OpenRouterFailure('The selected Context exceeds the routed model limit. Start a fresh scoped assignment with a compatible free model; no tool from this response ran.',category='continuation_unavailable') from None
+            raise OpenRouterFailure('The selected Context exceeds the routed model limit. Start a fresh scoped assignment with a compatible free model; no tool from this response ran.',category='continuation_unavailable',continuation_reason='context_limit',requested_context=context,model_context_limit=entry['context_length']) from None
         if set(required)-set(info['capabilities']):
-            raise OpenRouterFailure('The routed free model lacks a required continuation capability. Start a fresh scoped assignment; no tool from this response ran.',category='continuation_unavailable')
+            raise OpenRouterFailure('The routed free model lacks a required continuation capability. Start a fresh scoped assignment; no tool from this response ran.',category='continuation_unavailable',continuation_reason='capabilities')
         return model
 
     def estimate_tokens(self,messages,tools):

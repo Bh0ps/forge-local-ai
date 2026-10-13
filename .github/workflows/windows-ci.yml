@@ -79,6 +79,8 @@ jobs:
         run: python scripts/release_build.py build --work C:/ForgeCI --version "$env:FORGE_RELEASE_VERSION"
       - name: Verify native lifecycle on disposable state
         run: ./scripts/release_smoke.ps1 -Executable C:/ForgeCI/dist/Forge/Forge.exe -Output C:/ForgeCI/native-smoke
+      - name: Verify frozen windowed pipe framing and parent identity
+        run: python scripts/release_protocol_smoke.py --executable C:/ForgeCI/dist/Forge/Forge.exe --output C:/ForgeCI/protocol-smoke
       - name: Install verified pinned compiler
         run: ./scripts/release_tools.ps1 -Destination C:/ForgeCI/tools
       - name: Verify clean installer upgrades and recovery on disposable data

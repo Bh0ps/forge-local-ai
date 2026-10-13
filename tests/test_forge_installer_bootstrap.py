@@ -16,6 +16,7 @@ import pytest
 
 SOURCE = Path(__file__).resolve().parents[1]
 SCRIPT = SOURCE / "installer.iss"
+VERSION = re.search(r'^#define AppVersion "([0-9]+\.[0-9]+\.[0-9]+)"$', SCRIPT.read_text(encoding="utf-8"), re.M).group(1)
 ISCC = Path(os.environ.get("FORGE_TEST_ISCC", str(SOURCE.parent / "forge-5.0-build-tools/compiler/ISCC.exe")))
 
 
@@ -68,7 +69,7 @@ def installer(tmp_path):
         result = subprocess.run([str(ISCC), "/Q", "/DStageDir=" + str(stage), "/O" + str(output), str(script)],
             capture_output=True, text=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
         assert result.returncode == 0, result.stdout + result.stderr
-        return output / "Forge-5.1.2-Setup.exe"
+        return output / f"Forge-{VERSION}-Setup.exe"
 
     return base, app, backup, stage, compile
 

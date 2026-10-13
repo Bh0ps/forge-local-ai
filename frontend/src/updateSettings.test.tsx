@@ -22,6 +22,18 @@ const statusCalls = (call: ReturnType<typeof bridge>) => call.mock.calls.filter(
 afterEach(() => { vi.useRealTimers(); });
 
 describe('update settings', () => {
+  it('offers explicit previous-version recovery only for a native authenticated completed operation',async()=>{
+    const call=bridge({...current,state:'installed',safe_rollback_available:true,operation_id:'synthetic-completed-operation'},undefined,{update_handoff_begin:{blocked:true,reason:'native_input'}});render(<UpdateSettings notify={vi.fn()}/>);const button=await screen.findByRole('button',{name:'Restore previous version & restart',hidden:true});fireEvent.click(screen.getByText('Recovery'));fireEvent.click(button);
+    await waitFor(()=>expect(call).toHaveBeenCalledWith('update_handoff_begin',{kind:'rollback'}));expect(call.mock.calls.some(([action])=>['update_apply','update_rollback'].includes(action))).toBe(false);expect(screen.getByText('Forge will confirm your saved work and verify the retained installation backup before restoring it. Your Forge data stays on this computer.')).toBeTruthy();
+  });
+  it.each([{}, {safe_rollback_available:true}])('keeps recovery closed without a completed authenticated native operation %j',async fields=>{
+    bridge({...current,...fields});render(<UpdateSettings notify={vi.fn()}/>);await screen.findByText('Up to date');expect(screen.queryByRole('button',{name:'Restore previous version & restart',hidden:true})).toBeNull();
+  });
+  it('offers explicit restart only with a fresh native handoff capability and waits without duplicate starts', async () => {
+    const ready={...current,state:'ready',automatic_install_available:true,safe_handoff_available:true,verified_download_available:true,verified:true,release:{version:'5.1.4',size:20,trust_mode:'ed25519'}};
+    let answer!:(value:unknown)=>void;const call=bridge(ready,undefined,{update_handoff_begin:()=>new Promise(resolve=>{answer=resolve;})});render(<UpdateSettings notify={vi.fn()}/>);const button=await screen.findByRole('button',{name:'Install & restart'});fireEvent.click(button);fireEvent.click(button);
+    await waitFor(()=>expect(call.mock.calls.filter(([action])=>action==='update_handoff_begin')).toHaveLength(1));expect(screen.getByRole('button',{name:'Checking saved work…'}).getAttribute('disabled')).not.toBeNull();await act(async()=>answer({blocked:true,reason:'native_input'}));expect(await screen.findByRole('button',{name:'Install & restart'})).toBeTruthy();
+  });
   it('shows preference defaults without saving and only changes explicit controls', async () => {
     bridge(current); const change = vi.fn(async () => {});
     render(<UpdateSettings notify={vi.fn()} onChange={change} />);

@@ -9,6 +9,8 @@ import { QuestionPanel } from './questionPanel';
 import { TaskContextPanel } from './taskContextPanel';
 import { WorkspaceActivity, WorkspacePanel } from './workspacePanel';
 import { usePersistentDraft } from './persistentDraft';
+import { installReadinessFence, updateReadiness, useReadinessParticipant, useUpdateReadiness, type ReadinessReason } from './updateReadiness';
+import { UpdateHandoffSurface } from './updateHandoff';
 import { TaskStatus } from './taskStatus';
 import { SubmissionRecovery, type SubmissionScope } from './submissionRecovery';
 import { appearance, ProjectIcon } from './appearance';
@@ -104,12 +106,12 @@ function reconcileRunMessages(live: LiveRun, chat: SavedChat | null): { parts: M
 export default function App() {
   const [page, setPageState] = useState<Page>('chat');
   const navigation = useRef(0);
-  const setPage = useCallback((next: Page) => { const event = new CustomEvent('forge:navigate', {cancelable: true, detail: {page: next}}); if (!window.dispatchEvent(event)) return; navigation.current++; setPageState(next); }, []);
+  const setPage = useCallback((next: Page) => { if(!updateReadiness.canEdit())return; const event = new CustomEvent('forge:navigate', {cancelable: true, detail: {page: next}}); if (!window.dispatchEvent(event)) return; navigation.current++; setPageState(next); }, []);
   const [showSetup, setShowSetup] = useState(false); const [showNotifications, setShowNotifications] = useState(false);
   const [settingsTab, setSettingsTab] = useState('general');
   const [compactViewport,setCompactViewport]=useState(()=>window.innerWidth<800), [smallSidebar,setSmallSidebar]=useState(false);
   const [rightPanel, setRightPanelState] = useState(false); const [panelTab, setPanelTabState] = useState('activity');const panelTouched=useRef(false);
-  const setRightPanel=(value:boolean)=>{panelTouched.current=true;setRightPanelState(value);};const setPanelTab=(value:string)=>{panelTouched.current=true;setPanelTabState(value);};
+  const setRightPanel=(value:boolean)=>{if(!updateReadiness.canEdit())return;panelTouched.current=true;setRightPanelState(value);};const setPanelTab=(value:string)=>{if(!updateReadiness.canEdit())return;panelTouched.current=true;setPanelTabState(value);};
   useEffect(()=>{const resize=()=>{setCompactViewport(innerWidth<800);if(innerWidth>=800)setSmallSidebar(false);};window.addEventListener('resize',resize);return()=>window.removeEventListener('resize',resize);},[]);
   useEffect(() => { function showBrowser() { setRightPanel(true); setPanelTab('browser'); } window.addEventListener('forge:browser-open', showBrowser); return () => window.removeEventListener('forge:browser-open', showBrowser); }, []);
   const [contextOpen, setContextOpen] = useState(false);
@@ -117,12 +119,12 @@ export default function App() {
   useEffect(() => { function showPreview() { if (page !== 'builder') setPage('builder'); if (hud) void switchMode(false); } window.addEventListener('forge:preview-open', showPreview); return () => window.removeEventListener('forge:preview-open', showPreview); }, [hud, page]);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS); const [projects, setProjects] = useState<Project[]>([]); const [chats, setChats] = useState<Chat[]>([]); const [models, setModels] = useState<Model[]>([]);
   const [projectId, setProjectId] = useState<string | null>(null); const [chatId, setChatId] = useState<string | null>(null); const [chat, setChat] = useState<SavedChat | null>(null);
-  const [drafts, setDrafts] = useState<Record<string, string>>({}); const [attachments, setAttachments] = useState<Record<string, string[]>>({}); const [lives, setLives] = useState<Record<string, LiveRun>>({});
-  const [documents, setDocuments] = useState<Record<string, DocumentAttachment[]>>({});
-  const [pendingAttachments, setPendingAttachments] = useState<Record<string, PendingAttachment[]>>({});
+  const [drafts, setDraftsState] = useState<Record<string, string>>({}); const [attachments, setAttachmentsState] = useState<Record<string, string[]>>({}); const [lives, setLives] = useState<Record<string, LiveRun>>({});
+  const [documents, setDocumentsState] = useState<Record<string, DocumentAttachment[]>>({});
+  const [pendingAttachments, setPendingAttachmentsState] = useState<Record<string, PendingAttachment[]>>({});
   const [scheduledCount, setScheduledCount] = useState(0);
-  const [taskSkills, setTaskSkills] = useState<Record<string,string[]>>({});
-  const [taskSpaces, setTaskSpaces] = useState<Record<string,string[]>>({});
+  const [taskSkills, setTaskSkillsState] = useState<Record<string,string[]>>({});
+  const [taskSpaces, setTaskSpacesState] = useState<Record<string,string[]>>({});
   const [spaces, setSpaces] = useState<{id:string;name:string;project_ids?:string[]}[]>([]);
   const [pendingQuestionCount, setPendingQuestionCount] = useState(0);
   const [capabilities, setCapabilities] = useState<Record<string, unknown>>({}); const [connection, setConnection] = useState('Connecting'); const [notice, setNotice] = useState(''); const [busy, setBusy] = useState(false); const [search, setSearch] = useState('');
@@ -134,14 +136,43 @@ export default function App() {
   const [authNeeded, setAuthNeeded] = useState(false); const [authInput, setAuthInput] = useState('');
   const booted = useRef(false); const liveRef = useRef(lives); const chatRef = useRef(chatId); const settingsQueue = useRef(Promise.resolve()); const settingsRevision = useRef(0); const polling = useRef(false); const chatScroll = useRef<HTMLDivElement>(null); const promptRef = useRef<HTMLTextAreaElement>(null); const fileInput = useRef<HTMLInputElement>(null); const shouldScroll = useRef(true); const dictationTarget = useRef(''); const dictationJob = useRef('');
   const recorder = useRef<MediaRecorder | null>(null); const recordingStream = useRef<MediaStream | null>(null); const browserAudio = useRef<Blob[]>([]); const recordingTimer = useRef<ReturnType<typeof setTimeout> | null>(null); const recordingCancelled = useRef(false);
+  const dictationScope=useRef<import('./persistentDraft').DraftScope|undefined>(undefined),dictationDeliveries=useRef(new Set<string>()),dictationEpoch=useRef(0);
   const chatNavigationVersion = useRef(0);
   const steerRequests = useRef(new Map<string, string>());
   const sendRequests = useRef(new Map<string, string>());
   const [failedSubmissions,setFailedSubmissions]=useState<Record<string,SubmissionScope>>({});
+  const handoff=useUpdateReadiness(), workspaceRoot=useRef<HTMLDivElement>(null);
+  useLayoutEffect(installReadinessFence,[]);
+  useLayoutEffect(()=>{const lock=()=>{if(workspaceRoot.current)workspaceRoot.current.inert=updateReadiness.isLocked();};lock();return updateReadiness.subscribe(lock);},[]);
+  const privateComposers=useRef({drafts,documents,taskSkills,taskSpaces,attachments});
+  const draftScopes=useRef(new Map<string,import('./persistentDraft').DraftScope>());
+  const deletedChats=useRef(new Set<string>());
+  function updateComposerMap<K extends keyof typeof privateComposers.current>(name:K, value:typeof privateComposers.current[K] | ((previous:typeof privateComposers.current[K])=>typeof privateComposers.current[K])) {
+    updateReadiness.changed();
+    const previous=privateComposers.current[name], next={...(typeof value==='function' ? value(previous) : value)};
+    for(const id of deletedChats.current)delete next[id];
+    privateComposers.current={...privateComposers.current,[name]:next};
+    const state=privateComposers.current;
+    for(const changedKey of Object.keys(next)) {
+      if(next[changedKey]===previous[changedKey])continue;
+      const owned=draftScopes.current.get(changedKey); if(!owned || name==='attachments')continue;
+      persistedDraft.captureScope(owned,{text:state.drafts[changedKey] || '',document_ids:(state.documents[changedKey] || []).map(item=>item.id),skills:state.taskSkills[changedKey] || [],space_ids:state.taskSpaces[changedKey] || []});
+    }
+    if(name==='drafts')setDraftsState(next as typeof drafts);else if(name==='documents')setDocumentsState(next as typeof documents);else if(name==='taskSkills')setTaskSkillsState(next as typeof taskSkills);else if(name==='taskSpaces')setTaskSpacesState(next as typeof taskSpaces);else setAttachmentsState(next as typeof attachments);
+  }
+  const setDrafts=(value:typeof drafts | ((previous:typeof drafts)=>typeof drafts))=>updateComposerMap('drafts',value);
+  const setDocuments=(value:typeof documents | ((previous:typeof documents)=>typeof documents))=>updateComposerMap('documents',value);
+  const setTaskSkills=(value:typeof taskSkills | ((previous:typeof taskSkills)=>typeof taskSkills))=>updateComposerMap('taskSkills',value);
+  const setTaskSpaces=(value:typeof taskSpaces | ((previous:typeof taskSpaces)=>typeof taskSpaces))=>updateComposerMap('taskSpaces',value);
+  const setAttachments=(value:typeof attachments | ((previous:typeof attachments)=>typeof attachments))=>updateComposerMap('attachments',value);
+  const setPendingAttachments=(value:typeof pendingAttachments | ((previous:typeof pendingAttachments)=>typeof pendingAttachments))=>setPendingAttachmentsState(previous=>{const next={...(typeof value==='function' ? value(previous) : value)};for(const id of deletedChats.current)delete next[id];return next;});
   const [slashIndex, setSlashIndex] = useState(0), [slashDismissed, setSlashDismissed] = useState(false);
+  const queuedPreferences=useRef(0),preferencesFailed=useRef(false);
+  const localInputs=useRef({attachments:0,dictation:0});
   liveRef.current = lives; chatRef.current = chatId;
   useEffect(()=>{const update=(event:Event)=>{const detail=(event as CustomEvent<{run_id:string;planner_assignment?:Run['planner_assignment']}>).detail;if(!detail?.run_id||!detail.planner_assignment)return;setLives(previous=>previous[detail.run_id]?{...previous,[detail.run_id]:{...previous[detail.run_id],run:{...previous[detail.run_id].run,planner_assignment:detail.planner_assignment}}}:previous);};window.addEventListener('forge:goal-guidance',update);return()=>window.removeEventListener('forge:goal-guidance',update);},[]);
   const draftKey = chatId || `new:${projectId || 'global'}`;
+  if(!deletedChats.current.has(draftKey))draftScopes.current.set(draftKey,chatId ? {scope_kind:'chat',chat_id:chatId,project_id:projectId} : {scope_kind:'new_chat',project_id:projectId});
   const draft = drafts[draftKey] || ''; const images = attachments[draftKey] || [];
   const documentAttachments = documents[draftKey] || [];
   const processingAttachments = (pendingAttachments[draftKey] || []).some(item => item.state === 'processing');
@@ -168,7 +199,22 @@ export default function App() {
   const running = Boolean(live && !live.finished);
   const speedLabel = speed !== undefined ? `${speed.toFixed(1)}${speedEstimated ? ' (estimated)' : ''}` : running ? '— (estimated)' : '—';
   const activeRuns = Object.values(lives).filter(l => !l.finished);
-  const setDraft = useCallback((text: string) => setDrafts(prev => ({ ...prev, [draftKey]: text })), [draftKey]);
+  const setDraft = (text: string) => {if(updateReadiness.canEdit())setDrafts(prev => ({ ...prev, [draftKey]: text }));};
+  useReadinessParticipant({inspect:()=>{
+    const reasons:ReadinessReason[]=[];
+    if(!booted.current || authNeeded)reasons.push('workspace_loading');
+    if(Object.values(privateComposers.current.attachments).some(items=>items.length))reasons.push('unsent_images');
+    if(localInputs.current.attachments || captureBusy || Object.values(pendingAttachments).some(items=>items.some(item=>item.state==='processing')))reasons.push('attachment_pending');
+    if(localInputs.current.dictation || recording || transcribing || dictationBusy || recorder.current || recordingStream.current || browserAudio.current.length || dictationJob.current)reasons.push('dictation_pending');
+    if(busy)reasons.push('submission_pending');
+    if(queuedPreferences.current || preferencesFailed.current)reasons.push('preferences_pending');
+    if(Object.keys(failedSubmissions).length || sendRequests.current.size || steerRequests.current.size)reasons.push('submission_unknown');
+    if(activeRuns.length)reasons.push('active_work');
+    if(Object.values(lives).some(item=>item.approval))reasons.push('approval_pending');
+    if(pendingQuestionCount)reasons.push('question_pending');
+    if(Object.values(lives).some(item=>item.tools.some(tool=>tool.type==='outcome_unknown' || tool.state==='Outcome unknown')))reasons.push('recovery_pending');
+    return {reasons};
+  },flushAndConfirm:async()=>{await settingsQueue.current;return {ok:true,receipts:[]};}});
 
   const flash = useCallback((message: string) => { setNotice(message); setDictationSetupNeeded(false); }, []);
   const workspaceLayout=useWorkspaceLayout(booted.current,flash), uiAppearance=appearance(settings);
@@ -193,12 +239,13 @@ export default function App() {
     if (results[2].status === 'fulfilled') setScheduledCount((results[2].value.schedules || []).filter(item => item.enabled !== false).length);
   }
   async function loadChat(id: string, limit = 80, older = false) {
+    if(!updateReadiness.canEdit() || deletedChats.current.has(id))return;
     const event = new CustomEvent('forge:navigate', {cancelable: true, detail: {page: 'chat', chat_id: id}}); if (!window.dispatchEvent(event)) return;
     const navigationVersion=++navigation.current;
     const version = ++chatNavigationVersion.current;
     if(older && chatScroll.current){historyAnchor.current={height:chatScroll.current.scrollHeight,top:chatScroll.current.scrollTop};setHistoryLoading(true);}else{historyAnchor.current=null;setJumpToLatest(false);}
     try {
-      const next = await api<SavedChat>('get_chat', { id, limit }); if (version !== chatNavigationVersion.current || navigationVersion!==navigation.current) return; if(older && chatScroll.current)historyAnchor.current={height:chatScroll.current.scrollHeight,top:chatScroll.current.scrollTop};setChat(next); setChatId(next.id); setProjectId(next.project_id); setMessagesLimit(limit); setPageState('chat');
+      const next = await api<SavedChat>('get_chat', { id, limit }); if (deletedChats.current.has(id) || version !== chatNavigationVersion.current || navigationVersion!==navigation.current) return; if(older && chatScroll.current)historyAnchor.current={height:chatScroll.current.scrollHeight,top:chatScroll.current.scrollTop};setChat(next); setChatId(next.id); setProjectId(next.project_id); setMessagesLimit(limit); setPageState('chat');
       if (next.model) setSettings(prev => ({ ...prev, model: next.model }));
       shouldScroll.current = !older;
     } catch (e) { if(version===chatNavigationVersion.current){historyAnchor.current=null;flash(errorText(e));} }
@@ -285,15 +332,19 @@ export default function App() {
     }, 3500); return () => clearInterval(timer);
   }, []);
   async function changeSettings(delta: Partial<Settings>) {
+    if(!updateReadiness.canEdit())return; updateReadiness.changed();
+    queuedPreferences.current++;
     const revision = ++settingsRevision.current;
     setSettings(prev => ({ ...prev, ...delta }));
     settingsQueue.current = settingsQueue.current.catch(() => {}).then(async () => {
-      try { if ('startup' in delta) await api('startup', { enabled: delta.startup }); const saved = await api<Settings>('settings', delta); if (revision === settingsRevision.current) setSettings(prev => ({ ...prev, ...saved })); }
-      catch (e) { flash(`Could not save preferences: ${errorText(e)}`); }
+      try { if ('startup' in delta) await api('startup', { enabled: delta.startup }); const saved = await api<Settings>('settings', delta);preferencesFailed.current=false; if (revision === settingsRevision.current) setSettings(prev => ({ ...prev, ...saved })); }
+      catch (e) { preferencesFailed.current=true;flash(`Could not save preferences: ${errorText(e)}`); }
+      finally {queuedPreferences.current--;}
     });
     await settingsQueue.current;
   }
   async function switchMode(mode: boolean, expand = false) {
+    if(!updateReadiness.canEdit())return;
     try { if (isNative()) await native('mode', mode ? 'hud' : 'full', expand); setHud(mode); setPeek(expand); if (mode) setPage('chat'); }
     catch (e) { flash(errorText(e)); }
   }
@@ -308,17 +359,32 @@ export default function App() {
   }
   useEffect(() => {
     const keys = (e: KeyboardEvent) => {
+      if(!updateReadiness.canEdit()){if((e.ctrlKey && ['n','h'].includes(e.key.toLowerCase())) || e.shiftKey && e.key==='Escape' || e.target instanceof Element && e.target.closest('.app'))e.preventDefault();return;}
       if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'h') { e.preventDefault(); void switchMode(!hud); }
       if (e.ctrlKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newChat(); }
       if (e.key === 'Escape') { setModelOpen(false); if (running && e.shiftKey) void controlRun('cancel'); }
     }; window.addEventListener('keydown', keys); return () => window.removeEventListener('keydown', keys);
   }, [hud, running, live]);
-  function newChat() { const event = new CustomEvent('forge:navigate', {cancelable:true,detail:{page:'chat',action:'new'}}); if (!window.dispatchEvent(event)) return; chatNavigationVersion.current++; navigation.current++; chatRef.current = null; setChatId(null); setChat(null); setMessagesLimit(80); setReadyPlan(null); setPageState('chat'); promptRef.current?.focus(); }
-  function chooseProject(id: string | null) { const event = new CustomEvent('forge:navigate', {cancelable:true,detail:{page:'chat',action:'project',project_id:id}}); if (!window.dispatchEvent(event)) return; chatNavigationVersion.current++; navigation.current++; chatRef.current = null; setProjectId(id); setChatId(null); setChat(null); setPageState('chat'); }
+  function newChat() { if(!updateReadiness.canEdit())return; const event = new CustomEvent('forge:navigate', {cancelable:true,detail:{page:'chat',action:'new'}}); if (!window.dispatchEvent(event)) return; chatNavigationVersion.current++; navigation.current++; chatRef.current = null; setChatId(null); setChat(null); setMessagesLimit(80); setReadyPlan(null); setPageState('chat'); promptRef.current?.focus(); }
+  function chooseProject(id: string | null) { if(!updateReadiness.canEdit())return; const event = new CustomEvent('forge:navigate', {cancelable:true,detail:{page:'chat',action:'project',project_id:id}}); if (!window.dispatchEvent(event)) return; chatNavigationVersion.current++; navigation.current++; chatRef.current = null; setProjectId(id); setChatId(null); setChat(null); setPageState('chat'); }
   useEffect(()=>{const approved=(event:Event)=>{const detail=(event as CustomEvent).detail;if(detail.action==='new')newChat();else if(detail.action==='project')chooseProject(detail.project_id);else if(detail.chat_id)void loadChat(detail.chat_id);else if(detail.page)setPage(detail.page);};window.addEventListener('forge:navigate-approved',approved);return()=>window.removeEventListener('forge:navigate-approved',approved);},[page,chatId]);
   async function chatChanged(id: string, change: ChatChange) {
+    if(change==='delete'){
+      // ChatRow calls this only after the coordinator acknowledges deletion.
+      // Revoke the scope before refreshes or any late input callback can arrive.
+      deletedChats.current.add(id);persistedDraft.forgetChat(id);draftScopes.current.delete(id);composerSnapshots.current.delete(id);
+      setLives(prev=>Object.fromEntries(Object.entries(prev).filter(([,item])=>item.run.chat_id!==id)));
+      setDrafts(prev=>({...prev}));setAttachments(prev=>({...prev}));setDocuments(prev=>({...prev}));setTaskSkills(prev=>({...prev}));setTaskSpaces(prev=>({...prev}));setPendingAttachments(prev=>({...prev}));
+      if(dictationTarget.current===id){
+        recordingCancelled.current=true;dictationEpoch.current++;
+        if(recordingTimer.current)clearTimeout(recordingTimer.current);
+        if(recorder.current?.state==='recording')recorder.current.stop();recordingStream.current?.getTracks().forEach(track=>track.stop());browserAudio.current=[];
+        const job=dictationJob.current;dictationJob.current='';setRecording(false);setTranscribing(false);
+        if(job && job!=='pending-upload')void api('dictation_cancel',{id:job}).catch(()=>{});
+      }
+      if(id===chatRef.current)newChat();
+    }
     await refreshWorkspace();
-    if (change === 'delete') { setLives(prev => Object.fromEntries(Object.entries(prev).filter(([, item]) => item.run.chat_id !== id))); setDrafts(prev => { const next = { ...prev }; delete next[id]; return next; }); setAttachments(prev => { const next = { ...prev }; delete next[id]; return next; }); }
     if (id === chatRef.current) { if (change === 'delete' || change === 'archive') newChat(); else await loadChat(id); }
     flash(change === 'delete' ? 'Conversation deleted.' : change === 'archive' ? 'Conversation archived.' : change === 'restore' ? 'Conversation restored.' : change === 'move' ? 'Conversation moved.' : 'Conversation renamed.');
   }
@@ -328,11 +394,13 @@ export default function App() {
   async function saveChatRename(){const target=renameTarget,title=renameValue.trim(),generation=renameGeneration.current;if(!target||!title||renameBusy)return;setRenameBusy(true);try{await api('rename_chat',{id:target,title});if(generation===renameGeneration.current){setChat(previous=>previous?.id===target?{...previous,title}:previous);closeChatRename();}await refreshWorkspace();}catch(failure){if(generation===renameGeneration.current)flash(errorText(failure));}finally{if(generation===renameGeneration.current)setRenameBusy(false);}}
   async function registerProject() { try { if (isNative()) { const result = await native<Project & { cancelled?: boolean }>('choose_project'); if (!result.cancelled) { await refreshWorkspace(); chooseProject(result.id); } } else setPage('projects'); } catch (e) { flash(errorText(e)); } }
   function trackRun(run: Run, navigate = true) {
+    if(updateReadiness.isLocked())updateReadiness.changed();
     if (navigate) {chatNavigationVersion.current++; navigation.current++;}
     setLives(prev => {const existing=prev[run.id];return {...prev,[run.id]:existing ? {...existing,run:{...existing.run,...run},finished:!ACTIVE.has(run.status || 'running')} : { run: { ...run, created_at: run.created_at || new Date().toISOString(), model: run.model || run.settings?.model || settings.model }, text: '', thinking: '', parts: [], tools: [], cursor: 0, status: 'Loading model / waiting for engine…', finished: !ACTIVE.has(run.status || 'running') }};});
     if (navigate && run.chat_id) { setChatId(run.chat_id); if (run.chat_id !== chatId) setChat({ id: run.chat_id, project_id: run.project_id || projectId, model: run.model || settings.model, title: draft.slice(0, 60), messages: [] }); }
   }
   async function send(override?: string) {
+    if(!updateReadiness.canEdit())return;
     const text = (override || draft).trim(); if (!text || busy || processingAttachments) return;
     const user: Message = { role: 'user', content: text, images: images.length ? images : undefined };
     const submitted = {key:draftKey, fingerprint:composerFingerprint, draftScope:persistedDraft.key, draftContent:JSON.stringify(composerContent), navigation:navigation.current, projectId, chatId, settings:{...settings}, images:[...images], documents:documentAttachments.map(item=>item.id), spaces:[...(taskSpaces[draftKey] || [])], skills:[...(taskSkills[draftKey] || [])]};
@@ -369,12 +437,14 @@ export default function App() {
     finally { setBusy(false); if (navigation.current === submitted.navigation) promptRef.current?.focus(); }
   }
   async function buildPlan() {
+    if(!updateReadiness.canEdit())return;
     if (!readyPlan || busy || running) return; setBusy(true); setNotice('');
     const submitted={run_id:readyPlan.run_id,navigation:navigation.current,key:draftKey};const requestKey=`plan:${submitted.run_id}`;const clientId=sendRequests.current.get(requestKey)||crypto.randomUUID();sendRequests.current.set(requestKey,clientId);
     try { await settingsQueue.current; const run = await api<Run>('plan_build', { run_id: submitted.run_id,client_submission_id:clientId });sendRequests.current.delete(requestKey);const stillHere=navigation.current===submitted.navigation;trackRun(run,stillHere);if(stillHere){setReadyPlan(null); setPlanPreview(false); setRightPanel(true); setPanelTab('goals');}setGoalVersion(value => value + 1); await refreshWorkspace(); }
     catch (error) {setFailedSubmissions(previous=>({...previous,[submitted.key]:{action:'plan_build',client_submission_id:clientId,run_id:submitted.run_id}}));flash(errorText(error));} finally { setBusy(false); }
   }
   async function steer() {
+    if(!updateReadiness.canEdit())return;
     const text = draft.trim(); const runId = live?.run.id;
     if (!text || !runId || !running || busy) return;
     // Slash actions remain commands; they must never become ambiguous model instructions.
@@ -404,29 +474,33 @@ export default function App() {
     try { await api('approve', { ...approval, allowed }); setLives(prev => ({ ...prev, [approval.job_id]: { ...prev[approval.job_id], approval: undefined, status: allowed ? 'Continuing' : 'Action denied' } })); } catch (e) { flash(errorText(e)); }
   }
   async function capture() {
-    const key = draftKey; setCaptureBusy(true); try { const result = isNative() ? await native<{ image: string }>('screenshot') : await api<{ image: string }>('screenshot'); setAttachments(prev => ({ ...prev, [key]: [...(prev[key] || []), result.image] })); } catch (e) { flash(errorText(e)); } finally { setCaptureBusy(false); }
+    if(!updateReadiness.canEdit())return;
+    localInputs.current.attachments++;updateReadiness.changed();
+    const key = draftKey; setCaptureBusy(true); try { const result = isNative() ? await native<{ image: string }>('screenshot') : await api<{ image: string }>('screenshot'); setAttachments(prev => ({ ...prev, [key]: [...(prev[key] || []), result.image] })); } catch (e) { flash(errorText(e)); } finally { localInputs.current.attachments--;updateReadiness.changed();setCaptureBusy(false); }
   }
   async function dictate() {
-    if (dictationBusy) return; setDictationBusy(true); setDictationSetupNeeded(false);
+    if(!updateReadiness.canEdit())return;
+    if (dictationBusy || localInputs.current.dictation) return;localInputs.current.dictation++;updateReadiness.changed(); setDictationBusy(true); setDictationSetupNeeded(false);
     try {
-      if (transcribing) { recordingCancelled.current = true; await api('dictation_cancel'); setTranscribing(false); dictationJob.current = ''; flash('Dictation cancelled.'); return; }
+      if (transcribing) { recordingCancelled.current = true;dictationEpoch.current++; await api('dictation_cancel',dictationJob.current && dictationJob.current!=='pending-upload' ? {id:dictationJob.current} : {}); setTranscribing(false); dictationJob.current = ''; flash('Dictation cancelled.'); return; }
       if (!isNative()) {
         if (recording && recorder.current) { dictationJob.current = 'pending-upload'; recorder.current.stop(); setRecording(false); setTranscribing(true); return; }
         if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') throw new Error('Microphone recording requires a supported browser on localhost or HTTPS.');
-        dictationTarget.current = draftKey; dictationJob.current = ''; recordingCancelled.current = false;
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); recordingStream.current = stream; browserAudio.current = [];
+        dictationTarget.current = draftKey;dictationScope.current=draftScopes.current.get(draftKey); dictationJob.current = ''; recordingCancelled.current = false;
+        const generation=++dictationEpoch.current,ownedScope=dictationScope.current;
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });if(recordingCancelled.current || generation!==dictationEpoch.current){stream.getTracks().forEach(track=>track.stop());return;} recordingStream.current = stream; browserAudio.current = [];
         const capture = new MediaRecorder(stream); recorder.current = capture;
         capture.ondataavailable = event => { if (event.data.size) browserAudio.current.push(event.data); };
         capture.onstop = async () => {
           stream.getTracks().forEach(track => track.stop()); recordingStream.current = null; recorder.current = null;
           if (recordingTimer.current) clearTimeout(recordingTimer.current);
           const chunks = browserAudio.current; browserAudio.current = [];
-          if (recordingCancelled.current) return;
+          if (recordingCancelled.current || generation!==dictationEpoch.current) return;
           try { const audio = new Blob(chunks, { type: capture.mimeType }); if (audio.size > 6_000_000) throw new Error('Dictation audio exceeds 6 MB. Try a shorter recording.');
             const encoded = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result).split(',')[1]); reader.onerror = reject; reader.readAsDataURL(audio); });
-            if (recordingCancelled.current) return;
-            const result = await api<{ id: string }>('dictation_upload', { audio: encoded });
-            if (recordingCancelled.current) { await api('dictation_cancel'); return; }
+            if (recordingCancelled.current || generation!==dictationEpoch.current) return;
+            const result = await api<{ id: string }>('dictation_upload', { audio: encoded,draft_scope:ownedScope });
+            if (recordingCancelled.current || generation!==dictationEpoch.current) { await api('dictation_cancel',{id:result.id}); return; }
             dictationJob.current = result.id;
           } catch (e) { setTranscribing(false); flash(errorText(e)); }
           finally { chunks.length = 0; }
@@ -435,25 +509,35 @@ export default function App() {
         recordingTimer.current = setTimeout(() => { if (capture.state === 'recording') { dictationJob.current = 'pending-upload'; capture.stop(); setRecording(false); setTranscribing(true); } }, 120000);
         return;
       }
-      if (!recording) { dictationTarget.current = draftKey; dictationJob.current = ''; }
-      const result = await api<{ state: string; id?: string; text?: string; message?: string; setup_required?: boolean }>(recording ? 'dictation_stop' : 'dictation_start');
+      if (!recording) { dictationEpoch.current++;dictationTarget.current = draftKey;dictationScope.current=draftScopes.current.get(draftKey); dictationJob.current = ''; }
+      const generation=dictationEpoch.current,ownedScope=dictationScope.current,target=dictationTarget.current;
+      const result = await api<{ state: string; id?: string; text?: string; delivery_id?:string;message?: string; setup_required?: boolean }>(recording ? 'dictation_stop' : 'dictation_start',recording ? {} : {draft_scope:dictationScope.current});
+      if(generation!==dictationEpoch.current){if(deletedChats.current.has(target) && result.id)void api('dictation_cancel',{id:result.id}).catch(()=>{});return;}
       if (!['recording', 'transcribing', 'done', 'cancelled'].includes(result.state)) { setDictationSetupNeeded(Boolean(result.setup_required)); throw new Error(result.message || 'Dictation could not start. Check Settings → Dictation.'); }
       setNotice('');
       setRecording(result.state === 'recording'); setTranscribing(result.state === 'transcribing'); if (result.id) dictationJob.current = result.id;
-      if (result.state === 'done') { const text = result.text?.trim(); if (text) setDrafts(prev => ({ ...prev, [dictationTarget.current]: `${prev[dictationTarget.current] || ''}${prev[dictationTarget.current] ? ' ' : ''}${text}` })); flash(text ? 'Transcript added to your draft.' : 'No speech detected. Try again and check your microphone.'); }
+      if (result.state === 'done') {acceptDictation(result,target,ownedScope);dictationJob.current='';const text=result.text?.trim();flash(text ? 'Transcript added to your draft.' : 'No speech detected. Try again and check your microphone.'); }
     } catch (e) { setRecording(false); setTranscribing(false); dictationJob.current = ''; flash(errorText(e)); setDictationSetupNeeded(true); }
-    finally { setDictationBusy(false); }
+    finally { localInputs.current.dictation--;updateReadiness.changed();setDictationBusy(false); }
+  }
+  function acceptDictation(result:{text?:string;delivery_id?:string},target:string,owned:import('./persistentDraft').DraftScope|undefined) {
+    if(deletedChats.current.has(target))return;
+    const id=result.delivery_id;
+    if(id && dictationDeliveries.current.has(id))return;
+    const text=result.text?.trim();if(text)setDrafts(prev=>({...prev,[target]:`${prev[target] || ''}${prev[target] ? ' ' : ''}${text}`}));
+    if(id && owned && /^[a-f0-9]{64}$/.test(id)){dictationDeliveries.current.add(id);persistedDraft.trackDelivery(owned,id);}
   }
   useEffect(() => {
     if ((!recording && !transcribing) || (recording && !isNative())) return;
+    const generation=dictationEpoch.current,ownedScope=dictationScope.current,target=dictationTarget.current;
     let fetching = false;
     const timer = setInterval(async () => {
       if (fetching) return; fetching = true;
-      try { const result = await api<{ state: string; id?: string; text?: string; limit_reached?: boolean; message?: string }>('dictation_status');
+      try { const result = await api<{ state: string; id?: string; text?: string;delivery_id?:string; limit_reached?: boolean; message?: string }>('dictation_status');
+        if(generation!==dictationEpoch.current)return;
         if (result.state === 'error') throw new Error(result.message || 'Dictation failed. Check your microphone and installed model.');
         if (result.state === 'done' && (!dictationJob.current || result.id === dictationJob.current)) {
-          const target = dictationTarget.current;
-          if (result.text) setDrafts(prev => ({ ...prev, [target]: `${prev[target] || ''}${prev[target] ? ' ' : ''}${result.text}` }));
+          acceptDictation(result,target,ownedScope);
           setTranscribing(false); setRecording(false); dictationJob.current = ''; flash(result.text?.trim() ? 'Transcript added to your draft.' : 'No speech detected. Try again and check your microphone.');
         } else if (result.state === 'cancelled') { setTranscribing(false); setRecording(false); }
         else if (result.limit_reached && result.state === 'recording') { const next = await api<{ id: string }>('dictation_stop'); dictationJob.current = next.id; setRecording(false); setTranscribing(true); }
@@ -461,21 +545,25 @@ export default function App() {
       finally { fetching = false; }
     }, 600); return () => clearInterval(timer);
   }, [recording, transcribing]);
-  useEffect(() => () => { recordingCancelled.current = true; if (recordingTimer.current) clearTimeout(recordingTimer.current); if (recorder.current?.state === 'recording') recorder.current.stop(); recordingStream.current?.getTracks().forEach(track => track.stop()); browserAudio.current = []; }, []);
+  useEffect(() => () => { recordingCancelled.current = true;dictationEpoch.current++; if (recordingTimer.current) clearTimeout(recordingTimer.current); if (recorder.current?.state === 'recording') recorder.current.stop(); recordingStream.current?.getTracks().forEach(track => track.stop()); browserAudio.current = []; }, []);
   async function attachFiles(files: FileList | null) {
+    if(!updateReadiness.canEdit())return;
     if (!files) return;
     const key=draftKey, targetProject=projectId;
     const selected=Array.from(files).slice(0,4).map(file=>({file,id:crypto.randomUUID()}));
+    localInputs.current.attachments+=selected.length;updateReadiness.changed();
     setPendingAttachments(previous=>({...previous,[key]:[...(previous[key] || []),...selected.map(item=>({id:item.id,name:item.file.name,state:'processing' as const}))]}));
     for (const {file,id} of selected) {
       try {
         const image=file.type.startsWith('image/');
         if (file.size > (image ? 5_000_000 : 32*1024*1024)) throw new Error(image ? 'Choose an image below 5 MB.' : 'Choose a document below 32 MiB.');
         const content=await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=()=>reject(new Error('The file could not be read.'));reader.readAsDataURL(file);});
+        if(deletedChats.current.has(key))continue;
         if (image) setAttachments(previous=>({...previous,[key]:[...(previous[key] || []),content].slice(0,4)}));
         else {const result=await api<DocumentAttachment>('document_upload',{name:file.name,content_base64:content,project_id:targetProject || undefined}); setDocuments(previous=>({...previous,[key]:[...(previous[key] || []),{id:result.id,name:file.name}].slice(0,8)}));}
         setPendingAttachments(previous=>({...previous,[key]:(previous[key] || []).filter(item=>item.id!==id)}));
       } catch(error) {setPendingAttachments(previous=>({...previous,[key]:(previous[key] || []).map(item=>item.id===id?{...item,state:'error',error:errorText(error)}:item)}));}
+      finally {localInputs.current.attachments--;updateReadiness.changed();}
     }
     if (fileInput.current) fileInput.current.value = '';
   }
@@ -497,7 +585,7 @@ export default function App() {
     <div className="draft-status"><small>{persistedDraft.status}</small>{persistedDraft.conflict && <button className="text-button" onClick={()=>void persistedDraft.reloadSaved()}>Reload saved draft</button>}{Boolean(draft || documentAttachments.length || (taskSkills[draftKey] || []).length || (taskSpaces[draftKey] || []).length) && <button className="text-button" disabled={processingAttachments} onClick={()=>void persistedDraft.discard()}>Discard draft</button>}</div><div className="composer-status"><span className={`composer-connection ${running ? 'status-running' : ''}`}><i />{dictationBusy ? 'Loading local dictation…' : live?.status || connection}{(live || lastRun) && <TaskStatus compact run={(live || lastRun)!.run} status={live?.status} notify={flash} resume={()=>void controlRun('resume')} pause={()=>void controlRun('pause')}/>}</span><span className="composer-metrics"><span>{tokenLabel(settings.context)} context</span><span aria-hidden="true">·</span><span className="metric-speed" aria-label="Generation speed in tokens per second">Tokens/s: {speedLabel}</span></span></div>
   </div>;
 
-  return <div data-accent={project?.appearance?.accent || uiAppearance.accent} data-motion={uiAppearance.motion} data-visibility={visibleDocument?'visible':'hidden'} style={{'--sidebar-width':`${workspaceLayout.layout.sidebar_width}px`,'--right-panel-width':`${workspaceLayout.layout.right_panel_width}px`} as CSSProperties} className={`app ${hud ? 'hud' : ''} ${peek ? 'peek' : ''} ${!sidebar ? 'sidebar-collapsed' : ''}`}>
+  return <><div ref={workspaceRoot} data-update-phase={handoff.phase} data-accent={project?.appearance?.accent || uiAppearance.accent} data-motion={uiAppearance.motion} data-visibility={visibleDocument?'visible':'hidden'} style={{'--sidebar-width':`${workspaceLayout.layout.sidebar_width}px`,'--right-panel-width':`${workspaceLayout.layout.right_panel_width}px`} as CSSProperties} className={`app ${hud ? 'hud' : ''} ${peek ? 'peek' : ''} ${!sidebar ? 'sidebar-collapsed' : ''}`}>
     <input ref={fileInput} type="file" hidden accept="image/*,.txt,.md,.pdf,.docx,.csv,.tsv,.xlsx,.json" multiple onChange={e => void attachFiles(e.target.files)} />
     <Suspense fallback={null}>{showSetup && <SetupWizard settings={settings} models={models} onChange={changeSettings} refreshModels={refreshModels} close={() => setShowSetup(false)} openSettings={tab => { setShowSetup(false); setSettingsTab(tab); setPage('settings'); }} />}{showNotifications && <NotificationCenter close={() => setShowNotifications(false)} openRun={id => { const item = liveRef.current[id]; if (item?.run.chat_id) void loadChat(item.run.chat_id); else void api<{ runs: Run[] }>('runs').then(r => { const run = r.runs.find(v => v.id === id); if (run?.chat_id) void loadChat(run.chat_id); }); setShowNotifications(false); }} />}</Suspense>
     {!hud && sidebar && <WorkspaceSidebar workspaceName={uiAppearance.name} accent={uiAppearance.accent} width={workspaceLayout.layout.sidebar_width} onWidth={value=>workspaceLayout.update({sidebar_width:value})} collapsedProjectIds={workspaceLayout.layout.collapsed_project_ids} onCollapsedProjects={ids=>workspaceLayout.update({collapsed_project_ids:ids})} page={page} projects={projects} chats={chats} projectId={projectId} chatId={chatId} search={search} onSearch={setSearch} scheduledCount={scheduledCount} activeChatIds={activeRuns.map(item => item.run.chat_id || '').filter(Boolean)} navItems={navItems} onPage={setPage} onNew={newChat} onCollapse={() => setSidebar(false)} onConnect={() => void registerProject()} onProject={chooseProject} onChat={id => {if(compactViewport)setSmallSidebar(false);void loadChat(id);}} onChatChanged={chatChanged} onProjectRemoved={projectRemoved} />}
@@ -517,7 +605,7 @@ export default function App() {
     {planPreview && readyPlan && <Modal title="Implementation plan" wide close={() => setPlanPreview(false)}><p className="muted">{readyPlan.request}</p><Markdown text={readyPlan.markdown} />{readyPlan.path && <small className="plan-file-path">{readyPlan.path}</small>}<footer><button className="subtle" onClick={() => setPlanPreview(false)}>Close</button><button className="primary" disabled={busy || running} onClick={() => void buildPlan()}><Play size={14} />Build this plan</button></footer></Modal>}
     {rename && <Modal title="Rename conversation" close={closeChatRename}><form onSubmit={e=>{e.preventDefault();void saveChatRename();}}><input autoFocus aria-label="Conversation title" value={renameValue} maxLength={200} disabled={renameBusy} onChange={e=>setRenameValue(e.target.value)}/><footer><button className="primary" disabled={renameBusy || !renameValue.trim()}>{renameBusy?'Saving…':'Save'}</button></footer></form></Modal>}
     {authNeeded && <Modal title="Connect to your coordinator" close={() => setAuthNeeded(false)}><p className="muted">Generate a pairing code in the Forge desktop app under Settings → Browser, then enter it here.</p><form onSubmit={e => { e.preventDefault(); void api('pair', { code: authInput }).then(() => { setAuthInput(''); booted.current = false; void bootstrap(); }).catch(e => flash(errorText(e))); }}><input type="text" autoComplete="off" autoFocus aria-label="Browser pairing code" value={authInput} onChange={e => setAuthInput(e.target.value)} /><footer><button className="primary">Connect</button></footer></form></Modal>}
-  </div>;
+  </div><UpdateHandoffSurface/></>;
 }
 
 export function FilePanel({ projectId, notify }: { projectId: string | null; notify: (message: string) => void }) {

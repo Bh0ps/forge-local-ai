@@ -23,9 +23,34 @@ class Dictation:
         self._model_error = False
         self._generation = 0
         self._job = None
+        self._job_observer = None
+        self._observer_failed = False
         self._state = {'state': 'idle'}
         self.max_seconds = 120
         self.sample_rate = 16000
+
+    def bind_job_observer(self, observer):
+        """Private host callback; never expose transcript or audio to readiness."""
+        if not callable(observer):
+            raise ValueError('A native dictation observer is required.')
+        with self._lock:
+            if self._job_observer is not None and self._job_observer is not observer:
+                raise ValueError('The dictation observer is already bound.')
+            self._job_observer = observer
+
+    def _observe(self, event, job, nonempty=False):
+        if self._job_observer is not None:
+            try:
+                self._job_observer(event, job, nonempty)
+            except Exception:
+                self._observer_failed = True
+                if event == 'admitted':
+                    raise ValueError('Dictation readiness is unavailable. Preserve your draft and reopen Forge.') from None
+
+    def native_idle(self):
+        with self._lock:
+            return (not self._observer_failed and self._state.get('state') in
+                    ('idle', 'ready', 'done', 'error', 'cancelled') and self._stream is None)
 
     def select_model(self, model):
         if model not in ('tiny', 'base', 'small'):
@@ -120,7 +145,10 @@ class Dictation:
             self._clear_audio()
             self._generation += 1
             generation = self._generation
-            self._state = {'state': 'starting'}
+            self._job = uuid.uuid4().hex
+            job = self._job
+            self._observe('admitted', job)
+            self._state = {'state': 'starting', 'id': job}
             count = 0
             def callback(indata, frames, callback_time, status):
                 nonlocal count
@@ -150,7 +178,7 @@ class Dictation:
                     cancelled = generation != self._generation
                     if not cancelled:
                         self._stream = stream
-                        self._state = {'state': 'recording', 'seconds': 0, 'max_seconds': self.max_seconds}
+                        self._state = {'state': 'recording', 'id': job, 'seconds': 0, 'max_seconds': self.max_seconds}
                 if cancelled:
                     stream.close()
                     return self.status()
@@ -227,7 +255,10 @@ class Dictation:
                 raise ValueError('Dictation is already active.')
             self._generation += 1
             generation = self._generation
-            self._job = uuid.uuid4().hex
+            if expected_generation is None:
+                self._job = uuid.uuid4().hex
+                self._observe('admitted', self._job)
+            job = self._job
             self._state = {'state': 'transcribing', 'id': self._job}
         def worker():
             result = {}
@@ -242,9 +273,9 @@ class Dictation:
                             return
                     parts.append(segment.text)
                 result = {'state': 'done', 'text': ''.join(parts).strip(), 'language': info.language,
-                          'id': self._job, 'device': 'cpu', 'compute_type': 'int8'}
+                          'id': job, 'device': 'cpu', 'compute_type': 'int8'}
             except Exception as exc:
-                result = {'state': 'error', 'error': str(exc)[:500], 'id': self._job}
+                result = {'state': 'error', 'error': str(exc)[:500], 'id': job}
             finally:
                 # BytesIO's own allocation is cleared before close. Python and
                 # the decoder may have transient copies; no audio is persisted.
@@ -257,16 +288,31 @@ class Dictation:
                 with self._lock:
                     if self._generation == generation:
                         self._state = result
+                        self._observe('completed', job, result.get('state') == 'done' and bool(result.get('text')))
         threading.Thread(target=worker, name='forge-dictation', daemon=True).start()
         return self.status()
 
-    def cancel(self):
+    def cancel(self, expected_job=None):
+        if expected_job is not None and (not isinstance(expected_job, str) or
+                len(expected_job) != 32 or any(c not in '0123456789abcdef' for c in expected_job)):
+            raise ValueError('Use the exact dictation job identifier.')
+        # Serialize capture ownership, then detach only the admitted stream.
+        # A stale upload callback must never stop a newer recording. PortAudio
+        # joins its callback, so its stop/close cannot hold the callback lock.
         with self._lock:
+            if expected_job is not None and expected_job != self._state.get('id'):
+                return {**self.status(), 'not_current': True}
             self._generation += 1
+            stream, self._stream = self._stream, None
+            self._observe('discarded', self._state.get('id'))
             self._state = {'state': 'cancelled'}
-        self._stop_capture()
-        with self._lock:
             self._clear_audio()
+        with self._capture_lock:
+            if stream:
+                try:
+                    stream.stop()
+                finally:
+                    stream.close()
         return self.status()
 
     def dispatch(self, action, data=None):
@@ -276,7 +322,7 @@ class Dictation:
         if action == 'stop':
             return self.stop(data.get('language'))
         if action == 'cancel':
-            return self.cancel()
+            return self.cancel(data.get('id'))
         if action == 'status':
             return self.status()
         if action == 'install':

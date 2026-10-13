@@ -1,4 +1,16 @@
 import type { Settings } from './types';
+import { updateReadiness } from './updateReadiness';
+const readActions=new Set(('bootstrap commands projects chats get_chat attachment tasks runs poll plans plan_get unknown_actions goals goal_get spaces agents schedules usage providers models show permission_overrides storage_info setup_status openrouter_status github_status github_repos channel_list channel_notifications memory_list memory_export update_status browser_status browser_native_status dictation_status runtime_status hf_status performance_status pending_questions skills skill_read skill_preview plugins catalogs catalog_discover integrations tools skills_search skills_resource_read skill_route_preview skill_versions builder_list builder_get builder_read build_brief_get builder_changes preview_status preview_logs preview_browser_status preview_browser_inspect preview_browser_capture preview_browser_diagnostics run_context_inspect usage_requests command_session_status command_session_read command_session_wait artifact_list artifact_get artifact_download document_list performance performance_benchmarks performance_calibrations draft_get submission_get builder_runtime_get ai_workflow_status ai_workflow_self_test_status ui_layout_get run_activity run_diagnostics_export host_status').split(' '));
+const persistenceActions=new Set(['draft_save','draft_confirm','ui_layout_save']);
+let pendingMutations=0;
+updateReadiness.register({inspect:()=>({reasons:pendingMutations ? ['submission_pending'] : []}),flushAndConfirm:async()=>pendingMutations ? {ok:false,reason:'submission_pending'} : {ok:true,receipts:[]}});
+function mutationAdmission(action:string,data:Record<string,unknown>) {
+  if(action.startsWith('update_handoff_') || readActions.has(action) || action==='settings' && !Object.keys(data).length)return ()=>{};
+  if(persistenceActions.has(action) && ['idle','failed','checking'].includes(updateReadiness.getSnapshot().phase))return ()=>{};
+  if(!updateReadiness.canEdit())throw new Error('Forge is confirming a restart. Keep working after cancellation is confirmed.');
+  pendingMutations++;updateReadiness.changed();let finished=false;
+  return ()=>{if(!finished){finished=true;pendingMutations--;updateReadiness.changed();}};
+}
 export interface NativeBridge {
   call(action: string, data?: Record<string, unknown>): Promise<unknown>;
   mode?(mode: string, expanded?: boolean): Promise<unknown>;
@@ -32,6 +44,8 @@ function saveClientProof(value: string) {
 }
 export function setApiToken(value: string) { token = value; }
 export async function api<T = Record<string, unknown>>(action: string, data: Record<string, unknown> = {}): Promise<T> {
+  const finish=mutationAdmission(action,data);
+  try {
   let result: unknown;
   if (isNative()) result = await window.pywebview!.api.call(action, data);
   else {
@@ -55,13 +69,17 @@ export async function api<T = Record<string, unknown>>(action: string, data: Rec
   }
   if (result && typeof result === 'object' && 'error' in result && (result as { error?: unknown }).error) throw new Error(String((result as { error: unknown }).error));
   return result as T;
+  } finally {finish();}
 }
 export async function native<T>(method: keyof NativeBridge, ...args: unknown[]): Promise<T> {
+  const finish=method==='copy' ? ()=>{} : mutationAdmission(`native_${method}`,{});
+  try {
   const fn = window.pywebview?.api?.[method];
   if (typeof fn !== 'function') throw new Error('This control requires the Windows desktop app.');
   const result = await (fn as (...values: unknown[]) => Promise<unknown>)(...args);
   if (result && typeof result === 'object' && 'error' in result) throw new Error(String((result as { error: unknown }).error));
   return result as T;
+  } finally {finish();}
 }
 export async function saveSettings(delta: Partial<Settings>): Promise<Settings> { return api<Settings>('settings', delta); }
 export const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);

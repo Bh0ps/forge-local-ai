@@ -1,0 +1,2 @@
+.update-handoff-surface {position:fixed;z-index:10000;left:50%;top:22px;transform:translateX(-50%);width:min(440px,calc(100% - 32px));padding:18px 20px;border:1px solid var(--border);border-radius:14px;background:var(--surface);color:var(--text);box-shadow:0 12px 42px #0003;}
+.update-handoff-surface p {margin:8px 0 12px;font-size:13px;line-height:1.55;}

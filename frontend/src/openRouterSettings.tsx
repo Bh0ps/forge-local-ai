@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useRetainedScratch } from './retainedScratch';
 import { Bot, Check, KeyRound, ShieldCheck, Sparkles } from 'lucide-react';
 import { api, errorText, tokenLabel } from './api';
 import { Badge, ErrorNotice, Field, Toggle } from './components';
@@ -21,14 +22,15 @@ const FREE_ROUTER = 'openrouter/free';
 const connectionOptions = (provider: Provider) => ({ enabled: Boolean(provider.enabled), remote_consent: Boolean(provider.remote_consent), data_collection: provider.data_collection || 'deny' });
 
 export function OpenRouterSettings({ notify, settings, onChange }: { notify: (v: string) => void; settings?: Settings; onChange?: (v: Partial<Settings>) => Promise<void> }) {
-  const [provider, setProvider] = useState<Provider>({});
+  const profileDraft=useRetainedScratch<Provider>('openrouter-profile',{},'unsaved_setup'),provider=profileDraft.value,setProvider=profileDraft.update;
   const [savedProvider, setSavedProvider] = useState<Provider>({});
-  const [key, setKey] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
+  const keyDraft=useRetainedScratch('openrouter-key','','unsaved_setup'),key=keyDraft.value,setKey=keyDraft.update;const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const [workflow,setWorkflow]=useState<WorkflowStatus|null>(null), [selfTest,setSelfTest]=useState<{id:string;state:string;stages?:unknown[];failure_reason?:string}|null>(null);
   async function refreshWorkflow(){const value=await api<WorkflowStatus>('ai_workflow_status');setWorkflow(value);}
   useEffect(() => {
     let disposed = false;
-    void api<{ provider: Provider }>('openrouter_status').then(result => { if (!disposed) { setProvider(result.provider || {}); setSavedProvider(result.provider || {}); } }).catch(e => { if (!disposed) setError(errorText(e)); });
+    const initial=JSON.stringify(profileDraft.current());
+    void api<{ provider: Provider }>('openrouter_status').then(result => { if (!disposed) {if(!profileDraft.dirty && JSON.stringify(profileDraft.current())===initial){setProvider(result.provider || {});profileDraft.accepted(result.provider || {});}setSavedProvider(result.provider || {}); } }).catch(e => { if (!disposed) setError(errorText(e)); });
     void refreshWorkflow().catch(()=>{});
     return () => { disposed = true; };
   }, []);
@@ -45,11 +47,12 @@ export function OpenRouterSettings({ notify, settings, onChange }: { notify: (v:
     try { await onChange(delta); } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
   }
   async function save(test = false) {
+    const captured=provider,capturedKey=key;
     setBusy(true); setError('');
     try {
       const saved = await api<{ provider: Provider }>('openrouter_save', { ...connectionOptions(provider), ...(key ? { api_key: key } : {}) });
-      setKey(''); setProvider(saved.provider); setSavedProvider(saved.provider);
-      if (test) { const checked = await api<{ provider: Provider }>('openrouter_test'); setProvider(checked.provider); setSavedProvider(checked.provider); }
+      setKey(current=>current===capturedKey?'':current);if(JSON.stringify(profileDraft.current())===JSON.stringify(captured))setProvider(saved.provider);profileDraft.accepted(saved.provider);setSavedProvider(saved.provider);
+      if (test) { const checked = await api<{ provider: Provider }>('openrouter_test');if(JSON.stringify(connectionOptions(profileDraft.current()))===JSON.stringify(connectionOptions(saved.provider)))setProvider(checked.provider);profileDraft.accepted(checked.provider);setSavedProvider(checked.provider); }
       notify(test ? 'OpenRouter connection tested.' : 'OpenRouter connection saved.');
       await refreshWorkflow().catch(()=>{});
     } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
@@ -58,7 +61,7 @@ export function OpenRouterSettings({ notify, settings, onChange }: { notify: (v:
     setBusy(true); setError('');
     try {
       const result = await api<{ agents: Agent[]; settings?: Partial<Settings>; provider?: Provider }>('openrouter_setup_agents');
-      if (result.provider) { setProvider(result.provider); setSavedProvider(result.provider); }
+      if (result.provider) { setProvider(result.provider);profileDraft.accepted(result.provider);setSavedProvider(result.provider); }
       if (onChange && result.settings) await onChange({ auto_delegate: Boolean(result.settings.auto_delegate), goal_review_enabled: Boolean(result.settings.goal_review_enabled), goal_review_model: String(result.settings.goal_review_model || FREE_ROUTER), goal_review_max_revisions: Number(result.settings.goal_review_max_revisions || 3), goal_review_context: Number(result.settings.goal_review_context || 32768) });
       notify('OpenRouter helpers and independent goal review are ready. Your main model stays selected.');
     } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
@@ -78,7 +81,7 @@ export function OpenRouterSettings({ notify, settings, onChange }: { notify: (v:
       <Toggle label="Allow assigned context to leave this computer" description="Helpers receive their assigned prompt and tool results. Goal review sends the goal, checklist and recorded evidence to OpenRouter and its model provider." checked={Boolean(provider.remote_consent)} disabled={busy} onChange={remote_consent => setProvider({ ...provider, remote_consent })} />
       <Toggle label="Enable free OpenRouter agents" checked={Boolean(provider.enabled)} disabled={busy} onChange={enabled => setProvider({ ...provider, enabled })} />
       <Toggle label="Allow providers that collect data" description="Off requests providers that do not collect prompt data. Free providers may be unavailable under this restriction." checked={provider.data_collection === 'allow'} disabled={busy} onChange={allow => setProvider({ ...provider, data_collection: allow ? 'allow' : 'deny' })} />
-      <div className="setup-actions"><button className="primary" disabled={busy} onClick={() => void save()}><KeyRound size={14} />Save connection</button><button className="secondary" disabled={busy} onClick={() => void save(true)}><Check size={14} />Connect / Test</button><a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener noreferrer">Create a key</a></div>
+      <div className="setup-actions">{(keyDraft.dirty || profileDraft.dirty) && <button type="button" className="text-button" disabled={busy} onClick={()=>{keyDraft.discard();setProvider(savedProvider);profileDraft.accepted(savedProvider);}}>Discard connection input</button>}<button className="primary" disabled={busy} onClick={() => void save()}><KeyRound size={14} />Save connection</button><button className="secondary" disabled={busy} onClick={() => void save(true)}><Check size={14} />Connect / Test</button><a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener noreferrer">Create a key</a></div>
       {quota && <p className="openrouter-quota">Free requests today: {quota.used} / {quota.limit} · {quota.remaining} remaining. Helpers and reviews share this quota.</p>}
     </section>
     {settings && onChange && <>

@@ -261,7 +261,7 @@ def native_bridge(monkeypatch, bridge_class):
     drawing.Size = lambda width, height: (width, height)
     monkeypatch.setitem(sys.modules, 'System.Drawing', drawing)
     bridge, form = bridge_class(), Form()
-    bridge._native = lambda operation: operation(form)
+    bridge._native = lambda operation, **kwargs: operation(form)
     return bridge, form, area
 
 

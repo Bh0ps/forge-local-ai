@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
+from forge_cloud_failure import continuation_diagnostics
 
 
 ACCENTS = ('copper', 'sage', 'blue', 'violet', 'rose')
@@ -58,6 +59,7 @@ def _failure(value):
             result[key] = value[key]
     if type(value.get('http_status')) is int and 100 <= value['http_status'] <= 599:
         result['http_status'] = value['http_status']
+    result.update(continuation_diagnostics(value))
     return result or None
 
 
@@ -231,11 +233,12 @@ class WorkspaceUI:
         settings = run.get('settings') or {}
         with self.store._connection() as db:
             last = db.execute('SELECT name,status FROM invocations WHERE run_id=? ORDER BY updated_at DESC LIMIT 1', (run['id'],)).fetchone()
+        failure = _failure(run.get('failure')) or {}
         return {'schema': 1, 'run_id': run['id'], 'status': run['status'], 'provider_id': settings.get('provider_id'),
                 'requested_model': settings.get('model'), 'actual_model': run.get('returned_model_last'),
                 'rounds': run.get('rounds', 0), 'tools': run.get('tools', 0),
                 'last_tool': dict(last) if last else None, 'retry_count': run.get('retry_count', 0),
-                'attempt': run.get('attempt', 1), 'stop_category': (run.get('failure') or {}).get('category'),
-                'http_status': (run.get('failure') or {}).get('http_status'),
+                'attempt': run.get('attempt', 1), 'stop_category': failure.get('category'),
+                'http_status': failure.get('http_status'), **continuation_diagnostics(failure),
                 'finish_reason': run.get('last_finish_reason'), 'generation_id': run.get('provider_generation_id'),
                 'response_provider': run.get('response_provider')}

@@ -1613,13 +1613,13 @@ class RunManager:
                     if calls and not truncated and not call_error and (details or run['settings']['provider_id']=='openrouter' and hasattr(provider,'validate_continuation')):
                         from forge_openrouter import OpenRouterFailure, FREE_ROUTER
                         if run.get('continuation_model') and bound_model!=run['continuation_model']:
-                            raise OpenRouterFailure('The provider changed the model bound to this tool exchange. Start a fresh scoped assignment; no tool from this response ran.',category='continuation_unavailable')
+                            raise OpenRouterFailure('The provider changed the model bound to this tool exchange. Start a fresh scoped assignment; no tool from this response ran.',category='continuation_unavailable',continuation_reason='model_changed')
                         if effective_model==FREE_ROUTER and not run.get('continuation_model'):
                             required=['tools']+(['vision'] if run.get('vision_image') or run.get('images') else [])+(['structured_outputs'] if data.get('response_format') else [])
                             pinned=provider.validate_continuation(bound_model,run['settings']['context'],required)
                             run=self.store.update_run(identifier,continuation_model=pinned)
                         elif bound_model!=effective_model:
-                            raise OpenRouterFailure('Reasoning state did not match the requested model. Start a fresh scoped assignment; no tool from this response ran.',category='continuation_unavailable')
+                            raise OpenRouterFailure('Reasoning state did not match the requested model. Start a fresh scoped assignment; no tool from this response ran.',category='continuation_unavailable',continuation_reason='model_changed')
                     if truncated:
                         changes={'output_retries':run.get('output_retries',0)+1}
                         if run.get('mode')=='plan' and visible_answer: changes['plan_fragments']=run.get('plan_fragments',[])+[visible_answer]

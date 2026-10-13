@@ -24,8 +24,10 @@ export function transcriptActivity(chat:SavedChat|null,lives:ActivityLive[]):Act
   const build=(group:ActivityGroup):ActivityGroup=>{const live=byId.get(group.run_id);const persisted=group.children || [];const known=new Set(persisted.map(child=>child.run_id));const children=latestActivityAssignments([...persisted,...lives.filter(item=>item.run.parent_id===group.run_id && !known.has(item.run.id)).map(item=>fromLive(item))]).map(build);
     const tools=live?new Set(live.tools.filter(event=>event.type==='tool'||event.type==='outcome_unknown').map(event=>event.invocation_id || event.seq)).size:0;
     const attempts=(group.attempts || []).map(build);
-    return {...group,...(live?{status:live.run.status || group.status,current_step:live.run.progress_summary?.activity || live.status,model:live.run.returned_model_last || live.run.continuation_model || group.model || live.run.model,provider_id:String(live.run.settings?.provider_id || group.provider_id || ''),summary:live.run.progress_summary?.blocker || live.run.progress_summary?.waiting_reason || group.summary}:{}),tool_count:Math.max(group.tool_count || 0,tools+attempts.reduce((total,item)=>total+item.tool_count,0)),helper_count:Math.max(group.helper_count || 0,children.length),children,attempts};};
-  const fromLive=(item:ActivityLive):ActivityGroup=>({run_id:item.run.id,request_message_id:item.run.request_message_id,status:item.run.status || 'running',mode:item.run.mode,model:item.run.returned_model_last || item.run.continuation_model || item.run.model,provider_id:String(item.run.settings?.provider_id || ''),created_at:item.run.created_at,current_step:item.status,tool_count:0,helper_count:0,children:[],assignment_id:item.run.assignment_id,attempt:item.run.attempt,retry_count:item.run.retry_count});
+    const liveSummary=live?.run.progress_summary?.blocker || live?.run.progress_summary?.waiting_reason;
+    const finished=live?.run.status==='completed' || live?.run.status==='cancelled';
+    return {...group,...(live?{status:live.run.status || group.status,current_step:live.run.progress_summary?.activity || live.status,model:live.run.returned_model_last || live.run.continuation_model || group.model || live.run.model,provider_id:String(live.run.settings?.provider_id || group.provider_id || ''),summary:liveSummary || (finished?'':group.summary),failure:live.run.failure===undefined?group.failure:live.run.failure || undefined,finish_reason:live.run.last_finish_reason || group.finish_reason,response_provider:live.run.response_provider || group.response_provider}:{}),tool_count:Math.max(group.tool_count || 0,tools+attempts.reduce((total,item)=>total+item.tool_count,0)),helper_count:Math.max(group.helper_count || 0,children.length),children,attempts};};
+  const fromLive=(item:ActivityLive):ActivityGroup=>({run_id:item.run.id,request_message_id:item.run.request_message_id,status:item.run.status || 'running',mode:item.run.mode,model:item.run.returned_model_last || item.run.continuation_model || item.run.model,provider_id:String(item.run.settings?.provider_id || ''),created_at:item.run.created_at,current_step:item.status,tool_count:0,helper_count:0,children:[],assignment_id:item.run.assignment_id,attempt:item.run.attempt,retry_count:item.run.retry_count,failure:item.run.failure || undefined,finish_reason:item.run.last_finish_reason,response_provider:item.run.response_provider});
   const seen=new Set(saved.map(group=>group.run_id));
   return [...saved,...lives.filter(item=>item.run.chat_id===chat?.id && !item.run.parent_id && !seen.has(item.run.id)).map(fromLive)].map(build).sort((a,b)=>(a.request_message_id || 0)-(b.request_message_id || 0));
 }
@@ -33,8 +35,19 @@ export function activityRunIds(groups:ActivityGroup[]):Set<string>{return new Se
 interface ActivityResult {run_id:string;events:RunEvent[];next_cursor:number;has_more:boolean;status:string;children?:ActivityGroup[];}
 export function activityFailureLabel(failure:ActivityGroup['failure']):string {
   if(typeof failure==='string')return failure;if(!failure || typeof failure!=='object')return '';
+  const continuation=continuationFailureLabel(failure);if(continuation)return continuation;
   const labels:Record<string,string>={protocol:'Incomplete or invalid tool response',tool_protocol:'Incomplete or invalid tool response',continuation_unavailable:'The selected model could not continue the tool exchange',empty_result:'The helper returned no visible findings',timeout:'Provider response timed out',context:'The request exceeded the model context',refusal:'The provider declined this request',configuration:'Provider configuration needs attention',cancelled:'The helper was cancelled'};
   return `${failure.provider_id || 'Provider'}: ${labels[failure.category || ''] || String(failure.category || 'Request failed').replaceAll('_',' ')}${failure.http_status?` (HTTP ${failure.http_status})`:''}`;
+}
+function continuationFailureLabel(failure:ActivityGroup['failure']):string {
+  if(!failure || typeof failure!=='object' || failure.category!=='continuation_unavailable')return '';
+  const requested=failure.requested_context,limit=failure.model_context_limit;
+  if(failure.continuation_reason==='context_limit' && typeof requested==='number' && typeof limit==='number'
+    && Number.isSafeInteger(requested) && Number.isSafeInteger(limit)
+    && requested>0 && requested<=262144 && limit>0 && limit<=16777216 && requested>limit)
+    return `This route supports ${limit.toLocaleString('en-US')} tokens; the helper requests ${requested.toLocaleString('en-US')}. No tool from this response ran.`;
+  const reasons:Record<string,string>={model_unavailable:'The returned model is not advertised as an exact free model.',capabilities:'The returned model does not advertise the capabilities this helper needs.',model_changed:'The provider changed models during this tool exchange.'};
+  return reasons[failure.continuation_reason || ''] ? `${reasons[failure.continuation_reason!]} No tool from this response ran.` : '';
 }
 function ActivityStep({event}: {event:RunEvent}) {
   if(['tool','outcome_unknown','specialist','verification','skill'].includes(event.type))return <ActivityCard event={event}/>;
@@ -53,7 +66,7 @@ export function ChatActivity({group,lives=[],helper=false}: {group:ActivityGroup
   useEffect(()=>{generation.current++;cursor.current=0;pending.current=false;setEvents([]);setChildren([]);setError('');setHasMore(false);return()=>{generation.current++;};},[group.run_id]);
   useEffect(()=>{if(!open)return;void load();if(!active)return;const timer=setInterval(()=>{if(document.visibilityState!=='hidden')void load();},2500);return()=>clearInterval(timer);},[open,group.run_id,active,retry]);
   const label=helper?'Helper activity':'Task activity', status=group.status.replaceAll('_',' ');
-  const outcome=group.summary || activityFailureLabel(group.failure);
+  const outcome=continuationFailureLabel(group.failure) || group.summary || activityFailureLabel(group.failure);
   return <section className={`chat-activity ${helper?'helper-activity':''} ${active?'active-work':''}`} aria-label={label}>
     <button type="button" className="chat-activity-summary" aria-expanded={open} onClick={()=>setOpen(!open)}>{open?<ChevronDown size={14}/>:<ChevronRight size={14}/>}<span className="activity-mark">{helper?<Bot size={15}/>:active?<LoaderCircle className="spin" size={15}/>:<Activity size={15}/>}</span><span className="activity-title"><strong>{group.current_step || (active?'Working':status)}</strong><small>{helper && group.provider_id?`${group.provider_id} · `:''}{helper && group.model?`${friendlyModel(group.model)} · `:''}{helper && (group.attempt || 1)>1?`Attempt ${group.attempt} · `:''}{group.tool_count || 0} tool {group.tool_count===1?'step':'steps'}{group.helper_count?` · ${group.helper_count} ${group.helper_count===1?'helper':'helpers'}`:''}</small></span><span className="activity-state">{status}</span></button>
     {outcome && <p className="activity-outcome">{outcome}</p>}
