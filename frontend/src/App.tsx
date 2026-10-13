@@ -138,6 +138,13 @@ export default function App() {
   const recorder = useRef<MediaRecorder | null>(null); const recordingStream = useRef<MediaStream | null>(null); const browserAudio = useRef<Blob[]>([]); const recordingTimer = useRef<ReturnType<typeof setTimeout> | null>(null); const recordingCancelled = useRef(false);
   const dictationScope=useRef<import('./persistentDraft').DraftScope|undefined>(undefined),dictationDeliveries=useRef(new Set<string>()),dictationEpoch=useRef(0);
   const chatNavigationVersion = useRef(0);
+  const newComposerFocus = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const accepted = newComposerFocus.current;
+    if (accepted === null) return;
+    newComposerFocus.current = null;
+    if (accepted === navigation.current && page === 'chat' && updateReadiness.canEdit()) promptRef.current?.focus();
+  });
   const steerRequests = useRef(new Map<string, string>());
   const sendRequests = useRef(new Map<string, string>());
   const [failedSubmissions,setFailedSubmissions]=useState<Record<string,SubmissionScope>>({});
@@ -365,7 +372,7 @@ export default function App() {
       if (e.key === 'Escape') { setModelOpen(false); if (running && e.shiftKey) void controlRun('cancel'); }
     }; window.addEventListener('keydown', keys); return () => window.removeEventListener('keydown', keys);
   }, [hud, running, live]);
-  function newChat() { if(!updateReadiness.canEdit())return; const event = new CustomEvent('forge:navigate', {cancelable:true,detail:{page:'chat',action:'new'}}); if (!window.dispatchEvent(event)) return; chatNavigationVersion.current++; navigation.current++; chatRef.current = null; setChatId(null); setChat(null); setMessagesLimit(80); setReadyPlan(null); setPageState('chat'); promptRef.current?.focus(); }
+  function newChat() { if(!updateReadiness.canEdit())return; const event = new CustomEvent('forge:navigate', {cancelable:true,detail:{page:'chat',action:'new'}}); if (!window.dispatchEvent(event)) return; chatNavigationVersion.current++; navigation.current++; newComposerFocus.current = navigation.current; chatRef.current = null; setChatId(null); setChat(null); setMessagesLimit(80); setReadyPlan(null); setPageState('chat'); if (promptRef.current) { promptRef.current.focus(); newComposerFocus.current = null; } }
   function chooseProject(id: string | null) { if(!updateReadiness.canEdit())return; const event = new CustomEvent('forge:navigate', {cancelable:true,detail:{page:'chat',action:'project',project_id:id}}); if (!window.dispatchEvent(event)) return; chatNavigationVersion.current++; navigation.current++; chatRef.current = null; setProjectId(id); setChatId(null); setChat(null); setPageState('chat'); }
   useEffect(()=>{const approved=(event:Event)=>{const detail=(event as CustomEvent).detail;if(detail.action==='new')newChat();else if(detail.action==='project')chooseProject(detail.project_id);else if(detail.chat_id)void loadChat(detail.chat_id);else if(detail.page)setPage(detail.page);};window.addEventListener('forge:navigate-approved',approved);return()=>window.removeEventListener('forge:navigate-approved',approved);},[page,chatId]);
   async function chatChanged(id: string, change: ChatChange) {

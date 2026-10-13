@@ -4,16 +4,42 @@ import { api, errorText } from './api';
 import { Badge, Empty, ErrorNotice, Field, IconButton, Modal, Toggle, useResource } from './components';
 import type { Connection } from './types';
 import './mcpSettings.css';
+import { useRetainedScratch } from './retainedScratch';
 
 export interface McpServer extends Connection { args?: string[]; cwd?: string; authenticated?: boolean; auth_type?: 'none' | 'bearer' | 'oauth'; enabled_tools?: string[]; tools?: { name: string; description?: string }[]; }
 type AuthState = { state: string; setup_token?: string; flow_id?: string; authorization_url?: string; server?: McpServer };
 type CheckResult = { tool_count: number; tools?: { name: string; description?: string }[] };
 const identity = () => crypto.randomUUID().replaceAll('-', '');
+interface ToolPermissionOwner {key:string;saves:Map<string,Promise<McpServer>>}
+const nativeToolOwners=new WeakMap<object,ToolPermissionOwner>(),browserToolOwner:ToolPermissionOwner={key:'mcp-tools-browser',saves:new Map()};
+function toolPermissionOwner(){const bridge=window.pywebview?.api;if(!bridge)return browserToolOwner;let owner=nativeToolOwners.get(bridge);if(!owner){owner={key:`mcp-tools-${identity()}`,saves:new Map()};nativeToolOwners.set(bridge,owner);}return owner;}
+const toolSelection=(server:McpServer)=>server.enabled_tools || (server.tools || []).map(tool=>tool.name);
+function checkedToolServer(value:unknown,id:string,requireSelection=false):McpServer {
+  const server=value as McpServer | undefined;
+  if(!server || server.id!==id || server.tools!==undefined && (!Array.isArray(server.tools) || !server.tools.every(tool=>tool && typeof tool.name==='string')) || requireSelection && (!Array.isArray(server.tools) || !Array.isArray(server.enabled_tools)) || server.enabled_tools!==undefined && (!Array.isArray(server.enabled_tools) || !server.enabled_tools.every(name=>typeof name==='string')))throw new Error('Tool permissions could not be confirmed. Reload the connection and try again.');
+  return server;
+}
 
 export function McpSettings({ notify }: { notify: (message: string) => void }) {
   const data = useResource<McpServer>('mcp_servers', 'servers');
   const [edit, setEdit] = useState<McpServer | null>(null), [editor, setEditor] = useState(0);
-  const [tools, setTools] = useState<McpServer | null>(null), [pending, setPending] = useState('');
+  const [tools, setTools] = useState<McpServer | null>(null), [pending, setPending] = useState(''),[toolSaving,setToolSaving]=useState<string[]>([]);
+  const toolOwner=useRef(toolPermissionOwner()).current,toolDrafts=useRetainedScratch<Record<string,string[]>>(toolOwner.key,{},'unsaved_setup'),toolSaves=toolOwner.saves,mounted=useRef(true);
+  useEffect(()=>{mounted.current=true;return()=>{mounted.current=false;};},[]);
+  function savedTools(server:McpServer){
+    if(!mounted.current)return;
+    data.setItems(items=>items.map(item=>item.id===server.id ? server : item));
+  }
+  async function saveTools(id:string,selection:string[]){
+    if(toolSaves.has(id))throw new Error('Wait for the current permission change to finish.');
+    toolDrafts.update(drafts=>({...drafts,[id]:[...selection]}));setToolSaving(ids=>[...ids,id]);
+    const operation=api<{ok?:boolean;server:McpServer}>('mcp_save',{id,enabled_tools:selection}).then(result=>{
+      if(result.ok===false)throw new Error('Tool permissions could not be confirmed. Reload the connection and try again.');
+      const server=checkedToolServer(result.server,id,true);toolDrafts.apply(drafts=>{const next={...drafts};delete next[id];return next;});savedTools(server);return server;
+    });
+    toolSaves.set(id,operation);
+    try{return await operation;}finally{if(toolSaves.get(id)===operation)toolSaves.delete(id);if(mounted.current)setToolSaving(ids=>ids.filter(value=>value!==id));}
+  }
   const changing = useRef(false);
   function open(server: McpServer) { setEditor(current => current + 1); setEdit(server); }
   async function toggle(server: McpServer) {
@@ -25,15 +51,16 @@ export function McpSettings({ notify }: { notify: (message: string) => void }) {
   }
   return <><div className="settings-section-heading"><h2>MCP connections</h2><button className="secondary" onClick={() => open({ id: '', name: '', url: '', transport: 'http', auth_type: 'none', enabled: false })}><Plus size={14} />Add connection</button></div>
     <p className="muted">Connect the tools you use. Check a connection before saving it.</p>
+    {Object.keys(toolDrafts.current()).length>0 && <p className="muted">Tool permission selections are not saved yet. Retry from Tools.<button type="button" className="text-button" disabled={toolSaving.length>0 || toolSaves.size>0} onClick={()=>toolDrafts.discard()}>Discard unsaved tool selections</button></p>}
     {data.error && <ErrorNotice error={data.error} retry={() => void data.refresh()} />}
     {data.items.length ? <section className="settings-card mcp-connections">{data.items.map(server => <div className="mcp-connection-row" key={server.id}>
       <span className={`mcp-connection-icon${server.enabled ? ' enabled' : ''}`}><Plug size={19} aria-hidden="true" /></span>
       <div className="mcp-connection-name"><strong>{server.name}</strong><small title={server.url || server.command}>{server.url || server.command}</small></div>
       <Badge>{server.enabled ? 'Enabled' : ['needs_test', 'authenticating', 'error'].includes(server.status || '') ? 'Needs setup' : 'Disabled'}</Badge>
-      <div className="mcp-row-actions"><IconButton label={`Configure ${server.name}`} onClick={() => open(server)}><Settings2 size={16} /></IconButton><IconButton label={`Tools for ${server.name}`} onClick={() => setTools(server)}><Wrench size={16} /></IconButton><IconButton label={`${server.enabled ? 'Disable' : 'Enable'} ${server.name}`} disabled={Boolean(pending)} onClick={() => void toggle(server)}>{pending === server.id ? <LoaderCircle size={16} className="spin" /> : <Power size={16} />}</IconButton></div>
+      <div className="mcp-row-actions"><IconButton label={`Configure ${server.name}`} disabled={toolSaving.includes(server.id) || toolSaves.has(server.id)} onClick={() => open(server)}><Settings2 size={16} /></IconButton><IconButton label={`Tools for ${server.name}`} onClick={() => setTools(server)}><Wrench size={16} /></IconButton><IconButton label={`${server.enabled ? 'Disable' : 'Enable'} ${server.name}`} disabled={Boolean(pending) || toolSaving.includes(server.id) || toolSaves.has(server.id)} onClick={() => void toggle(server)}>{pending === server.id ? <LoaderCircle size={16} className="spin" /> : <Power size={16} />}</IconButton></div>
     </div>)}</section> : !data.error && <Empty icon={<Plug size={26} />} title="Connect your first tool server" text="Start with an endpoint URL. Local executable servers are available in advanced setup." />}
     {edit && <McpEditor key={editor} server={edit} close={() => { setEdit(null); void data.refresh(); }} committed={() => void data.refresh()} complete={() => { setEdit(null); void data.refresh(); notify('MCP connection enabled.'); }} />}
-    {tools && <Modal title={`${tools.name} · Tools`} close={() => setTools(null)} wide><McpTools connection={tools} notify={notify} /></Modal>}
+    {tools && <Modal title={`${tools.name} · Tools`} close={() => setTools(null)} wide><McpTools connection={tools} saved={savedTools} save={saveTools} pending={()=>toolSaves.get(tools.id)} retained={()=>toolDrafts.current()[tools.id]} /></Modal>}
   </>;
 }
 
@@ -156,14 +183,31 @@ export function McpEditor({ server, close, committed, complete }: { server: McpS
   </form></Modal>;
 }
 
-function McpTools({ connection, notify }: { connection: McpServer; notify: (message: string) => void }) {
-  const all = connection.tools || [], [enabled, setEnabled] = useState(connection.enabled_tools || all.map(tool => tool.name)), [busy, setBusy] = useState(false), pending = useRef(false);
-  async function toggle(name: string, value: boolean) {
-    if (pending.current) return;
-    pending.current = true; setBusy(true); const next = value ? [...enabled, name] : enabled.filter(item => item !== name);
-    try { await api('mcp_save', { id: connection.id, enabled_tools: next }); setEnabled(next); }
-    catch (failure) { notify(errorText(failure)); }
-    finally { pending.current = false; setBusy(false); }
+function McpTools({ connection, saved, save, pending, retained }: { connection:McpServer;saved:(server:McpServer)=>void;save:(id:string,selection:string[])=>Promise<McpServer>;pending:()=>Promise<McpServer>|undefined;retained:()=>string[]|undefined }) {
+  const [server,setServer]=useState<McpServer|null>(null),[enabled,setEnabled]=useState<string[]>([]),[busy,setBusy]=useState(false),[loading,setLoading]=useState(true),[error,setError]=useState(''),[retry,setRetry]=useState(0);
+  const mounted=useRef(true),generation=useRef(0),saving=useRef(false);
+  useEffect(()=>{mounted.current=true;const request=++generation.current;setLoading(true);setServer(null);setError('');
+    void (async()=>{
+      try{
+        // A reopened view cannot edit an older snapshot while its save waits.
+        await pending()?.catch(()=>{});
+        if(!mounted.current || request!==generation.current)return;
+        const result=await api<{servers:McpServer[]}>('mcp_servers');
+        if(!mounted.current || request!==generation.current)return;
+        const current=checkedToolServer(Array.isArray(result.servers) ? result.servers.find(item=>item.id===connection.id) : undefined,connection.id),draft=retained();
+        saved(current);setServer(current);setEnabled(draft || toolSelection(current));
+        if(draft)setError('Permission changes have not been saved. Your selection is kept; retry to apply it.');
+      }catch(failure){if(mounted.current && request===generation.current)setError(errorText(failure));}
+      finally{if(mounted.current && request===generation.current)setLoading(false);}
+    })();return()=>{mounted.current=false;generation.current++;};
+  },[connection.id,retry]);
+  async function apply(selection:string[]){
+    if(saving.current || loading || !server)return;
+    saving.current=true;setBusy(true);setEnabled(selection);setError('');const request=generation.current;
+    try{const current=await save(connection.id,selection);if(mounted.current && request===generation.current){setServer(current);setEnabled(toolSelection(current));}}
+    catch(failure){if(mounted.current && request===generation.current)setError(`${errorText(failure)} Your selection is kept; retry to save it.`);}
+    finally{saving.current=false;if(mounted.current && request===generation.current)setBusy(false);}
   }
-  return <div className="mcp-tools">{all.length ? all.map(tool => <Toggle key={tool.name} label={tool.name} description={tool.description} checked={enabled.includes(tool.name)} disabled={busy} onChange={value => void toggle(tool.name, value)} />) : <Empty icon={<Wrench size={22} />} title="No tools discovered" text="Check this connection to discover its available tools." />}</div>;
+  const all=server?.tools || [];
+  return <div className="mcp-tools">{loading && <p className="muted" role="status">Loading tool permissions…</p>}{error && <ErrorNotice error={error} retry={!busy && !loading ? ()=>server ? void apply(enabled) : setRetry(value=>value+1) : undefined}/>} {!loading && all.length ? all.map(tool=><Toggle key={tool.name} label={tool.name} description={tool.description} checked={enabled.includes(tool.name)} disabled={busy} onChange={value=>void apply(value ? [...enabled,tool.name] : enabled.filter(name=>name!==tool.name))}/>) : !loading && server && <Empty icon={<Wrench size={22}/>} title="No tools discovered" text="Check this connection to discover its available tools."/>}</div>;
 }

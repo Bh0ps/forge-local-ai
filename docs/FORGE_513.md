@@ -1,6 +1,6 @@
 # Forge 5.1.3 Windows preview
 
-This preview improves restart readiness and cloud-helper recovery. It preserves
+This preview improves restart readiness, tool permissions and cloud-helper recovery. It preserves
 Forge's conversation layout, colors, compact settings and project workflows.
 
 ## Saved work before a restart
@@ -53,6 +53,19 @@ retain their blocked state.
 These captures exercise the production UI with synthetic data. Task content and
 available versions are fixtures; no private workspace or external account is
 shown.
+
+## Tool permissions and everyday navigation
+
+Reopening an MCP connection's Tools dialog loads its current permissions. A
+pending save finishes before another edit can start; failed selections remain
+available to retry or discard and block restart until resolved. Changing a
+different tool no longer restores a permission that was previously disabled.
+
+New chat focuses the composer after it mounts, including when opened with
+Ctrl+N from Settings. Cancelled navigation keeps the current focus and saved
+chat drafts remain available. The research browser keeps a submitted URL visible
+while navigation waits, preserves later edits and shows failed navigation for
+retry instead of restoring an older address.
 
 ## Downloads, trust and recovery
 
