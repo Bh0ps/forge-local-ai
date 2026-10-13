@@ -34,6 +34,20 @@ function Write-ForgeSmokeDiagnostics {
         'Browser panel falls outside the workspace viewport.' = 'panel-viewport'
         'Native workspace viewport is unavailable.' = 'native-viewport'
         'DPI or browser zoom changed. Refresh the Browser panel.' = 'panel-dpi'
+        'Browser action cancelled.' = 'browser-cancelled'
+        'Open Forge Browser or use browser_navigate before inspecting this page.' = 'browser-not-open'
+        'Browser page is still loading. Inspect again when navigation completes.' = 'browser-loading'
+        'Browser page could not be inspected.' = 'browser-inspection'
+        'Browser navigated while inspecting. Inspect again.' = 'browser-navigation-changed'
+        'Start a ready preview before inspecting it.' = 'preview-not-ready'
+        'Preview inspection requires Forge desktop.' = 'preview-desktop-missing'
+        'This Builder or preview belongs to another project.' = 'preview-project-scope'
+        'The browser panel requires the local Forge workspace.' = 'panel-origin'
+        'Forge panel layout did not respond. Open it again.' = 'panel-layout-timeout'
+        'Forge panel layout could not be inspected.' = 'panel-layout-inspection'
+        'Browser layout changed. Refresh its panel bounds.' = 'panel-layout-changed'
+        'Browser panel changed. Inspect again after reopening it.' = 'panel-layout-changed'
+        'Browser view has been disposed.' = 'browser-disposed'
     }
     $phases = @('workspace-ready','workspace-size','library','host-lifecycle','research-start','research-navigate',
         'research-load','research-input-target','research-type','research-button-target','research-click','research-verify',
@@ -69,6 +83,16 @@ function Write-ForgeSmokeDiagnostics {
             research=(Check-Status $SmokeData.native_browser.fixture_updated ($SmokeData.native_browser.fixture_updated -eq $true))
             research_bridge=(Check-Status $SmokeData.native_browser.bridge_exposed ($SmokeData.native_browser.bridge_exposed -eq 'undefined'))
             preview=(Check-Status $SmokeData.native_preview.fixture_updated ($SmokeData.native_preview.fixture_updated -eq $true))
+            preview_state=(Check-Status $SmokeData.smoke_preview_state.available ($SmokeData.smoke_preview_state.available -eq $true))
+            preview_record_ready=(Check-Status $SmokeData.smoke_preview_state.record_ready ($SmokeData.smoke_preview_state.record_ready -eq $true))
+            preview_running=(Check-Status $SmokeData.smoke_preview_state.running ($SmokeData.smoke_preview_state.running -eq $true))
+            preview_load_complete=(Check-Status $SmokeData.smoke_preview_state.loading ($SmokeData.smoke_preview_state.loading -eq $false))
+            preview_visible=(Check-Status $SmokeData.smoke_preview_state.visible ($SmokeData.smoke_preview_state.visible -eq $true))
+            preview_view=(Check-Status $SmokeData.smoke_preview_state.view_present ($SmokeData.smoke_preview_state.view_present -eq $true))
+            preview_builder_page=(Check-Status $SmokeData.smoke_preview_state.builder ($SmokeData.smoke_preview_state.builder -eq $true))
+            preview_pane=(Check-Status $SmokeData.smoke_preview_state.pane ($SmokeData.smoke_preview_state.pane -eq $true))
+            preview_pane_visible=(Check-Status $SmokeData.smoke_preview_state.pane_visible ($SmokeData.smoke_preview_state.pane_visible -eq $true))
+            preview_modal_closed=(Check-Status $SmokeData.smoke_preview_state.modal ($SmokeData.smoke_preview_state.modal -eq $false))
             preview_controller=(Check-Status $SmokeData.native_preview.separate_controller ($SmokeData.native_preview.separate_controller -eq $true))
             preview_profile=(Check-Status $SmokeData.native_preview.separate_profile ($SmokeData.native_preview.separate_profile -eq $true))
             preview_bridge=(Check-Status $SmokeData.native_preview.bridge_exposed ($SmokeData.native_preview.bridge_exposed -eq 'undefined'))

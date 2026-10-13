@@ -436,6 +436,7 @@ class WebView2Page:
         self.changed = changed
         self.event = threading.Event()
         self.error = None
+        self.disposed = False
         scale = float(getattr(owner, 'DeviceDpi', 96)) / 96
         px = lambda value: round(value * scale)
         area = Screen.FromControl(owner).WorkingArea
@@ -478,7 +479,7 @@ class WebView2Page:
         self.form.Controls.Add(toolbar)
         toolbar.BringToFront()
         self.control.CoreWebView2InitializationCompleted += self._initialized
-        self.form.FormClosed += lambda sender, args: self.changed('closed')
+        self.form.FormClosed += self._closed
         self.form.Show()
         self.control.EnsureCoreWebView2Async(None)
 
@@ -507,6 +508,7 @@ class WebView2Page:
             core.Settings.AreHostObjectsAllowed = False
             core.Settings.IsWebMessageEnabled = False
             core.Settings.AreDevToolsEnabled = False
+            self._navigation_id = None
             core.NavigationStarting += self._navigation
             core.NavigationCompleted += self._loaded
             core.SourceChanged += self._source_changed
@@ -533,6 +535,10 @@ class WebView2Page:
             self.event.set()
 
     def _navigation(self, sender, args):
+        if getattr(self, 'disposed', False):
+            args.Cancel = True
+            return
+        self._navigation_id = getattr(args, 'NavigationId', None)
         try:
             url = browser_url(str(args.Uri))
             guard = getattr(self, 'navigation_guard', None)
@@ -545,15 +551,26 @@ class WebView2Page:
             self.changed('loaded', 'Only HTTP and HTTPS pages can open in Forge Browser.')
 
     def _loaded(self, sender, args):
+        identifier = getattr(args, 'NavigationId', None)
+        if (getattr(self, 'disposed', False) or identifier is None or
+                identifier != getattr(self, '_navigation_id', None)):
+            return
         self.changed('loaded', None if args.IsSuccess else 'Navigation failed: ' + str(args.WebErrorStatus))
 
     def _source_changed(self, sender, args):
+        if getattr(self, 'disposed', False):
+            return
         # SPA/history/fragment changes need the same invalidation as full loads.
         source = str(self.control.CoreWebView2.Source)
         self.address.Text = source
         self.changed('navigation', source)
         if not args.IsNewDocument:
             self.changed('loaded')
+
+    def _closed(self, sender, args):
+        self.disposed = True
+        self._navigation_id = None
+        self.changed('closed')
 
     def _popup(self, sender, args):
         args.Handled = True
@@ -587,19 +604,27 @@ class WebView2Page:
 
     def navigate(self, url):
         # Navigate schedules WebView2 events asynchronously. Mark loading before
-        # returning so a client cannot inspect between dispatch and Starting.
-        self.changed('navigation', url)
-        self.ui(lambda _: self.control.CoreWebView2.Navigate(url))
+        # returning, and reject old completions while the next Starting is pending.
+        def request(_):
+            self._navigation_id = None
+            self.changed('navigation', url)
+            self.control.CoreWebView2.Navigate(url)
+        self.ui(request)
 
     def history(self, action):
         def change(_):
             core = self.control.CoreWebView2
             if action == 'back' and core.CanGoBack:
-                core.GoBack()
+                operation = core.GoBack
             elif action == 'forward' and core.CanGoForward:
-                core.GoForward()
+                operation = core.GoForward
             elif action == 'reload':
-                core.Reload()
+                operation = core.Reload
+            else:
+                return
+            self._navigation_id = None
+            self.changed('navigation', str(core.Source))
+            operation()
         self.ui(change)
 
     def evaluate(self, script):

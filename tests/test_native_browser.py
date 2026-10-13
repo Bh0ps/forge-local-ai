@@ -224,3 +224,165 @@ def test_navigation_invalidates_snapshot_before_async_webview_events(tmp_path):
         browser.view.url='https://example.org/next';browser.view.changed('loaded')
         assert browser.execute('browser_inspect',{}, {'run_id':'fixture'})['ok']
     finally:browser.shutdown()
+
+
+def event_browser(tmp_path):
+    from types import SimpleNamespace
+    from native_browser import WebView2Page
+    class EventPage(FakePage):
+        def __init__(self, changed):
+            super().__init__(changed)
+            self.disposed = False
+            self.address = SimpleNamespace(Text='')
+            self.ui = lambda operation: operation(None)
+            self.control = SimpleNamespace(CoreWebView2=SimpleNamespace(
+                Navigate=lambda url: self.effects.append(('requested', url)), Source='about:blank',
+                CanGoBack=False, CanGoForward=False, GoBack=lambda: self.effects.append('back'),
+                GoForward=lambda: self.effects.append('forward'), Reload=lambda: self.effects.append('reload')))
+        def navigate(self, url):
+            WebView2Page.navigate(self, url)
+        def history(self, action):
+            WebView2Page.history(self, action)
+        def starting(self, identifier, url):
+            args = SimpleNamespace(NavigationId=identifier, Uri=url, Cancel=False)
+            WebView2Page._navigation(self, None, args)
+            if not args.Cancel:
+                self.url = url
+                self.control.CoreWebView2.Source = url
+            return args
+        def completed(self, identifier, success=True):
+            WebView2Page._loaded(self, None, SimpleNamespace(
+                NavigationId=identifier, IsSuccess=success, WebErrorStatus='ConnectionAborted'))
+        def source_changed(self, url, new_document=False):
+            self.url = self.control.CoreWebView2.Source = url
+            WebView2Page._source_changed(self, None, SimpleNamespace(IsNewDocument=new_document))
+        def close(self):
+            WebView2Page._closed(self, None, None)
+    browser = NativeBrowser(tmp_path, view_factory=EventPage)
+    browser.dispatch('open')
+    return browser
+
+
+def test_old_navigation_completions_cannot_finish_newer_navigation(tmp_path):
+    browser = event_browser(tmp_path)
+    try:
+        page = browser.view
+        page.starting(1, 'https://example.org/first')
+        page.starting(2, 'https://example.org/second')
+        for success in (True, False):
+            page.completed(1, success)
+            assert browser.status()['loading'] and browser.status()['error'] is None
+            assert browser.status()['url'] == 'https://example.org/second'
+            assert browser.execute('browser_inspect', {})['not_executed']
+        page.completed(2)
+        assert not browser.status()['loading']
+        assert browser.execute('browser_inspect', {})['ok']
+    finally:
+        browser.shutdown()
+
+
+def test_initial_blank_completion_cannot_finish_requested_navigation_before_starting(tmp_path):
+    browser = event_browser(tmp_path)
+    try:
+        page = browser.view
+        previous = browser.execute('browser_inspect', {})
+        page.starting(1, 'about:blank')
+        browser.execute('browser_navigate', {'url': 'https://example.org/fixture'})
+        page.completed(1, False)
+        assert browser.status()['loading'] and browser.status()['error'] is None
+        assert browser.status()['url'] == 'https://example.org/fixture'
+        assert browser.execute('browser_inspect', {})['not_executed']
+        assert browser.execute('browser_click', {'snapshot_id': previous['snapshot_id'],
+            'selector': previous['targets'][0]['selector']})['not_executed']
+        page.starting(2, 'https://example.org/fixture')
+        page.completed(1)
+        assert browser.status()['loading']
+        page.completed(2)
+        assert browser.execute('browser_inspect', {})['url'] == 'https://example.org/fixture'
+    finally:
+        browser.shutdown()
+
+
+def test_redirect_current_failure_and_same_document_navigation_keep_state(tmp_path):
+    browser = event_browser(tmp_path)
+    try:
+        page = browser.view
+        page.starting(1, 'https://example.org/start')
+        page.starting(1, 'https://example.org/redirected')
+        page.completed(1)
+        assert not browser.status()['loading'] and browser.status()['error'] is None
+        assert browser.status()['url'] == 'https://example.org/redirected'
+        page.starting(2, 'https://example.org/redirected')
+        page.completed(2, False)
+        assert not browser.status()['loading']
+        assert browser.status()['url'] == 'https://example.org/redirected'
+        assert browser.status()['error'] == 'Navigation failed: ConnectionAborted'
+        page.completed(1)
+        assert browser.status()['error'] == 'Navigation failed: ConnectionAborted'
+        previous = browser.execute('browser_inspect', {})
+        browser.execute('browser_navigate', {'url': 'https://example.org/redirected#section'})
+        page.source_changed('https://example.org/redirected#section')
+        assert not browser.status()['loading'] and browser.status()['error'] is None
+        assert browser.execute('browser_inspect', {})['url'].endswith('#section')
+        assert browser.execute('browser_click', {'snapshot_id': previous['snapshot_id'],
+            'selector': previous['targets'][0]['selector']})['not_executed']
+    finally:
+        browser.shutdown()
+
+
+def test_closed_page_navigation_callbacks_cannot_change_reopened_browser(tmp_path):
+    browser = event_browser(tmp_path)
+    try:
+        previous = browser.view
+        previous.starting(1, 'https://example.org/old')
+        browser.dispatch('close')
+        browser.dispatch('open')
+        page = browser.view
+        page.starting(2, 'https://example.org/current')
+        assert previous.starting(3, 'https://example.org/late').Cancel
+        previous.completed(1, False)
+        previous.source_changed('https://example.org/late#fragment')
+        assert browser.status()['running'] and browser.status()['loading']
+        assert browser.status()['url'] == 'https://example.org/current'
+        assert browser.status()['error'] is None
+        page.completed(2)
+        assert browser.execute('browser_inspect', {})['url'] == 'https://example.org/current'
+    finally:
+        browser.shutdown()
+
+
+def test_history_navigation_guards_pending_completion_and_preserves_noops(tmp_path):
+    browser = event_browser(tmp_path)
+    try:
+        page = browser.view
+        page.starting(0, 'https://example.org/current')
+        page.completed(0)
+        previous = browser.execute('browser_inspect', {})
+        generation = browser.generation
+        for action in ('back', 'forward'):
+            browser.dispatch(action)
+            assert not browser.status()['loading'] and page._navigation_id == 0
+            assert browser.generation == generation and browser.snapshot['id'] == previous['snapshot_id']
+            assert action not in page.effects
+        page.control.CoreWebView2.CanGoBack = page.control.CoreWebView2.CanGoForward = True
+        for index, action in enumerate(('back', 'forward', 'reload')):
+            previous = browser.execute('browser_inspect', {})
+            url = page.url if action == 'reload' else 'https://example.org/' + action
+            first, second = 2 * index + 1, 2 * index + 2
+            browser.dispatch(action)
+            assert browser.status()['loading']
+            assert browser.execute('browser_click', {'snapshot_id': previous['snapshot_id'],
+                'selector': previous['targets'][0]['selector']})['not_executed']
+            page.starting(first, url)
+            browser.dispatch(action)
+            page.completed(first)
+            assert browser.status()['loading'] and browser.status()['error'] is None
+            page.starting(second, url)
+            page.completed(first, False)
+            assert browser.status()['loading'] and browser.status()['error'] is None
+            page.completed(second)
+            assert not browser.status()['loading']
+            assert browser.execute('browser_inspect', {})['url'] == url
+            assert page.effects.count(action) == 2
+    finally:
+        browser.shutdown()

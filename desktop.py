@@ -687,9 +687,27 @@ def main():
                             preview_run = {'id': 'preview-native-smoke', 'project_id': project['id'], 'settings': service.store.get_settings()}
                             def preview_tool(name, arguments):
                                 result['smoke_phase'] = 'builder:' + name
-                                outcome = manager.execute(preview_run, name, {'id': preview['id'], **arguments}, cancel)
-                                if outcome.get('ok') is False: raise ValueError(outcome.get('error', 'Preview fixture failed.'))
-                                return outcome
+                                try:
+                                    outcome = manager.execute(preview_run, name, {'id': preview['id'], **arguments}, cancel)
+                                    if outcome.get('ok') is False: raise ValueError(outcome.get('error', 'Preview fixture failed.'))
+                                    return outcome
+                                except Exception:
+                                    if name == 'preview_inspect':
+                                        try:
+                                            state = manager.previews.browser.status()
+                                            result['smoke_preview_state'] = {
+                                                'available': True, 'running': bool(state.get('running')),
+                                                'loading': bool(state.get('loading')), 'visible': bool(state.get('visible')),
+                                                'view_present': manager.previews.browser.view is not None,
+                                                'record_ready': manager.previews.status(preview['id']).get('status') == 'ready'}
+                                            ui = api._window.evaluate_js("(()=>{const p=document.getElementById('forge-preview-panel'),r=p?.getBoundingClientRect(),s=p&&getComputedStyle(p);return {builder:!!document.querySelector('nav[aria-label=\"Builder sections\"]'),pane:!!p,pane_visible:!!r&&r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden',modal:!!document.querySelector('dialog[open],.modal-backdrop')};})()")
+                                            if isinstance(ui, dict):
+                                                result['smoke_preview_state'].update({
+                                                    'builder': bool(ui.get('builder')), 'pane': bool(ui.get('pane')),
+                                                    'pane_visible': bool(ui.get('pane_visible')), 'modal': bool(ui.get('modal'))})
+                                        except Exception:
+                                            result.setdefault('smoke_preview_state', {'available': False})
+                                    raise
                             inspected = preview_tool('preview_inspect', {})
                             result['smoke_phase'] = 'builder-input-target'
                             target = next(t for t in inspected['targets'] if t['tag']=='input')
