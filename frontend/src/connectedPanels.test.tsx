@@ -154,7 +154,7 @@ describe('native browser panel lifecycle', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Fixture project' }));
     await act(async () => { window.dispatchEvent(new Event('forge:browser-open')); });
     await screen.findByRole('textbox', { name: 'Agent browser address' });
-    await userEvent.click(screen.getByRole('button', { name: 'Files' }));
+    await userEvent.click(screen.getByRole('tab', { name: 'Files' }));
     await screen.findByRole('button', { name: 'fixture.txt' });
     expect(call).toHaveBeenCalledWith('workspace_files', { project_id: project.id, path: '.' });
     expect(call).toHaveBeenCalledWith('browser_native_hide', {});

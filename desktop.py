@@ -489,6 +489,8 @@ def main():
         api._hotkey = EmergencyHotkey(api._lifecycle.emergency_stop, shortcut)
         api._hotkey.start()
         _tray(api)
+        from forge_update_monitor import start_native_update_monitor
+        start_native_update_monitor(service)
         webview.settings['ALLOW_FILE_URLS'] = False
         webview.settings['OPEN_DEVTOOLS_IN_DEBUG'] = False
         api._window = webview.create_window('Forge', url=api._server_url, js_api=api,

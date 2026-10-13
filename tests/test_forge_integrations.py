@@ -45,9 +45,13 @@ def test_credentials_never_serialized(hub):
     assert "private-test-token" not in hub.config_path.read_text()
     assert "credential_ref" not in result["server"]
     assert result["server"]["authenticated"]
+    reference = hub._server(result["server"]["id"])["credential_ref"]
     result = hub.dispatch("mcp_save", {"id": result["server"]["id"], "clear_token": True})
     assert not result["server"]["authenticated"]
-    assert not hub.vault.values
+    assert "credential_ref" not in hub._server(result["server"]["id"])
+    # Configuration clears its link; other owners and saved recovery references
+    # may still need the encrypted credential in the shared OS vault.
+    assert hub.vault.get(reference) == "private-test-token"
 
 
 def test_secret_environment_uses_vault(hub):

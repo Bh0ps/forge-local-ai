@@ -18,6 +18,7 @@ from storage import Store, _context_setting, _now
 DEFAULTS = dict(context=32768, model='', provider_id='ollama', permission_profile='always_ask',
                 permission_overrides={}, theme='system', tokens=4096, temperature=0.3,
                 ui_appearance={'name':'Forge','accent':'copper','motion':'system'},
+                update_checks=True,update_channel='preview',
                 thinking=True, web=True, timezone='UTC', performance='balanced', keep_alive='10m',
                 auto_compact=True, auto_delegate=False, startup=False, dictation_model='base',allow_edits=True,
                 computer_tools=False,browser_tools=True,num_thread=4,
@@ -299,6 +300,10 @@ class ForgeStore(Store):
         if 'ui_appearance' in settings:
             from forge_workspace_ui import workspace_appearance
             settings={**settings,'ui_appearance':workspace_appearance(settings['ui_appearance'],self.get_settings().get('ui_appearance'))}
+        if 'update_checks' in settings and type(settings['update_checks']) is not bool:
+            raise ValueError('Automatic update checks must be true or false.')
+        if 'update_channel' in settings and settings['update_channel'] not in ('stable','preview'):
+            raise ValueError('Choose the stable or preview update channel.')
         if 'context' in settings: _context_setting(settings['context'])
         if 'permission_profile' in settings and settings['permission_profile'] not in ('always_ask','full_access','deny_access'):
             raise ValueError('Unknown permission profile.')

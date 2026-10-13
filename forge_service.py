@@ -322,7 +322,7 @@ class ForgeService:
     def bootstrap(self):
         runs=self.store.runs(limit=200)
         from forge_workspace_ui import WorkspaceUI
-        return dict(version='5.1.0',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
+        return dict(version='5.1.1',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
                     chats=self.store.list_chats(),runs=runs,goals=[self.goal_view(goal,runs) for goal in self.store.active_goals()],
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -415,7 +415,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='5.1.0')
+                    self.update_manager=UpdateManager(self,current_version='5.1.1')
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)
@@ -516,7 +516,11 @@ class ForgeService:
         if action=='usage': return self.store.usage(data.get('period','all'),data.get('timezone',self.store.get_settings()['timezone']),data.get('model'),data.get('project_id'))
         if action=='providers': return {'providers':self.providers.configurations()}
         if action=='provider_save': return self.provider_save(data)
-        if action=='provider_test': return {'models':self.providers.provider(data['id']).models(),'ok':True}
+        if action=='provider_test':
+            if 'draft' in data:
+                from forge_provider_probe import probe_provider
+                return probe_provider(self,data)
+            return {'models':self.providers.provider(data['id']).models(),'ok':True}
         if action=='models': return {'models':self.providers.models(data.get('provider_id',self.store.get_settings()['provider_id']),bool(data.get('refresh')))}
         if action in ('show','pull','delete'):
             provider=self.providers.provider(data.get('provider_id',self.store.get_settings()['provider_id']))
@@ -1141,18 +1145,31 @@ class ForgeService:
 
     def provider_save(self,data):
         if data.get('kind')=='openrouter': return self.dispatch('openrouter_save',data)
-        data={**data,'url':data.get('url') or data.get('base_url',''),'kind':data.get('kind') or data.get('type','openai-compatible')}
-        url=data.get('url',''); parsed=urlparse(url)
-        if parsed.scheme not in ('http','https') or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError('Enter a provider HTTP(S) endpoint without embedded credentials, query parameters or fragments. Use Credential Manager for authentication.')
+        previous={}
+        if data.get('id'):
+            try: previous=self.store.entity('providers',data['id'])
+            except ValueError: pass
+        # An editor sends only changed fields; retain coordinator-owned metadata.
+        supplied=dict(data)
+        supplied.pop('credential_ref',None)
+        data={**previous,**supplied,'url':supplied.get('url') or supplied.get('base_url') or previous.get('url',''),
+              'kind':supplied.get('kind') or supplied.get('type') or previous.get('kind','openai-compatible')}
+        from forge_provider_probe import validate_api_key,validate_endpoint
+        url=validate_endpoint(data.get('url','')); data['url']=url
+        for key in ('token','api_key'):
+            if key in data: data[key]=validate_api_key(data[key])
         allowed={'id','name','kind','url','base_url','type','credential_ref','capabilities','context_limit','managed','runtime_id','enabled','updated_at','resource_id','independent_resource'}
         if data.get('resource_id') and (not isinstance(data['resource_id'],str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',data['resource_id'])):
             raise ValueError('Use a short resource identifier.')
         if 'independent_resource' in data and type(data['independent_resource']) is not bool: raise ValueError('Independent resource must be true or false.')
         profile={k:v for k,v in data.items() if k in allowed}
+        if previous and (previous.get('kind')!=data['kind'] or previous.get('url','').rstrip('/')!=url.rstrip('/')):
+            profile.pop('credential_ref',None)
         if data.get('token') or data.get('api_key'):
             if not self.vault: raise ValueError('OS credential storage is unavailable.')
-            profile['credential_ref']=self.vault.put(data.get('token') or data['api_key'])
+            try: profile['credential_ref']=self.vault.put(data.get('token') or data['api_key'])
+            except Exception:
+                raise ValueError('Credentials could not be saved in the operating system store. Try saving the engine again.') from None
         profile.setdefault('kind','openai-compatible'); profile.setdefault('name','Local endpoint')
         profile['base_url']=profile['url']; profile['type']=profile['kind']
         saved=self.store.save_entity('providers',profile)

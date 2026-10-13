@@ -1,0 +1,50 @@
+.workspace-panel .workspace-panel-heading {display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:15px 14px 11px;flex-shrink:0;}
+.workspace-panel-heading>div {min-width:0;}
+.workspace-panel-heading h2 {font-size:14px;line-height:1.5;font-weight:550;margin:0;}
+.workspace-panel-heading p {font-size:12px;line-height:1.5;margin:4px 0 0;color:var(--muted);}
+.workspace-panel-heading>.icon-button {width:28px;height:28px;flex-shrink:0;margin-top:-2px;}
+.right-panel.workspace-panel>nav.workspace-panel-tabs {display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px;padding:0 12px 9px;overflow:visible;flex-shrink:0;}
+.right-panel.workspace-panel>nav.workspace-panel-tabs>button {display:flex;align-items:center;justify-content:center;height:34px;padding:7px;border:1px solid transparent;border-radius:7px;color:var(--secondary);transition:background-color .15s,color .15s;}
+.right-panel.workspace-panel>nav.workspace-panel-tabs>button[aria-selected=true] {color:var(--accent);background:var(--accent-soft);border-color:var(--accent-border);}
+.workspace-panel-tabs>button:focus-visible {outline:2px solid var(--accent);outline-offset:2px;}
+.workspace-panel .right-scroll {padding:14px 12px;}
+.right-panel.workspace-panel.with-browser {min-width:0;max-width:calc(100vw - 30px);}
+.workspace-panel .right-scroll.browser-scroll {padding:0;}
+.workspace-panel .browser-page {min-height:0;}
+.workspace-activity-group {padding-bottom:13px;margin-bottom:13px;border-bottom:1px solid var(--border);}
+.workspace-activity-group:last-of-type {border-bottom:0;}
+.workspace-panel .chat-activity {margin:0;padding-left:7px;}
+.workspace-panel .chat-activity-summary {gap:7px;padding:7px 2px;}
+.workspace-panel .activity-state {max-width:76px;overflow-wrap:anywhere;}
+.workspace-panel .activity-title small {font-size:12px;line-height:1.5;}
+.workspace-panel .activity-outcome {margin-left:27px;line-height:1.65;overflow-wrap:anywhere;}
+.workspace-panel .chat-activity-detail {margin-left:10px;}
+.workspace-panel .helper-activity {margin-top:12px;}
+.workspace-run-recovery {display:grid;gap:8px;margin:8px 0 0 12px;font-size:12px;}
+.workspace-run-recovery:empty {display:none;}
+.workspace-run-recovery>strong {font-weight:500;color:var(--secondary);}
+.workspace-run-recovery>.secondary {justify-self:start;font-size:12px;}
+.workspace-run-recovery .recovery-note {line-height:1.65;margin:0;}
+.workspace-activity-more {width:100%;font-size:12px;padding:8px;}
+.workspace-panel .task-context-panel {padding:0;gap:13px;font-size:12px;}
+.context-attachment-summary {display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:20px;color:var(--secondary);font-size:12px;}
+.context-attachment-summary>span {color:var(--muted);}
+.workspace-panel .context-selected {gap:6px;}
+.workspace-panel .context-chip {max-width:100%;font-size:12px;line-height:1.5;padding:4px 7px;border-radius:6px;}
+.context-chip-name {min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.context-chip>button {flex-shrink:0;}
+.context-chip.unavailable {border-style:dashed;color:var(--muted);}
+.workspace-panel .context-search {gap:7px;padding:8px;border-radius:8px;}
+.workspace-panel .context-search:focus-within {outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft);}
+.workspace-panel .context-search>svg {color:var(--muted);flex-shrink:0;}
+.workspace-panel .context-search input {padding:0;border:0;border-radius:0;box-shadow:none;font-size:12px;}
+.workspace-panel .context-search input:focus {outline:none;box-shadow:none;}
+.context-search>button {display:flex;align-items:center;justify-content:center;flex-shrink:0;padding:2px;color:var(--muted);}
+.workspace-panel .context-choice {padding:10px 2px;font-size:12px;}
+.workspace-panel .context-choice>span {min-width:0;}
+.workspace-panel .context-choice strong {font-weight:500;overflow-wrap:anywhere;}
+.workspace-panel .context-choice small {font-size:12px;line-height:1.55;overflow-wrap:anywhere;}
+.context-empty {margin:2px 0;font-size:12px;color:var(--muted);line-height:1.6;}
+.context-note-limit {font-size:12px;color:var(--muted);margin:0;line-height:1.6;}
+[data-motion=reduced] .workspace-panel-tabs>button {transition:none!important;}
+@media(prefers-reduced-motion:reduce) {.workspace-panel-tabs>button {transition:none!important;}}

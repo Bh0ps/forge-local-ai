@@ -1,4 +1,4 @@
-# Forge 5.1 demo media
+# Forge 5.1.1 demo media
 
 These screenshots and animations use the synthetic **Tide Studio** fixture in a
 disposable workspace. The chat, project, notes and sample application are demo
@@ -6,10 +6,14 @@ content. No personal account, conversation, project folder or API key is shown.
 
 | File | Demonstration |
 | --- | --- |
-| `forge-5.1.0-workspace-dark.png` | Chat, saved task activity, skills and reference notes in the dark theme. |
-| `forge-5.1.0-builder-light.png` | Builder and its isolated local application preview in the light theme. |
-| `forge-5.1.0-context.gif` | Selecting skills and notes, writing a draft and returning to chat. |
-| `forge-5.1.0-builder.gif` | Reviewing a brief, starting a preview, trying the sample app and inspecting demonstration checks. |
+| `forge-5.1.1-workspace-dark.png` | Chat, saved task activity, skills and reference notes in the dark theme. |
+| `forge-5.1.1-settings.png` | Grouped settings navigation, appearance and conversation controls. |
+| `forge-5.1.1-activity.png` | Current-chat activity with an expanded saved tool step. |
+| `forge-5.1.1-builder-light.png` | Builder and its isolated local application preview in the light theme. |
+| `forge-5.1.1-context.gif` | Selecting skills and notes, writing a draft and returning to chat. |
+| `forge-5.1.1-builder.gif` | Reviewing a brief, starting a preview, trying the sample app and inspecting demonstration checks. |
+
+The previous `forge-5.1.0-*` captures remain available for that release.
 
 Each animation contains seven captured UI states. Screenshots have no embedded
 text metadata; animations contain only standard playback metadata. All frames

@@ -1,10 +1,11 @@
 <p align="center"><img src="assets/forge.svg" width="88" alt="Forge"></p>
 
-# Forge 5.1.0
+# Forge 5.1.1
 
-This **unsigned Windows preview** improves OpenRouter delegation recovery and
-refines the chat workspace. Read [the 5.1 preview notes](docs/FORGE_51.md) for
-changes, recovery guidance and validation.
+This **unsigned Windows preview** adds live reasoning scroll-follow, cleaner
+settings and workspace details, safer connection testing and background GitHub
+update detection. Read [the patch notes](docs/FORGE_511.md) and
+[5.1 recovery guidance](docs/FORGE_51.md).
 
 Your models. Your projects. Your workspace.
 
@@ -12,17 +13,17 @@ Forge is a local AI workspace for building apps, exploring ideas and working wit
 files on your computer. It brings chat, Builder, previews and project tools into
 one Windows app. Optional OpenRouter guidance helps with planning and review.
 
-**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.0/Forge-5.1.0-Setup.exe)**
-· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.0)
-· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.0/Forge-5.1.0-Portable.zip)
-· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.0/SHA256SUMS.txt)
+**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.1/Forge-5.1.1-Setup.exe)**
+· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.1)
+· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.1/Forge-5.1.1-Portable.zip)
+· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.1/SHA256SUMS.txt)
 
-The [previous 5.0.4 release](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.0.4) remains available.
+The [previous 5.1.0 preview](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.0) remains available.
 
 ## Install
 
 1. Install [Ollama](https://ollama.com/download/windows) and choose a local model.
-2. Download **Forge-5.1.0-Setup.exe** and run it.
+2. Download **Forge-5.1.1-Setup.exe** and run it.
 3. Open Forge and follow the setup wizard to connect your model.
 
 Windows 10/11, 64-bit, with WebView2 is required. Python, Node.js and the source
@@ -49,20 +50,22 @@ up. Ollama and model downloads are separate. No cloud account is required.
 
 These images and animations use an isolated demo workspace with synthetic data.
 
-![Forge chat with saved task activity, skills and reference notes](assets/demos/forge-5.1.0-workspace-dark.png)
+![Forge chat with saved task activity, skills and reference notes](assets/demos/forge-5.1.1-workspace-dark.png)
 
-![Forge Builder and a local app preview](assets/demos/forge-5.1.0-builder-light.png)
+![Forge settings with grouped navigation](assets/demos/forge-5.1.1-settings.png)
+
+![Forge workspace details scoped to the current chat](assets/demos/forge-5.1.1-activity.png)
 
 <details>
 <summary>Watch the workspace and Builder in action</summary>
 
 Attach guidance for your next message:
 
-![Selecting skills and reference notes in Forge](assets/demos/forge-5.1.0-context.gif)
+![Selecting skills and reference notes in Forge](assets/demos/forge-5.1.1-context.gif)
 
 Move from the brief to the preview and checks:
 
-![Forge Builder brief, preview and checks](assets/demos/forge-5.1.0-builder.gif)
+![Forge Builder brief, preview and checks](assets/demos/forge-5.1.1-builder.gif)
 
 </details>
 

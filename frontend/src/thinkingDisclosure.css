@@ -1,0 +1,20 @@
+.thinking-disclosure {position:relative;}
+.thinking-disclosure summary {width:fit-content;min-height:24px;color:var(--secondary);}
+.thinking-disclosure summary:after {transition:transform .15s ease;}
+.thinking-disclosure[open] summary:after {transform:rotate(180deg);}
+.thinking-disclosure .thinking-indicator {position:relative;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex-shrink:0;}
+.thinking-disclosure .thinking-indicator svg {position:relative;z-index:1;}
+.thinking-active .thinking-indicator {color:var(--accent);}
+.thinking-active .thinking-indicator:before {content:'';position:absolute;inset:-3px;border-radius:50%;background:var(--accent-soft);box-shadow:0 0 12px 2px color-mix(in srgb,var(--accent) 12%,transparent);animation:thinking-breathe 3.6s ease-in-out infinite;}
+.thinking-disclosure>.thinking-frame {margin-top:7px;border:0;padding:0;white-space:normal;max-height:none;overflow:visible;}
+.thinking-disclosure .thinking-scroll {border-left:2px solid var(--border);padding:2px 12px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:min(210px,30vh);overflow-y:auto;overscroll-behavior:contain;font-size:12px;line-height:1.75;color:var(--secondary);scroll-behavior:auto;}
+.thinking-disclosure .thinking-scroll:focus-visible {outline:2px solid var(--accent-border);outline-offset:3px;border-radius:2px;}
+.thinking-disclosure .thinking-latest {display:flex;align-items:center;gap:5px;margin:6px 0 0 auto;padding:3px 5px;color:var(--secondary);font-size:11px;line-height:1.5;}
+.thinking-disclosure .thinking-latest:hover {color:var(--accent);background:var(--accent-soft);}
+.hud .thinking-disclosure>.thinking-frame {max-height:none;}
+.hud .thinking-disclosure .thinking-scroll {max-height:100px;}
+@keyframes thinking-breathe {0%,100% {opacity:.3;}50% {opacity:.8;}}
+[data-visibility=hidden] .thinking-active .thinking-indicator:before {animation-play-state:paused;}
+[data-motion=reduced] .thinking-active .thinking-indicator:before {animation:none;opacity:.45;}
+[data-motion=reduced] .thinking-disclosure summary:after {transition:none;}
+@media(prefers-reduced-motion:reduce) {.thinking-active .thinking-indicator:before {animation:none;opacity:.45;}.thinking-disclosure summary:after {transition:none;}}

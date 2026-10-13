@@ -3,6 +3,7 @@ import { Brain, Check, ChevronDown, Copy, Info, Search, X, Eye, Wrench, LoaderCi
 import ReactMarkdown, { type Components } from 'react-markdown';
 import { api, bytesLabel, friendlyModel, isNative, native, tokenLabel } from './api';
 import type { Message, Model, RunEvent } from './types';
+import { ThinkingDisclosure } from './thinkingDisclosure';
 
 export function IconButton({ label, children, onClick, disabled, active, className = '' }: { label: string; children: React.ReactNode; onClick?: () => void; disabled?: boolean; active?: boolean; className?: string }) {
   return <button type="button" className={`icon-button ${active ? 'selected' : ''} ${className}`} aria-label={label} title={label} aria-pressed={active} onClick={onClick} disabled={disabled}>{children}</button>;
@@ -61,7 +62,7 @@ export function MessageView({ message, streaming = false, showThinking = true }:
   return <article className={`message ${message.role}`}>
     <div className="message-meta">{message.role === 'user' ? 'You' : <><img src="./forge.svg" alt="" />Forge</>}{message.status && message.status !== 'complete' && <span>{message.status}</span>}</div>
     {message.images?.length ? <div className="message-images">{message.images.map((image, i) => <SavedImage key={i} image={image} />)}</div> : null}
-    {message.thinking && showThinking && <details className="reasoning" open={streaming || undefined}><summary>{streaming ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}{streaming ? 'Thinking' : 'Model reasoning'}</summary><div>{message.thinking}</div></details>}
+    {message.thinking && showThinking && <ThinkingDisclosure key={message.id ?? message.run_id} text={message.thinking} streaming={streaming} active={streaming && !message.content} />}
     <Markdown text={message.content}/>{streaming && <span className="stream-caret" aria-hidden="true"/>}
     {!streaming && message.role !== 'user' && message.content && <button className="text-button copy-button" onClick={copy}>{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? 'Copied' : 'Copy'}</button>}
     {copyError && <small role="alert">Could not copy. Select the text to copy it manually.</small>}

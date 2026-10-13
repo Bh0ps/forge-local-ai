@@ -93,22 +93,49 @@ def _server_namespace(identity):
     return identity if len(identity) <= 12 else identity[:6] + hashlib.sha256(identity.encode()).hexdigest()[:6]
 
 
-def _error(exc):
+def _error(exc, *, remote=False):
     # SDK exceptions may include request headers/URL query strings: return a safe
     # class-based failure instead of leaking secrets into a chat or event log.
     if isinstance(exc, (ImportError, ModuleNotFoundError)):
         return "Optional integration dependency is unavailable; install requirements-integrations.txt"
     if isinstance(exc, concurrent.futures.TimeoutError):
         return "Integration timed out. Inspect its outcome before retrying a side effect."
-    if isinstance(exc, (ValueError, FileNotFoundError)):
+    if not remote and isinstance(exc, (ValueError, FileNotFoundError)):
         return str(exc)[:500]
     return f"Integration failed ({type(exc).__name__}). Check the endpoint, authentication and server availability."
+
+
+def _mcp_identity(server):
+    if server.get("transport") == "stdio":
+        return ("stdio", server.get("command"), tuple(server.get("args", [])), server.get("cwd"))
+    return (server.get("transport", "http"), server.get("url"))
+
+
+def _mcp_credential_refs(server):
+    return set(filter(None, [server.get("credential_ref"), server.get("oauth_tokens_ref"),
+        server.get("oauth_client_ref"), *server.get("env_credentials", {}).values(),
+        *server.get("header_credentials", {}).values()]))
+
+
+def _mcp_binding(server):
+    configuration = {key: server.get(key) for key in ("auth_type", "credential_ref",
+        "oauth_tokens_ref", "oauth_client_ref", "oauth_redirect_uri")}
+    configuration.update({key: server.get(key, {}) for key in
+        ("headers", "env", "header_credentials", "env_credentials")})
+    # Keep mapping names as well as references: X-Account, tenant headers and
+    # process environment can select a different account without changing a key.
+    raw = json.dumps(configuration, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return (_mcp_identity(server), hashlib.sha256(raw.encode("utf-8")).digest())
+
+
+class MCPPreflightError(ValueError):
+    """No MCP operation was dispatched to the server."""
 
 
 class MCPConnection:
     """Persistent official-SDK session owned by one async task on one thread."""
     def __init__(self, config, vault, oauth_flow=None):
-        self.config = dict(config)
+        self.config = copy.deepcopy(config)
         self.vault = vault
         self.oauth_flow = oauth_flow
         self.ready = concurrent.futures.Future()
@@ -122,7 +149,7 @@ class MCPConnection:
         try:
             asyncio.run(self._serve())
         except BaseException as exc:
-            safe = RuntimeError(_error(exc))
+            safe = RuntimeError(_error(exc, remote=True))
             if not self.ready.done():
                 self.ready.set_exception(safe)
             for future in list(self.pending):
@@ -140,15 +167,20 @@ class MCPConnection:
         self.queue = asyncio.Queue()
         async with AsyncExitStack() as stack:
             config = self.config
-            token = self.vault.get(config.get("credential_ref"))
-            headers = dict(config.get("headers", {}))
+            auth_type = config.get("auth_type")
+            headers = {name: value for name, value in config.get("headers", {}).items()
+                       if auth_type not in {"none", "oauth"} or name.lower() != "authorization"}
             for name, reference in config.get("header_credentials", {}).items():
+                # Custom API-key headers are explicitly configured authentication.
+                # "None" disables automatic bearer/OAuth and Authorization headers.
+                if auth_type in {"none", "oauth"} and name.lower() == "authorization":
+                    continue
                 secret = self.vault.get(reference)
                 if secret is None:
                     raise ValueError("A configured header credential is missing")
-                if config.get("auth_type") != "oauth" or name.lower() != "authorization":
-                    headers[name] = secret
-            if token and config.get("auth_type") != "oauth":
+                headers[name] = secret
+            token = self.vault.get(config.get("credential_ref")) if auth_type not in {"none", "oauth"} else None
+            if token:
                 headers["Authorization"] = "Bearer " + token
             auth = None
             if config.get("auth_type") == "oauth":
@@ -223,7 +255,7 @@ class MCPConnection:
                         future.set_result(value)
                 except Exception as exc:
                     if not future.done():
-                        future.set_exception(RuntimeError(_error(exc)))
+                        future.set_exception(RuntimeError(_error(exc, remote=True)))
                 except asyncio.CancelledError:
                     future.cancel()
                 finally:
@@ -250,8 +282,15 @@ class MCPConnection:
                     raise
 
     def shutdown(self):
-        if self.loop and self.queue and not self.closed:
-            self.loop.call_soon_threadsafe(self.queue.put_nowait, None)
+        was_closed = self.closed
+        self.closed = True
+        for future in list(self.pending):
+            future.cancel()
+        if self.loop and self.queue and not was_closed:
+            try:
+                self.loop.call_soon_threadsafe(self.queue.put_nowait, None)
+            except RuntimeError:
+                pass  # The worker already closed its event loop.
             self.thread.join(timeout=5)
         if self.oauth_flow:
             self.oauth_flow.shutdown()
@@ -349,6 +388,7 @@ class IntegrationHub:
         self.vault = vault or CredentialVault()
         self.connections = {}
         self.auth_flows = {}
+        self.mcp_requests = {}
         self.inspections = {}
         self.skill_index = SkillIndex()
         self.browser = BrowserTools(self.root)
@@ -380,8 +420,13 @@ class IntegrationHub:
 
     def _public_server(self, server):
         public = {key: value for key, value in server.items() if key not in {"credential_ref", "env_credentials", "header_credentials", "oauth_tokens_ref", "oauth_client_ref"}}
-        public["authenticated"] = bool(server.get("credential_ref") or server.get("env_credentials") or server.get("header_credentials") or
-                                         (server.get("oauth_tokens_ref") and self.vault.get(server["oauth_tokens_ref"])))
+        auth_type = server.get("auth_type")
+        automatic = auth_type not in {"none", "oauth"} and server.get("credential_ref")
+        custom = any(name.lower() != "authorization" or auth_type not in {"none", "oauth"}
+                     for name in server.get("header_credentials", {}))
+        oauth = auth_type == "oauth" and server.get("oauth_tokens_ref") and self.vault.get(server["oauth_tokens_ref"])
+        public["authenticated"] = bool(automatic or custom or oauth or
+                                         (server.get("transport") == "stdio" and server.get("env_credentials")))
         public["connected"] = server["id"] in self.connections and not self.connections[server["id"]].closed
         public["tools"] = [{**tool, "enabled": self._tool_enabled(server, tool["name"])} for tool in server.get("tools", [])]
         return public
@@ -395,13 +440,73 @@ class IntegrationHub:
         return self._server_enabled(server) and (selected is None or name in selected)
 
     def _connection(self, server):
-        connection = self.connections.get(server["id"])
-        if connection is None or connection.closed:
-            connection = MCPConnection(server, self.vault)
-            self.connections[server["id"]] = connection
-        return connection
+        with self.lock:
+            current = self._server(server["id"])
+            if current is not server or _mcp_binding(current) != _mcp_binding(server):
+                raise MCPPreflightError("The MCP endpoint changed. Test the current connection before continuing.")
+            connection = self.connections.get(server["id"])
+            if connection is None or connection.closed:
+                connection = MCPConnection(current, self.vault)
+                self.connections[server["id"]] = connection
+            elif getattr(connection, "config", None) is not None and _mcp_binding(connection.config) != _mcp_binding(current):
+                raise MCPPreflightError("The MCP connection configuration changed. Test it again before continuing.")
+            return connection
+
+    def _require_idle(self, identity):
+        connection = self.connections.get(identity)
+        if self.mcp_requests.get(identity) or (connection and any(
+                not future.done() for future in getattr(connection, "pending", ()))):
+            raise ValueError("This connection has an active tool request. Wait for it to finish before changing the connection.")
+
+    def _admit_request(self, server, tool_name=None):
+        with self.lock:
+            try:
+                current = self._server(server["id"])
+            except ValueError:
+                raise MCPPreflightError("This MCP connection changed before the request started.") from None
+            if current is not server:
+                raise MCPPreflightError("This MCP connection changed before the request started.")
+            self._require_enabled(current, tool_name)
+            binding = _mcp_binding(current)
+            connection = self._connection(current)
+            identity = current["id"]
+            self.mcp_requests[identity] = self.mcp_requests.get(identity, 0) + 1
+            return connection, binding
+
+    def _require_enabled(self, server, tool_name):
+        if tool_name is None:
+            allowed = self._server_enabled(server)
+        else:
+            allowed = (any(tool.get("name") == tool_name for tool in server.get("tools", []))
+                       and self._tool_enabled(server, tool_name))
+        if not allowed:
+            raise MCPPreflightError("This MCP tool is disabled or its connection changed.")
+
+    def _validate_request(self, server, connection, binding, tool_name, cancel):
+        with self.lock:
+            try:
+                current = self._server(server["id"])
+            except ValueError:
+                raise MCPPreflightError("This MCP connection changed before the request started.") from None
+            if (current is not server or _mcp_binding(current) != binding or
+                    self.connections.get(server["id"]) is not connection or connection.closed):
+                raise MCPPreflightError("This MCP connection changed before the request started.")
+            self._require_enabled(current, tool_name)
+            if cancel is not None and cancel.is_set():
+                raise MCPPreflightError("This MCP request was cancelled before it started.")
+
+    def _release_request(self, identity):
+        with self.lock:
+            remaining = self.mcp_requests.get(identity, 0) - 1
+            if remaining > 0:
+                self.mcp_requests[identity] = remaining
+            else:
+                self.mcp_requests.pop(identity, None)
 
     def _close_connection(self, identity):
+        flow = self.auth_flows.pop(identity, None)
+        if flow:
+            flow.shutdown()
         connection = self.connections.pop(identity, None)
         if connection:
             connection.shutdown()
@@ -411,7 +516,8 @@ class IntegrationHub:
         # install/review mutations prevents that rollback from deleting a second
         # concurrent installation or its newly configured servers.
         if action in {"plugin_install", "plugin_inspect", "plugin_discard", "plugin_toggle",
-                      "skill_install", "skill_toggle", "skill_edit", "skill_reset", "skill_restore", "mcp_save", "mcp_remove"}:
+                      "skill_install", "skill_toggle", "skill_edit", "skill_reset", "skill_restore", "mcp_save", "mcp_remove",
+                      "mcp_auth_start", "mcp_auth_cancel"}:
             with self.lock:
                 return self._dispatch(action, data)
         return self._dispatch(action, data)
@@ -435,12 +541,15 @@ class IntegrationHub:
                 server = self._server(data["id"])
                 if server["transport"] == "stdio":
                     raise ValueError("OAuth is available for remote MCP endpoints")
+                self._require_idle(server["id"])
                 self._close_connection(server["id"])
                 flow = OAuthFlow()
                 self.auth_flows[server["id"]] = flow
                 server.update(auth_type="oauth", oauth_tokens_ref=server.get("oauth_tokens_ref") or uuid.uuid4().hex,
                               oauth_client_ref=server.get("oauth_client_ref") or uuid.uuid4().hex,
                               oauth_redirect_uri=flow.redirect_uri)
+                server.update(tools=[], enabled=False, status="authenticating")
+                server.pop("error", None)
                 self._save()
                 self.connections[server["id"]] = MCPConnection(server, self.vault, oauth_flow=flow)
                 return {"ok": True, "state": "connecting", "id": server["id"]}
@@ -452,39 +561,54 @@ class IntegrationHub:
                     raise ValueError("Start authentication first")
                 if connection.ready.done():
                     connection.ready.result()
-                    server["tools"] = self._validate_tools(connection.request("list_tools"))
-                    server["status"] = "ready"
-                    self._save()
-                    if flow:
-                        flow.shutdown()
+                    tools = self._validate_tools(connection.request("list_tools"))
+                    with self.lock:
+                        if self._server(server["id"]) is not server or self.connections.get(server["id"]) is not connection:
+                            raise ValueError("This connection changed during authentication. Connect it again.")
+                        server["tools"] = tools
+                        server["status"] = "ready"
+                        self._save()
+                        if flow:
+                            flow.shutdown()
                     return {"ok": True, "state": "ready", "server": self._public_server(server)}
                 return {"ok": True, "state": "authenticate" if flow and flow.authorization_url else "connecting",
                         "authorization_url": flow.authorization_url if flow else None}
             if action == "mcp_auth_cancel":
+                if self.mcp_requests.get(data["id"]):
+                    raise ValueError("This connection has an active tool request. Wait for it to finish before changing the connection.")
                 self._close_connection(data["id"])
                 flow = self.auth_flows.pop(data["id"], None)
                 if flow:
                     flow.shutdown()
                 return {"ok": True}
             if action == "mcp_test":
-                server = self._server(data["id"])
-                self._close_connection(server["id"])
+                with self.lock:
+                    server = self._server(data["id"])
+                    self._require_idle(server["id"])
+                    self._close_connection(server["id"])
+                    connection = self._connection(server)
                 try:
-                    tools = self._connection(server).request("list_tools")
+                    tools = connection.request("list_tools")
                     with self.lock:
+                        if self._server(server["id"]) is not server or self.connections.get(server["id"]) is not connection:
+                            raise ValueError("This connection changed while being tested. Test it again.")
                         server["tools"] = self._validate_tools(tools)
                         server["status"] = "ready"
                         server.pop("error", None)
                         self._save()
                     return {"ok": True, "server": self._public_server(server), "tools": server["tools"]}
                 except Exception as exc:
-                    self._close_connection(server["id"])
-                    server["status"] = "error"
-                    server["error"] = _error(exc)
-                    self._save()
+                    with self.lock:
+                        if self._server(server["id"]) is not server or self.connections.get(server["id"]) is not connection:
+                            return {"ok": False, "error": "This connection changed while being tested. Test it again."}
+                        self._close_connection(server["id"])
+                        server["status"] = "error"
+                        server["error"] = _error(exc)
+                        self._save()
                     return {"ok": False, "error": server["error"], "server": self._public_server(server)}
             if action == "mcp_remove":
                 server = self._server(data["id"])
+                self._require_idle(server["id"])
                 self._close_connection(server["id"])
                 references = [server.get("credential_ref"), server.get("oauth_tokens_ref"), server.get("oauth_client_ref"),
                               *server.get("env_credentials", {}).values(), *server.get("header_credentials", {}).values()]
@@ -606,7 +730,7 @@ class IntegrationHub:
             if transport not in {"http", "stdio", "sse"}:
                 raise ValueError("Select HTTP, stdio or legacy SSE transport")
             name = str(data.get("name") or existing.get("name") or "MCP server")[:100]
-            server = {**existing, "id": identity, "name": name, "transport": transport,
+            server = {**copy.deepcopy(existing), "id": identity, "name": name, "transport": transport,
                       "enabled": bool(data.get("enabled", existing.get("enabled", False)))}
             if transport == "stdio":
                 command = str(data.get("command", existing.get("command", ""))).strip()
@@ -614,51 +738,109 @@ class IntegrationHub:
                 if not command or "\x00" in command or not isinstance(args, list) or not all(isinstance(a, str) and "\x00" not in a for a in args):
                     raise ValueError("Supply an executable and an array of arguments")
                 server.update(command=command, args=args[:100], cwd=data.get("cwd", existing.get("cwd")))
-                environment = dict(existing.get("env", {}))
-                references = dict(existing.get("env_credentials", {}))
-                for key, value in data.get("env", {}).items():
-                    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,100}", key):
-                        raise ValueError("Invalid environment variable name")
-                    if SECRET_NAMES.search(key):
-                        references[key] = self.vault.put(str(value), references.get(key))
-                        environment.pop(key, None)
-                    else:
-                        environment[key] = str(value)
-                server.update(env=environment, env_credentials=references)
                 server.pop("url", None)
             else:
                 server["url"] = _safe_url(data.get("url", existing.get("url", "")))
-                # Query credentials are rejected rather than serialized in config.
                 if SECRET_NAMES.search(urlsplit(server["url"]).query):
                     raise ValueError("Use the authentication field instead of URL query credentials")
-            if data.get("token"):
-                server["credential_ref"] = self.vault.put(data["token"], existing.get("credential_ref"))
-                server["auth_type"] = "bearer"
+            target_changed = bool(existing and _mcp_identity(existing) != _mcp_identity(server))
+            if target_changed:
+                # No credential link or old catalog proves anything about a new target.
+                for key in ("credential_ref", "env_credentials", "header_credentials", "oauth_tokens_ref",
+                            "oauth_client_ref", "oauth_redirect_uri"):
+                    server.pop(key, None)
+                # Unclassified values can also contain account data or secrets.
+                # Only maps explicitly supplied for the new target are retained.
+                server["headers"] = {}
+                server["env"] = {}
+                server["tools"] = []
+                server["enabled"] = False
+                server["status"] = "needs_test"
+                server.pop("error", None)
             if "auth_type" in data:
                 if data["auth_type"] not in {"none", "bearer", "oauth"}:
                     raise ValueError("Select no authentication, bearer token or OAuth")
                 server["auth_type"] = data["auth_type"]
+            token = data.get("token")
+            if token is not None and (not isinstance(token, str) or len(token) > 8192 or any(c in token for c in ("\r", "\n", "\x00"))):
+                raise ValueError("Enter a valid access token.")
+            secret_writes = []
+            if token:
+                secret_writes.append(("credential_ref", None, token))
+                if "auth_type" not in data:
+                    server["auth_type"] = "bearer"
+            if transport == "stdio":
+                environment = dict(server.get("env", {}))
+                references = dict(server.get("env_credentials", {}))
+                for key, value in data.get("env", {}).items():
+                    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,100}", key):
+                        raise ValueError("Invalid environment variable name")
+                    if SECRET_NAMES.search(key):
+                        secret_writes.append(("env_credentials", key, str(value)))
+                        environment.pop(key, None)
+                    else:
+                        environment[key] = str(value)
+                server.update(env=environment, env_credentials=references)
             if "headers" in data:
                 headers = {}
-                refs = dict(existing.get("header_credentials", {}))
+                refs = dict(server.get("header_credentials", {}))
                 for key, value in data["headers"].items():
                     if not re.fullmatch(r"[A-Za-z0-9-]{1,100}", str(key)) or "\r" in str(value) or "\n" in str(value):
                         raise ValueError("Invalid server header")
                     if SECRET_NAMES.search(str(key)):
-                        refs[key] = self.vault.put(str(value), refs.get(key))
+                        secret_writes.append(("header_credentials", key, str(value)))
                     else:
                         headers[key] = str(value)
                 server.update(headers=headers, header_credentials=refs)
-            if data.get("clear_token") and server.get("credential_ref"):
-                self.vault.delete(server.pop("credential_ref"))
+            if data.get("clear_token"):
+                server.pop("credential_ref", None)
             if "enabled_tools" in data:
                 if not isinstance(data["enabled_tools"], list):
                     raise ValueError("Enabled tools must be an array")
                 server["enabled_tools"] = [str(name) for name in data["enabled_tools"]][:1000]
+            configuration_changed = bool(existing and (
+                _mcp_binding(existing) != _mcp_binding(server) or secret_writes or
+                server.get("headers", {}) != existing.get("headers", {}) or
+                server.get("env", {}) != existing.get("env", {})))
+            if configuration_changed:
+                server.update(tools=[], enabled=False, status="needs_test")
+                server.pop("error", None)
+            elif existing.get("status") in {"needs_test", "authenticating"} and data.get("enabled"):
+                raise ValueError("Test the changed endpoint before enabling this connection.")
             server.setdefault("tools", [])
+            self._require_idle(identity)
             self._close_connection(identity)
-            self.config["servers"] = [s for s in self.config["servers"] if s["id"] != identity] + [server]
-            self._save()
+            old_servers = self.config["servers"]
+            created = []
+            try:
+                for key, member, value in secret_writes:
+                    # Fresh links do not mutate credentials still owned by an old session.
+                    reference = self.vault.put(value)
+                    created.append(reference)
+                    if member is None:
+                        server[key] = reference
+                    else:
+                        server.setdefault(key, {})[member] = reference
+                if data.get("clear_token"):
+                    server.pop("credential_ref", None)
+                self.config["servers"] = [s for s in old_servers if s["id"] != identity] + [server]
+                self._save()
+            except Exception:
+                self.config["servers"] = old_servers
+                for reference in created:
+                    try:
+                        self.vault.delete(reference)
+                    except Exception:
+                        pass
+                raise ValueError("Could not save this connection securely. Check credential storage and try again.") from None
+            # Old references may also belong to providers, GitHub or a recovery
+            # snapshot. Unlink them here; only this save's unused new entries are
+            # provably ours to delete from the shared operating-system vault.
+            for reference in set(created) - _mcp_credential_refs(server):
+                try:
+                    self.vault.delete(reference)
+                except Exception:
+                    pass
             return {"ok": True, "server": self._public_server(server)}
 
     @staticmethod
@@ -718,6 +900,8 @@ class IntegrationHub:
 
     def execute(self, name, arguments, run_context=None):
         invocation_started = False
+        mcp_path = False
+        claim = None
         try:
             if name.startswith("browser_"):
                 invocation_started = name in {"browser_navigate", "browser_click", "browser_type", "browser_select", "browser_key", "browser_scroll", "browser_close"}
@@ -731,22 +915,45 @@ class IntegrationHub:
                 return self.read_skill_resource(arguments["id"], arguments["path"], project, arguments.get("start", 0), arguments.get("limit", 8000))
             for server in self.config["servers"]:
                 resource_name = f"mcp__{_server_namespace(server['id'])}__read_resource"
+                operation = payload = tool_name = None
                 if name == resource_name and self._server_enabled(server):
-                    response = self._connection(server).request("read_resource", {"uri": str(arguments["uri"])})
-                    return self._bound_result(response, server)
-                for tool in server.get("tools", []):
-                    if name == self.tool_name(server["id"], tool["name"]):
-                        if not self._tool_enabled(server, tool["name"]):
-                            raise ValueError("This MCP tool is disabled")
-                        connection = self._connection(server)
-                        connection.ready.result(timeout=20)
-                        invocation_started = True
-                        cancel = run_context.get("cancel") if isinstance(run_context, dict) else None
-                        response = connection.request("call_tool", {"name": tool["name"], "arguments": arguments}, cancel=cancel)
-                        return self._bound_result(response, server)
-            raise ValueError("Integration tool was not found")
+                    operation, payload = "read_resource", {"uri": str(arguments["uri"])}
+                else:
+                    for tool in server.get("tools", []):
+                        if name == self.tool_name(server["id"], tool["name"]):
+                            if not self._tool_enabled(server, tool["name"]):
+                                raise MCPPreflightError("This MCP tool is disabled")
+                            tool_name = tool["name"]
+                            operation, payload = "call_tool", {"name": tool_name, "arguments": arguments}
+                            break
+                if operation is None:
+                    continue
+                mcp_path = True
+                connection, binding = self._admit_request(server, tool_name)
+                claim = server["id"]
+                # The short coordinator admission prevents configuration changes
+                # before the SDK registers its pending future. No lock spans I/O.
+                connection.ready.result(timeout=20)
+                cancel = run_context.get("cancel") if isinstance(run_context, dict) else None
+                self._validate_request(server, connection, binding, tool_name, cancel)
+                invocation_started = True
+                response = connection.request(operation, payload, cancel=cancel)
+                return self._bound_result(response, server)
+            raise MCPPreflightError("Integration tool was not found")
         except Exception as exc:
-            return {"ok": False, "error": _error(exc), "outcome_unknown": invocation_started or isinstance(exc, concurrent.futures.TimeoutError)}
+            preflight = isinstance(exc, MCPPreflightError)
+            not_executed = preflight or (mcp_path and not invocation_started)
+            message = ("Connection did not become ready. No tool request was sent; test the connection before retrying."
+                       if mcp_path and not invocation_started and isinstance(exc, concurrent.futures.TimeoutError)
+                       else _error(exc, remote=mcp_path and not preflight))
+            result = {"ok": False, "error": message,
+                      "outcome_unknown": not not_executed and (invocation_started or isinstance(exc, concurrent.futures.TimeoutError))}
+            if not_executed:
+                result["not_executed"] = True
+            return result
+        finally:
+            if claim is not None:
+                self._release_request(claim)
 
     def _bound_result(self, response, server):
         raw = json.dumps(response, ensure_ascii=False).encode("utf-8")
@@ -1734,7 +1941,7 @@ class IntegrationHub:
         if self.closed:
             return
         self.closed = True
-        for identity in list(self.connections):
+        for identity in set(self.connections) | set(self.auth_flows):
             self._close_connection(identity)
         self.browser.shutdown()
         for package in list(self.inspections.values()):

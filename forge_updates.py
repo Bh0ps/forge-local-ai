@@ -24,6 +24,8 @@ from forge_store import TERMINAL, atomic_text, encode
 
 REPOSITORY = 'Bh0ps/forge-local-ai'
 MAX_PACKAGE_BYTES = 1024 * 1024 * 1024
+UPDATE_CHANNELS = ('stable', 'preview')
+MAX_RELEASE_PAGES = 3
 try:
     # Generated in the protected release build BEFORE PyInstaller/signing. This
     # module is compiled into the executable, never loaded from a user setting.
@@ -46,8 +48,46 @@ def bounded_lock(lock, description):
 def version(value):
     match = re.fullmatch(r'v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)', str(value))
     if not match:
-        raise ValueError('Only stable major.minor.patch releases are supported.')
+        raise ValueError('Only major.minor.patch release tags are supported.')
     return tuple(map(int, match.groups()))
+
+
+def update_channel(value):
+    if value not in UPDATE_CHANNELS:
+        raise ValueError('Choose the stable or preview update channel.')
+    return value
+
+
+def release_metadata(metadata):
+    """Keep only the exact public installer identity; never retain release prose."""
+    if not isinstance(metadata, dict):
+        raise ValueError('Invalid release metadata.')
+    tag = metadata.get('tag_name')
+    number = '.'.join(map(str, version(tag)))
+    if type(metadata.get('draft')) is not bool or type(metadata.get('prerelease')) is not bool:
+        raise ValueError('Invalid release publication state.')
+    if metadata['draft']:
+        raise ValueError('Only published releases are supported.')
+    page = 'https://github.com/' + REPOSITORY + '/releases/tag/' + tag
+    if metadata.get('html_url') != page:
+        raise ValueError('Release metadata refers to a different repository.')
+    filename = 'Forge-' + number + '-Setup.exe'
+    assets = metadata.get('assets')
+    if not isinstance(assets, list):
+        raise ValueError('Invalid release assets.')
+    candidates = [asset for asset in assets if isinstance(asset, dict) and asset.get('name') == filename]
+    if len(candidates) != 1:
+        raise ValueError('Release must contain exactly one matching Windows installer.')
+    asset = candidates[0]
+    expected = 'https://github.com/' + REPOSITORY + '/releases/download/' + tag + '/' + filename
+    digest = asset.get('digest', '')
+    if asset.get('browser_download_url') != expected or not isinstance(digest, str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
+        raise ValueError('Installer URL or GitHub SHA256 digest is missing or invalid.')
+    size = asset.get('size')
+    if type(size) is not int or not 0 < size <= MAX_PACKAGE_BYTES:
+        raise ValueError('Invalid installer size.')
+    return {'version': number, 'tag': tag, 'name': filename, 'html_url': page,
+            'url': expected, 'sha256': digest[7:], 'size': size, 'prerelease': metadata['prerelease']}
 
 
 def file_hash(path):
@@ -252,7 +292,7 @@ async def _get_bytes(client, url, limit, cancel=None, progress=None, consume=Non
 
 
 class UpdateManager:
-    def __init__(self, service, current_version='5.1.0', install_dir=None, trust_policy=None,
+    def __init__(self, service, current_version='5.1.1', install_dir=None, trust_policy=None,
                  client_factory=None, verifier=authenticode):
         self.service, self.store = service, service.store
         self.home = self.store.home
@@ -266,13 +306,20 @@ class UpdateManager:
         self.client_factory = client_factory or _client
         self.verifier = verifier
         self.lock, self.cancel_event = threading.RLock(), threading.Event()
+        # Only admission flags/thread starts use this lock. SQLite/filesystem
+        # work stays outside it so host shutdown never waits on slow state I/O.
+        self.admission_lock = threading.RLock()
+        self.shutting_down = False
         self.thread = None
+        self.thread_stop_event = None
+        self.monitor = None
         self.applying = False
         self.inspection_required = False
         try: self.state = self.store.entity('updates', 'current')
         except ValueError: self.state = {'id': 'current', 'state': 'idle'}
         if self.state.get('state') in ('checking', 'downloading'):
-            self._save(state='interrupted', error='The previous update operation stopped. Check again.')
+            self._save(state='interrupted', verified=False,
+                       error='The previous update operation stopped. Check again.')
         if self.state.get('operation_id'):
             try:
                 operation = load_operation(self.home, self.state['operation_id'])
@@ -285,6 +332,13 @@ class UpdateManager:
             except (ValueError, OSError, KeyError):
                 self.inspection_required = True
                 self._save(state='error', error='Update journal could not be verified. Inspect the retained backups.')
+        if self.state.get('state') in ('available', 'ready'):
+            try:
+                if version((self.state.get('release') or {}).get('version')) <= version(self.current_version):
+                    self._save(state='current', release=None, downloaded=None, signature=None,
+                               verified=False, received_bytes=0)
+            except ValueError:
+                self._save(state='error', verified=False, error='Stored release metadata is invalid. Check again.')
 
     def _save(self, **data):
         with self.lock:
@@ -294,6 +348,7 @@ class UpdateManager:
     def status(self):
         with self.lock:
             return {**self.state, 'current_version': self.current_version, 'repository': REPOSITORY,
+                'channel': self.state.get('channel') if self.state.get('channel') in UPDATE_CHANNELS else 'stable',
                 'inspection_required': self.inspection_required,
                 'automatic_install_available': bool(self.publishers and self.install_dir and not self.inspection_required),
                 'signing_setup_required': not bool(self.publishers),
@@ -301,49 +356,127 @@ class UpdateManager:
                     'Updates require a valid timestamped Windows signature from the approved publisher.' if self.publishers else
                     'Signing setup is required. Unsigned releases can be installed manually; automatic installation stays disabled.'}
 
-    def check(self):
+    def _begin_check(self, channel):
         with self.lock:
-            if self.applying or self.state.get('state') == 'checking' or self.thread and self.thread.is_alive(): raise ValueError('An update operation is already active.')
-            self._save(state='checking', error=None)
+            with self.admission_lock:
+                if self.shutting_down: raise ValueError('The updater is shutting down.')
+            if self.applying or self.state.get('state') in ('checking', 'downloading') or self.thread and self.thread.is_alive(): raise ValueError('An update operation is already active.')
+            previous = dict(self.state)
+            self.cancel_event.clear()
+            self._save(state='checking', error=None, channel=channel, last_check_failed=False)
+            return previous
+
+    def check(self, channel='stable'):
+        channel = update_channel(channel)
+        return self._check(channel, self._begin_check(channel))
+
+    def check_background(self, channel='stable', *, stop_event=None):
+        """Reserve the operation before returning; HTTP never blocks the UI call."""
+        channel = update_channel(channel)
+        with self.lock:
+            with self.admission_lock:
+                if self.shutting_down or stop_event is not None and stop_event.is_set():
+                    raise ValueError('The update check is stopping.')
+            previous = self._begin_check(channel)
+            def worker():
+                try: self._check(channel, previous)
+                except Exception: pass  # Sanitized failure is already persisted.
+            with self.admission_lock:
+                stopped = self.shutting_down or stop_event is not None and stop_event.is_set()
+                if not stopped:
+                    self.thread = threading.Thread(target=worker, daemon=True, name='Forge-update-check')
+                    self.thread_stop_event = stop_event
+                    self.thread.start()
+            if stopped:
+                self._save(state='cancelled', verified=False, error='Update check cancelled.')
+                raise ValueError('The update check is stopping.')
+            return self.status()
+
+    def _check(self, channel, previous):
         try:
-            chunks = []
+            if self.shutting_down or self.cancel_event.is_set(): raise ValueError('Update check cancelled.')
             async def fetch_metadata():
                 async with self.client_factory() as client:
-                    await _get_bytes(client, 'https://api.github.com/repos/' + REPOSITORY + '/releases/latest', 1024 * 1024, consume=chunks.append)
-            asyncio.run(fetch_metadata())
-            raw = b''.join(chunks)
-            metadata = json.loads(raw)
-            tag = metadata['tag_name']; newer = version(tag) > version(self.current_version)
-            if metadata.get('draft') or metadata.get('prerelease'): raise ValueError('Only published stable releases are supported.')
-            if metadata.get('html_url') != 'https://github.com/' + REPOSITORY + '/releases/tag/' + tag:
-                raise ValueError('Release metadata refers to a different repository.')
-            if not newer: return self._save(state='current', release=None)
-            number = '.'.join(map(str, version(tag)))
-            filename = 'Forge-' + number + '-Setup.exe'
-            candidates = [asset for asset in metadata.get('assets', []) if asset.get('name') == filename]
-            if len(candidates) != 1: raise ValueError('Release must contain exactly one matching Windows installer.')
-            asset = candidates[0]
-            expected = 'https://github.com/' + REPOSITORY + '/releases/download/' + tag + '/' + filename
-            digest = asset.get('digest', '')
-            if asset.get('browser_download_url') != expected or not re.fullmatch(r'sha256:[0-9a-f]{64}', digest):
-                raise ValueError('Installer URL or GitHub SHA256 digest is missing or invalid.')
-            size = asset.get('size')
-            if type(size) is not int or not 0 < size <= MAX_PACKAGE_BYTES: raise ValueError('Invalid installer size.')
-            return self._save(state='available', release={'version': number, 'tag': tag, 'name': filename,
-                'url': expected, 'sha256': digest[7:], 'size': size}, downloaded=None, verified=False)
+                    base = 'https://api.github.com/repos/' + REPOSITORY + '/releases'
+                    if channel == 'stable':
+                        chunks = []
+                        await _get_bytes(client, base + '/latest', 1024 * 1024,
+                                         self.cancel_event, consume=chunks.append)
+                        metadata = json.loads(b''.join(chunks))
+                        if not isinstance(metadata, dict): raise ValueError('Invalid release metadata.')
+                        if metadata.get('draft') or metadata.get('prerelease'): raise ValueError('Only published stable releases are supported.')
+                        version(metadata.get('tag_name'))
+                        return metadata
+                    candidates = []
+                    for page in range(1, MAX_RELEASE_PAGES + 1):
+                        chunks = []
+                        await _get_bytes(client, base + '?per_page=100&page=' + str(page), 1024 * 1024,
+                                         self.cancel_event, consume=chunks.append)
+                        values = json.loads(b''.join(chunks))
+                        if not isinstance(values, list) or len(values) > 100:
+                            raise ValueError('Invalid release feed.')
+                        for value in values:
+                            if not isinstance(value, dict): raise ValueError('Invalid release metadata.')
+                            if value.get('draft') is True: continue
+                            try: version(value.get('tag_name'))
+                            except ValueError: continue  # Other tag formats are never executable candidates.
+                            candidates.append(value)
+                        if len(values) < 100:
+                            if not candidates: return None
+                            newest = max(version(value['tag_name']) for value in candidates)
+                            matching = [value for value in candidates if version(value['tag_name']) == newest]
+                            if len(matching) != 1: raise ValueError('Release feed has ambiguous version identities.')
+                            return matching[0]
+                    raise ValueError('Release history exceeds the safe check limit. View the public releases instead.')
+            metadata = asyncio.run(fetch_metadata())
+            if metadata is not None:
+                if type(metadata.get('draft')) is not bool or type(metadata.get('prerelease')) is not bool or metadata['draft']:
+                    raise ValueError('Invalid release publication state.')
+                if metadata.get('html_url') != 'https://github.com/' + REPOSITORY + '/releases/tag/' + metadata['tag_name']:
+                    raise ValueError('Release metadata refers to a different repository.')
+            if metadata is None or version(metadata.get('tag_name')) <= version(self.current_version):
+                return self._finish_check(state='current', release=None, downloaded=None, signature=None,
+                                          verified=False, received_bytes=0)
+            release = release_metadata(metadata)
+            # A periodic check of the same release preserves its verified bytes.
+            identity = ('version', 'tag', 'name', 'url', 'sha256', 'size')
+            same = all((previous.get('release') or {}).get(key) == release[key] for key in identity)
+            staged = previous.get('state') == 'ready' and previous.get('verified') is True and same
+            return self._finish_check(state='ready' if staged else 'available', release=release,
+                downloaded=previous.get('downloaded') if staged else None,
+                signature=previous.get('signature') if staged else None,
+                verified=staged, received_bytes=release['size'] if staged else 0)
         except Exception as exc:
-            self._save(state='error', error=str(exc)[:400]); raise
+            # A failed feed check must not leave an old Install button armed.
+            cancelled = self.cancel_event.is_set()
+            self._save(state='cancelled' if cancelled else 'error',
+                       error='Update check cancelled.' if cancelled else str(exc)[:400], verified=False,
+                       last_check_failed=not cancelled, checked_at=int(time.time())); raise
+
+    def _finish_check(self, **data):
+        with self.lock:
+            if self.cancel_event.is_set(): raise ValueError('Update check cancelled.')
+            return self._save(**data, last_check_failed=False, checked_at=int(time.time()))
 
     def download(self):
         with self.lock:
+            with self.admission_lock:
+                if self.shutting_down: raise ValueError('The updater is shutting down.')
             if self.inspection_required: raise ValueError('Inspect and repair the previous update before downloading another automatic installer.')
             if not self.publishers: raise ValueError('Automatic download is disabled until a verified publisher is embedded. Install unsigned previews manually.')
             if self.applying or self.state.get('state') == 'checking' or self.thread and self.thread.is_alive(): raise ValueError('An update operation is already active.')
             release = self._release()
             self.cancel_event.clear()
             self._save(state='downloading', received_bytes=0, error=None, verified=False)
-            self.thread = threading.Thread(target=self._download, args=(release,), daemon=True, name='Forge-update-download')
-            self.thread.start()
+            with self.admission_lock:
+                stopped = self.shutting_down
+                if not stopped:
+                    self.thread = threading.Thread(target=self._download, args=(release,), daemon=True, name='Forge-update-download')
+                    self.thread_stop_event = None
+                    self.thread.start()
+            if stopped:
+                self._save(state='cancelled', verified=False, error='Update download cancelled.')
+                raise ValueError('The updater is shutting down.')
             return self.status()
 
     def _download(self, release):
@@ -362,14 +495,17 @@ class UpdateManager:
             if partial.stat().st_size != release['size'] or file_hash(partial) != release['sha256']:
                 raise ValueError('Installer failed SHA256 or size verification. Nothing was installed.')
             signature = require_trust(partial, release['version'], self.publishers, self.verifier)
-            os.replace(partial, complete)
-            self._save(state='ready', downloaded=str(complete), verified=True, signature=signature)
+            with self.lock:
+                if self.cancel_event.is_set(): raise ValueError('Update download cancelled.')
+                os.replace(partial, complete)
+                self._save(state='ready', downloaded=str(complete), verified=True, signature=signature)
         except Exception as exc:
             partial.unlink(missing_ok=True)
             self._save(state='cancelled' if self.cancel_event.is_set() else 'error', error=str(exc)[:400], downloaded=None, verified=False)
 
     def cancel(self):
-        self.cancel_event.set()
+        with self.lock:
+            self.cancel_event.set()
         return {'ok': True}
 
     def _idle(self):
@@ -410,6 +546,8 @@ class UpdateManager:
             yield
 
     def _package(self):
+        if self.state.get('state') in ('checking', 'downloading') or self.thread and self.thread.is_alive():
+            raise ValueError('An update operation is already active.')
         release = self._release()
         path = plain_path(self.state.get('downloaded') or '')
         if not self.state.get('verified') or not path.is_relative_to(self.root.resolve()) or path.name != 'installer.exe' or not path.is_file():
@@ -478,6 +616,8 @@ class UpdateManager:
         # path. A committed rollback never executes a downloaded older installer.
         with self._quiesce():
             if self.applying: raise ValueError('An update is already prepared.')
+            if self.state.get('state') in ('checking', 'downloading') or self.thread and self.thread.is_alive():
+                raise ValueError('An update operation is already active.')
             self._idle()
             identifier = self.state.get('operation_id')
             data = load_operation(self.home, identifier)
@@ -518,8 +658,15 @@ class UpdateManager:
         return {'artifact': artifact, 'diagnostics': data}
 
     def dispatch(self, action, data=None):
-        if action == 'update_status': return self.status()
-        if action == 'update_check': return self.check()
+        if action == 'update_status':
+            result = self.status()
+            result['operation_error'] = result.pop('error', None)
+            return result
+        if action == 'update_check':
+            payload = data or {}
+            background = payload.get('background', False)
+            if type(background) is not bool: raise ValueError('Background checking must be enabled or disabled.')
+            return (self.check_background if background else self.check)(channel=payload.get('channel', 'stable'))
         if action == 'update_download': return self.download()
         if action == 'update_cancel': return self.cancel()
         if action == 'update_apply': return self.apply()
@@ -528,8 +675,30 @@ class UpdateManager:
         raise ValueError('Unknown update action.')
 
     def shutdown(self):
-        self.cancel()
+        with self.admission_lock:
+            self.shutting_down = True
+            self.cancel_event.set()
+        if self.monitor: self.monitor.stop()
         if self.thread: self.thread.join(timeout=2)
+
+    def start_monitor(self):
+        with self.lock:
+            with self.admission_lock:
+                if self.shutting_down: raise ValueError('The updater is shutting down.')
+            if self.monitor is None:
+                from forge_update_monitor import UpdateMonitor
+                self.monitor = UpdateMonitor(self)
+            self.monitor.start()
+
+    def stop_monitor(self, stop_event):
+        with self.admission_lock:
+            stop_event.set()
+            self.cancel_monitor_check(stop_event)
+
+    def cancel_monitor_check(self, stop_event):
+        with self.admission_lock:
+            if self.thread_stop_event is stop_event and self.thread and self.thread.is_alive():
+                self.cancel_event.set()
 
 
 def load_operation(home, identifier):

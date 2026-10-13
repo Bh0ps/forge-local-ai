@@ -25,6 +25,7 @@ from PIL import Image
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parents[1]
+MEDIA_VERSION = json.loads((ROOT / 'frontend/package.json').read_text())['version']
 sys.path.insert(0, str(ROOT))
 from forge_builder import BuilderManager
 from forge_drafts import DraftManager
@@ -240,7 +241,7 @@ def capture_extension(executable, output: Path):
         assert not page.get_by_role('button', name='Reconnect Forge', exact=True).is_visible()
         assert page.get_by_text('Reference page', exact=True).is_visible()
         assert page.get_by_text('https://example.org', exact=True).is_visible()
-        target = output / 'forge-5.1.0-extension-popup.png'
+        target = output / f'forge-{MEDIA_VERSION}-extension-popup.png'
         Image.open(io.BytesIO(page.locator('body').screenshot())).save(target, optimize=True)
         connect.click()
         page.get_by_role('status').get_by_text('Connected to Forge', exact=True).wait_for()
@@ -304,7 +305,7 @@ def main():
                 page.wait_for_timeout(300)
                 frames = [pixels(page)]
                 page.get_by_role('button', name='Skills and notes', exact=True).click()
-                page.get_by_role('heading', name='Skills and notes', exact=True).wait_for()
+                page.get_by_role('heading', name='Context', exact=True).wait_for()
                 frames.append(pixels(page))
                 page.get_by_role('checkbox', name='UI design', exact=False).check()
                 frames.append(pixels(page))
@@ -315,12 +316,18 @@ def main():
                     'Add keyboard controls and keep the layout calm.')
                 page.get_by_text('Draft saved locally', exact=True).wait_for()
                 frames.append(pixels(page))
-                png(page, args.output / 'forge-5.1.0-workspace-dark.png')
+                png(page, args.output / f'forge-{MEDIA_VERSION}-workspace-dark.png')
                 page.get_by_role('button', name='Skills and notes', exact=True).click()
                 frames.append(pixels(page))
                 page.get_by_role('button', name='Skills and notes', exact=True).click()
                 frames.append(pixels(page))
-                gif(frames, args.output / 'forge-5.1.0-context.gif')
+                gif(frames, args.output / f'forge-{MEDIA_VERSION}-context.gif')
+                page.get_by_role('tab', name='Activity', exact=True).click()
+                page.get_by_role('heading', name='Activity', exact=True).wait_for()
+                page.locator('.workspace-panel .chat-activity-summary').first.click()
+                page.locator('.workspace-panel .chat-activity-detail').get_by_text('read file', exact=True).wait_for()
+                png(page, args.output / f'forge-{MEDIA_VERSION}-activity.png')
+                page.get_by_role('tab', name='Context', exact=True).click()
 
                 page.get_by_role('button', name='Skills and notes', exact=True).click()
                 page.set_viewport_size({'width': 1440, 'height': 1050})
@@ -337,7 +344,7 @@ def main():
                 frame = page.frame_locator('iframe[title="Local application preview"]')
                 frame.get_by_role('heading', name='Make space for what comes next.', exact=False).wait_for()
                 frames.append(pixels(page))
-                png(page, args.output / 'forge-5.1.0-builder-light.png')
+                png(page, args.output / f'forge-{MEDIA_VERSION}-builder-light.png')
                 field = frame.get_by_role('textbox', name='New idea', exact=True)
                 field.fill('A small creative habit')
                 frames.append(pixels(page))
@@ -361,7 +368,12 @@ def main():
                 page.get_by_role('button', name='Preview', exact=True).click()
                 frame.get_by_role('heading', name='Make space for what comes next.', exact=False).wait_for()
                 frames.append(pixels(page))
-                gif(frames, args.output / 'forge-5.1.0-builder.gif')
+                gif(frames, args.output / f'forge-{MEDIA_VERSION}-builder.gif')
+                page.set_viewport_size({'width': 1440, 'height': 900})
+                page.evaluate("document.documentElement.dataset.theme='dark'")
+                page.get_by_role('button', name='Settings', exact=True).click()
+                page.get_by_role('heading', name='Workspace appearance', exact=True).wait_for()
+                png(page, args.output / f'forge-{MEDIA_VERSION}-settings.png')
                 assert not errors, errors
                 assert not blocked_requests, 'The demo attempted a request outside its isolated loopback servers.'
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
@@ -369,7 +381,7 @@ def main():
                 browser.close()
         finally:
             fixture.manager.shutdown()
-    for path in sorted(args.output.glob('forge-5.1.0-*')):
+    for path in sorted(args.output.glob(f'forge-{MEDIA_VERSION}-*')):
         print(f'{path.name}: {path.stat().st_size:,} bytes')
     print('Synthetic production-UI capture passed; no page errors or external requests.')
 

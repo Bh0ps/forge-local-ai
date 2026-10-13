@@ -168,8 +168,9 @@ describe('update and workspace integration', () => {
     vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: urls, revokeObjectURL: vi.fn() }));
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     render(<UpdateSettings notify={notify} />);
-    const download = await screen.findByRole('button', { name: 'Download & verify' });
-    expect((download as HTMLButtonElement).disabled).toBe(true);
+    const download = await screen.findByRole('link', { name: 'Download installer' });
+    expect(download.getAttribute('href')).toBe('https://github.com/Bh0ps/forge-local-ai/releases');
+    expect(screen.queryByRole('button', { name: 'Download & verify' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Install & restart' })).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Export diagnostic report' }));
     await waitFor(() => expect(call).toHaveBeenCalledWith('diagnostics_export', {}));

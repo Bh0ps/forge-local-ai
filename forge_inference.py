@@ -144,7 +144,7 @@ class CompatibleProvider:
         token=self.vault.get(self.config['credential_ref']) if self.vault and self.config.get('credential_ref') else None
         return {'Authorization':'Bearer '+token} if token else {}
     def models(self):
-        with httpx.Client(timeout=10) as client:
+        with httpx.Client(timeout=10,trust_env=False,follow_redirects=False) as client:
             result=client.get(self.base+'/models',headers=self._headers()); result.raise_for_status()
             return [{'name':m['id'],'model':m['id'],'capabilities':self.config.get('capabilities',[])} for m in result.json().get('data',[])]
     def capabilities(self,model):
