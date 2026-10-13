@@ -52,7 +52,7 @@ def setup(tmp_path):
         def response(request):
             return httpx.Response(200, json=metadata()) if request.url.path.endswith('/latest') else httpx.Response(200, content=PACKAGE)
         return httpx.AsyncClient(transport=httpx.MockTransport(response), trust_env=False)
-    manager = UpdateManager(service, '4.1.1', app, (PUBLISHER,), factory, signature)
+    manager = UpdateManager(service, '4.1.1', app, (PUBLISHER,), factory, signature, proof_policy={}, _allow_installation=True)
     return manager, app
 
 
@@ -69,7 +69,7 @@ def prepare(manager, monkeypatch):
     return result
 
 
-@pytest.mark.parametrize('path', ['../outside', '/absolute', 'a\\b', 'a:b', 'a//b', './file', 'a/../file', 'a./file', 'nul.txt', 'a/COM1', 'plugins/run.exe', '.forge/state', 'a\x00b'])
+@pytest.mark.parametrize('path', ['../outside', '/absolute', 'a\\b', 'a:b', 'a//b', './file', 'a/../file', 'a./file', 'nul.txt', 'a/COM1', 'plugins/run.exe', '.forge/state', 'a\x00b', 'COM¹.txt', 'LPT²', 'a/COM³.dll'])
 def test_package_path_rejects_escape_and_windows_aliases(path):
     with pytest.raises(ValueError): safe_relative(path)
 
@@ -204,7 +204,7 @@ def test_explicit_rollback_restores_previous_version_once(setup, monkeypatch):
         return SimpleNamespace(returncode=0)
     helper_main(manager.home, result['operation_id'], data['parent_pid'], install_dir=app,
                 publishers=(PUBLISHER,), verifier=signature, runner=install)
-    restarted = UpdateManager(manager.service, '4.2.0', app, (PUBLISHER,), verifier=signature)
+    restarted = UpdateManager(manager.service, '4.2.0', app, (PUBLISHER,), verifier=signature, _allow_installation=True)
     assert restarted.status()['state'] == 'installed'
     rollback = restarted.rollback(); rollback_data = load_operation(manager.home, rollback['operation_id'])
     assert rollback_data['parent_created'] > 0
@@ -356,7 +356,7 @@ def test_interrupted_installer_blocks_new_operation_and_rollback(setup, monkeypa
     operation=load_operation(manager.home,result['operation_id'])
     operation['state']='applying'
     atomic_text(manager.root/'operations'/(operation['id']+'.json'),encode(operation))
-    restored=UpdateManager(manager.service,'4.1.1',app,(PUBLISHER,),verifier=signature)
+    restored=UpdateManager(manager.service,'4.1.1',app,(PUBLISHER,),verifier=signature, _allow_installation=True)
     assert restored.status()['inspection_required'] and restored.status()['state']=='interrupted'
     assert not restored.status()['verified']
     for action in (restored.apply, restored.rollback):
@@ -369,7 +369,7 @@ def test_corrupt_update_journal_cannot_enable_another_install(setup, monkeypatch
     manager, app=setup;result=prepare(manager,monkeypatch)
     path=manager.root/'operations'/(result['operation_id']+'.json')
     path.write_text('{}',encoding='utf-8')
-    restored=UpdateManager(manager.service,'4.1.1',app,(PUBLISHER,),verifier=signature)
+    restored=UpdateManager(manager.service,'4.1.1',app,(PUBLISHER,),verifier=signature, _allow_installation=True)
     assert restored.status()['inspection_required']
     with pytest.raises(ValueError,match='inspection'): restored.apply()
 
@@ -437,7 +437,7 @@ def install_ready_fixture(manager, app, monkeypatch):
         return SimpleNamespace(returncode=0)
     helper_main(manager.home, data['id'], data['parent_pid'], install_dir=app,
                 publishers=(PUBLISHER,), verifier=signature, runner=install)
-    return data, UpdateManager(manager.service, '4.2.0', app, (PUBLISHER,), verifier=signature)
+    return data, UpdateManager(manager.service, '4.2.0', app, (PUBLISHER,), verifier=signature, _allow_installation=True)
 
 
 def test_rollback_cannot_rewind_completed_effect_to_prepared_invocation(setup, monkeypatch, tmp_path):

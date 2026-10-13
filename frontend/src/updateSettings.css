@@ -1,9 +1,25 @@
 .update-settings-card { padding: 16px 18px; }
 .update-settings-card .setting-row { padding: 12px 0; }
 .update-settings-card > .setting-row:first-child { padding-top: 0; }
+.update-version { gap: 10px; }
+.update-version > div { flex: 1; min-width: 0; }
+.update-version-icon { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 8px; background: var(--hover); color: var(--accent); flex-shrink: 0; }
+.update-status { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; flex-shrink: 0; }
+.update-release { border-top: 1px solid var(--border); padding-top: 12px; }
+.update-release > p { font-size: 12px; margin: 0 0 10px; }
+.update-verification { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; padding: 10px 0 2px; }
+.update-verification > svg { flex-shrink: 0; margin-top: 2px; color: var(--accent); }
+.update-verification strong { font-weight: 550; }
+.update-verification p { margin: 4px 0 0; color: var(--muted); line-height: 1.65; overflow-wrap: anywhere; }
 .update-settings-card > .field { margin: 16px 0; max-width: 360px; }
 .update-settings-card > p { font-size: 12px; line-height: 1.7; margin: 12px 0; }
+.update-settings-card > p.muted { padding: 0; }
 .update-settings-card > small { font-size: 11px; display: block; }
+.update-settings-card > .update-install-note { color: var(--muted); margin: 4px 0 10px; line-height: 1.6; }
+.update-links { display: flex; flex-wrap: wrap; gap: 14px; margin: 6px 0 12px; font-size: 11px; }
+.update-links a { display: inline-flex; align-items: center; gap: 4px; }
+.update-progress { margin: 12px 0; }
+.update-progress > div { display: flex; justify-content: space-between; gap: 12px; font-size: 11px; color: var(--muted); }
 .update-settings-card .setup-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 16px 0 12px; }
 .update-settings-card .setup-actions > a { display: inline-flex; align-items: center; justify-content: center; gap: 7px; border-radius: 7px; color: var(--text); }
 .update-settings-card .setup-actions > a:hover { background: var(--hover); text-decoration: none; }
@@ -13,3 +29,6 @@
 .update-settings-card details summary { color: var(--muted); cursor: pointer; }
 .update-settings-card details p { line-height: 1.7; margin: 10px 0; }
 @media (max-width: 720px) { .update-settings-card { padding: 14px; } }
+[data-visibility=hidden] .update-status .spin { animation-play-state: paused; }
+[data-motion=reduced] .update-status .spin { animation: none; }
+@media (prefers-reduced-motion: reduce) { .update-status .spin { animation: none; } }

@@ -5,8 +5,9 @@ import { UpdateSettings } from './updateSettings';
 const current = { current_version: '5.1.1', state: 'current', automatic_install_available: false,
   signing_setup_required: true, message: 'Unsigned fixture preview.', checked_at: 1_000_000 };
 
-function bridge(status: unknown, checking: unknown = { ...current, state: 'checking' }) {
-  const call = vi.fn(async (action: string) => {
+function bridge(status: unknown, checking: unknown = { ...current, state: 'checking' }, actions: Record<string, unknown> = {}) {
+  const call = vi.fn(async (action: string, data: Record<string, unknown> = {}) => {
+    if (action in actions) return typeof actions[action] === 'function' ? actions[action](data) : actions[action];
     if (action === 'host_status') return { visible: true, visibility_seq: 0 };
     if (action === 'update_status') return typeof status === 'function' ? status() : status;
     if (action === 'update_check') return checking;
@@ -117,5 +118,149 @@ describe('update settings', () => {
     await act(async () => { resolve(current); await pending; });
     expect(screen.getByText('Checking…')).toBeTruthy();
     expect(screen.queryByText('Up to date')).toBeNull();
+  });
+
+  const release = { version: '5.1.2', prerelease: true, size: 1200,
+    html_url: 'https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.2',
+    url: 'https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.2/Forge-5.1.2-Setup.exe' };
+  const publisherReady = { ...current, state: 'ready', automatic_install_available: true, signing_setup_required: false,
+    publisher_proof_configured: true, verified: true, release: { ...release, trust_mode: 'ed25519' },
+    signature: { mode: 'ed25519', proof_sha256: 'synthetic-digest', version: '5.1.2' } };
+
+  it('distinguishes publisher-record verification from downloaded installer verification', async () => {
+    const call = bridge({ ...publisherReady, state: 'available', verified: false, signature: undefined });
+    render(<UpdateSettings notify={vi.fn()} />);
+    expect(await screen.findByText('Publisher record verified')).toBeTruthy();
+    expect(screen.getByText('Download to verify the installer against this publisher record.')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Download & verify' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'Download installer' }).getAttribute('href')).toBe(release.url);
+    expect(screen.queryByRole('button', { name: 'Install & restart' })).toBeNull();
+    expect(screen.queryByText(/Windows publisher/)).toBeNull();
+    expect(call.mock.calls.some(([action]) => action === 'update_apply')).toBe(false);
+  });
+
+  it('keeps publisher-verified seed downloads manual without claiming Windows signing or invoking install', async () => {
+    const notify = vi.fn();
+    const call = bridge(publisherReady, undefined, { update_apply: { ...publisherReady, prepared: true } });
+    render(<UpdateSettings notify={notify} />);
+    expect(await screen.findByText('Publisher verified installer')).toBeTruthy();
+    expect(screen.getByText('The downloaded installer matches Forge’s authenticated release record.')).toBeTruthy();
+    expect(screen.queryByText(/Windows/)).toBeNull();
+    expect(screen.queryByText('synthetic-digest')).toBeNull();
+    expect(call.mock.calls.some(([action]) => action === 'update_apply')).toBe(false);
+    expect(screen.getByText('Verified download')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Install & restart' })).toBeNull();
+    expect(screen.getByText('In-app installation is unavailable in this version. Save your work before installing manually.')).toBeTruthy();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('keeps valid legacy Windows certificate updates compatible', async () => {
+    bridge({ ...publisherReady, publisher_proof_configured: false, release: { ...release, trust_mode: 'authenticode' },
+      signature: { status: 'Valid', publisher: 'Synthetic publisher', version: '5.1.2', timestamped: true } });
+    render(<UpdateSettings notify={vi.fn()} />);
+    expect(await screen.findByText('Windows publisher verified')).toBeTruthy();
+    expect(screen.getByText(/valid timestamped certificate/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Install & restart' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Download installer' })).toBeTruthy();
+    expect(screen.queryByText(/Publisher record verified/)).toBeNull();
+  });
+
+  it('keeps an unsigned legacy cache manual even when its cached state says ready', async () => {
+    bridge({ ...current, state: 'ready', verified: true, release });
+    render(<UpdateSettings notify={vi.fn()} />);
+    expect(await screen.findByText('Manual install')).toBeTruthy();
+    expect(screen.getByText('Manual installation')).toBeTruthy();
+    expect(screen.queryByText('Ready to install')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Install & restart' })).toBeNull();
+  });
+
+  it('supports verified seed downloads independently of installation capability', async () => {
+    const call = bridge({ ...publisherReady, state: 'available', verified: false, automatic_install_available: false, verified_download_available: true },
+      undefined, { update_download: { ...publisherReady, state: 'downloading', verified: false, automatic_install_available: false, verified_download_available: true } });
+    render(<UpdateSettings notify={vi.fn()} />);
+    await screen.findByText('Publisher record verified');
+    fireEvent.click(screen.getByRole('button', { name: 'Download & verify' }));
+    await waitFor(() => expect(call).toHaveBeenCalledWith('update_download', {}));
+    expect(screen.queryByRole('button', { name: 'Install & restart' })).toBeNull();
+    expect(screen.getByRole('link', { name: 'Download installer' })).toBeTruthy();
+  });
+
+  it('does not offer restart or rollback even if an older cache advertises installation', async () => {
+    const call = bridge({ ...publisherReady, operation_id: 'synthetic-old-operation' });
+    render(<UpdateSettings notify={vi.fn()} />);
+    await screen.findByText('Publisher verified installer');
+    expect(screen.queryByRole('button', { name: 'Install & restart' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Roll back previous installation' })).toBeNull();
+    expect(screen.getByText('In-app restore is unavailable in this version. Inspect retained backups before any manual repair.')).toBeTruthy();
+    expect(call.mock.calls.some(([action]) => ['update_apply', 'update_rollback'].includes(action))).toBe(false);
+  });
+
+  it('does not label a mismatched staged publisher proof as a Windows certificate', async () => {
+    bridge({ ...publisherReady, release: { ...release, trust_mode: 'authenticode' } });
+    render(<UpdateSettings notify={vi.fn()} />);
+    expect(await screen.findByText('Manual installation')).toBeTruthy();
+    expect(screen.getByText('This download needs a fresh publisher verification. Check again or use the public installer.')).toBeTruthy();
+    expect(screen.queryByText('Windows publisher verified')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Download & verify' })).toBeNull();
+  });
+
+  it.each([{ state: 'error', last_check_failed: false }, { state: 'available', last_check_failed: true }])
+    ('requires a fresh check for stale cached proof status %j and restores trust after success', async failed => {
+      const fresh = { ...publisherReady, state: 'available', verified: false, signature: undefined, last_check_failed: false };
+      const call = bridge({ ...fresh, ...failed, operation_error: 'The cached publisher proof is unavailable.' }, fresh);
+      render(<UpdateSettings notify={vi.fn()} />);
+      expect(await screen.findByText('Manual installation')).toBeTruthy();
+      expect(screen.getByText('Publisher verification needs another check. Retry the update check or use the public installer.')).toBeTruthy();
+      expect(screen.queryByText('Publisher record verified')).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Download & verify' })).toBeNull();
+      expect(screen.getByRole('link', { name: 'Download installer' }).getAttribute('href')).toBe(release.url);
+      fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
+      expect(await screen.findByText('Publisher record verified')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Download & verify' })).toBeTruthy();
+      expect(call).toHaveBeenCalledWith('update_check', { channel: 'preview', background: true });
+    });
+
+  it.each(['The publisher record is missing.', 'The publisher record expired.', 'The publisher record is invalid.', 'The publisher key is no longer trusted.'])
+    ('explains manual-only verification once and disarms stale installation for %s', async reason => {
+      bridge({ ...publisherReady, release: { ...release, trust_mode: 'manual', verification_error: reason } });
+      render(<UpdateSettings notify={vi.fn()} />);
+      expect(await screen.findByText('Manual installation')).toBeTruthy();
+      expect(screen.getByText('Manual install')).toBeTruthy();
+      expect(screen.queryByText('Ready to install')).toBeNull();
+      expect(screen.getAllByText(reason)).toHaveLength(1);
+      expect(screen.getByRole('link', { name: 'Download installer' }).getAttribute('href')).toBe(release.url);
+      expect(screen.queryByRole('button', { name: 'Install & restart' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Download & verify' })).toBeNull();
+      expect(screen.queryByText(/publisher verified/i)).toBeNull();
+    });
+
+  it('shows bounded progress and refreshes cancellation before allowing another update action', async () => {
+    let status = { ...publisherReady, state: 'downloading', verified: false, received_bytes: 600 };
+    const call = bridge(() => status, undefined, { update_cancel: () => { status = { ...status, state: 'cancelled' }; return { ok: true }; } });
+    render(<UpdateSettings notify={vi.fn()} />);
+    const progress = await screen.findByRole('progressbar', { name: 'Update download' }) as HTMLProgressElement;
+    expect(progress.value).toBe(600); expect(progress.max).toBe(1200); expect(screen.getByText('50%')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByText('Cancelled')).toBeTruthy();
+    expect(call.mock.calls.filter(([action]) => action === 'update_cancel')).toHaveLength(1);
+    expect((screen.getByRole('button', { name: 'Check for updates' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('retries an honest failure by checking the selected channel', async () => {
+    const call = bridge({ ...current, state: 'error', operation_error: 'Synthetic connection unavailable.' });
+    render(<UpdateSettings notify={vi.fn()} settings={{ update_channel: 'stable' }} />);
+    expect(await screen.findByRole('alert')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(call).toHaveBeenCalledWith('update_check', { channel: 'stable', background: true }));
+  });
+
+  it('leaves a hidden running status static while keeping its honest text', async () => {
+    bridge({ ...publisherReady, state: 'checking', verified: false });
+    const { container } = render(<UpdateSettings notify={vi.fn()} />);
+    await screen.findByText('Checking…');
+    expect(container.querySelector('.update-status .spin')).toBeTruthy();
+    fireEvent(window, new CustomEvent('forge:visibility', { detail: { visible: false, seq: 1 } }));
+    expect(container.querySelector('.update-status .spin')).toBeNull();
+    expect(screen.getByText('Checking…')).toBeTruthy();
   });
 });

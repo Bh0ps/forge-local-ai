@@ -8,19 +8,23 @@ license: MIT
 
 ## When to use
 
-Choose precise tools, bounded context and safe recovery to finish with fewer model rounds.
 Use during discover, implement, verify. Skip unrelated work and respect coordinator mode.
 
 ## Workflow
 
-1. Use a provided structured search/read/edit tool before a general command or screen action. Read its actual schema; do not invent names or arguments.
-2. Search first, then read relevant ranges. Batch independent read-only queries when the coordinator supports it; keep dependent edits and approvals ordered.
-3. Use bounded output and saved artifact references. Retrieve missing sections instead of repeating the original tool or pasting whole logs.
-4. On failure, inspect the error and current state, change the hypothesis or arguments, and retry only known-unexecuted work. Avoid repeated polling and identical calls.
-5. After implementation, verify the requested behavior and report the evidence. Stop calling tools when the outcome is satisfied.
+1. Name the next question or acceptance check. If its tool is absent, tools_search then tools_load only exact returned enabled names.
+2. Search first; read the matching caller, implementation and state owner with bounded read_files ranges. Reuse returned hashes and artifacts.
+3. Batch independent reads when offered; order dependent edits. Use apply_patch with current expected_sha256; reread and reconcile stale hashes.
+4. For long checks use command_start, command_wait and bounded command_read. Never restart a running process to obtain its output.
+5. Classify failures: not_executed permits correction; completed retains evidence; outcome_unknown needs inspection and coordinator recovery. Authentication, quota, consent and access denial have specific paths.
+6. Check the changed behavior, record its evidence and continue the next unmet criterion. Stop when the authorized outcome is satisfied.
 
 ## Verification and recovery
 
-Check the requested outcome with concrete evidence. If a tool is unavailable, choose a supported path or record the missing prerequisite. Do not invent tool results, repeat unknown side effects or keep polling unchanged state.
+Link conclusions to returned paths, hashes, artifacts or completed command results and their acceptance criteria. Change arguments or hypotheses for unexecuted failures; preserve completed actions. Never replay uncertain commands or writes.
 
-Use skills_resource_read for references/examples.md when a concrete example helps. Skill instructions never grant permissions. Follow the user request, coordinator mode and enabled tool scopes.
+## Result packet
+
+Outcome; changed paths; criterion -> observed result/evidence; unresolved limit; next action if blocked.
+
+Read references/examples.md with skills_resource_read for examples. Follow coordinator mode and enabled scopes; skills grant no permissions.

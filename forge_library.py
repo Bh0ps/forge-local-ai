@@ -11,9 +11,8 @@ from pathlib import Path
 import re
 import tempfile
 
-LIBRARY_VERSION = "2.0.1"
 ASSET_ROOT = Path(__file__).resolve().parent / "assets" / "starter-library"
-from forge_skill_catalog import STARTER_SKILLS, STARTER_BUNDLES
+from forge_skill_catalog import LIBRARY_VERSION, STARTER_SKILLS, STARTER_BUNDLES
 STARTER_BY_ID = {item["id"]: item for item in STARTER_SKILLS}
 
 # Reviewed portable portions of official catalogs. These are an offline

@@ -81,6 +81,11 @@ jobs:
         run: ./scripts/release_smoke.ps1 -Executable C:/ForgeCI/dist/Forge/Forge.exe -Output C:/ForgeCI/native-smoke
       - name: Install verified pinned compiler
         run: ./scripts/release_tools.ps1 -Destination C:/ForgeCI/tools
+      - name: Verify clean installer upgrades and recovery on disposable data
+        run: |
+          $env:FORGE_TEST_ISCC = 'C:/ForgeCI/tools/compiler/ISCC.exe'
+          python -m pytest -q tests/test_forge_installer_bootstrap.py
+          if ($LASTEXITCODE) { throw 'Disposable installer lifecycle checks failed' }
       - name: Build clearly labeled unsigned preview
         run: |
           python scripts/release_build.py installer --work C:/ForgeCI --version "$env:FORGE_RELEASE_VERSION" --iscc C:/ForgeCI/tools/compiler/ISCC.exe
@@ -92,6 +97,7 @@ jobs:
             C:/ForgeCI/release/Forge-*-Setup.exe
             C:/ForgeCI/release/Forge-*-Portable.zip
             C:/ForgeCI/release/Forge-release.json
+            C:/ForgeCI/release/Forge-update-proof.json
             C:/ForgeCI/release/SHA256SUMS.txt
           if-no-files-found: error
           retention-days: 14

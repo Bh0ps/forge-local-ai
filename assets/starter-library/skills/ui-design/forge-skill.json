@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "2.0.0",
+  "version": "2.1.0",
   "bundle": "design",
   "phases": [
     "plan",
@@ -24,8 +24,10 @@
   ],
   "recommended_tools": [
     "read_file",
+    "preview_open",
     "preview_inspect",
-    "preview_screenshot"
+    "preview_screenshot",
+    "tools_search"
   ],
   "exclude_triggers": [],
   "resources": [

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "2.0.0",
+  "version": "2.1.0",
   "bundle": "review",
   "phases": [
     "verify"
@@ -17,9 +17,10 @@
     "check this code"
   ],
   "recommended_tools": [
-    "read_file",
     "search_files",
-    "run_command"
+    "read_files",
+    "command_start",
+    "artifact_read"
   ],
   "exclude_triggers": [],
   "resources": [

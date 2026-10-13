@@ -76,6 +76,7 @@ Desktop.ini
 /docs/**/*.md
 !/docs/FORGE_51.md
 !/docs/FORGE_511.md
+!/docs/FORGE_512.md
 /CHANGELOG.md
 /QUICKSTART.md
 /assets/evaluations/README.md

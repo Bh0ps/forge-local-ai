@@ -21,6 +21,9 @@ import httpx
 import psutil
 
 from forge_store import TERMINAL, atomic_text, encode
+from forge_update_proof import (BUILD_NAME, RELEASE_NAME, MAX_RECORD_BYTES, normalize_keys,
+                                read_record, verify_build, verify_release, verify_artifact,
+                                bind_release_build, validated_build_manifest, tree_files)
 
 REPOSITORY = 'Bh0ps/forge-local-ai'
 MAX_PACKAGE_BYTES = 1024 * 1024 * 1024
@@ -32,6 +35,10 @@ try:
     from forge_release_policy import TRUSTED_PUBLISHERS
 except ImportError:
     TRUSTED_PUBLISHERS = ()
+try:
+    from forge_update_keys import TRUSTED_UPDATE_KEYS
+except ImportError:
+    TRUSTED_UPDATE_KEYS = {}
 
 
 @contextmanager
@@ -106,7 +113,7 @@ def safe_relative(value):
         raise ValueError('Package path escapes its root.')
     if any(part.lower().rstrip(' .') != part.lower() or part.lower() in ('plugins', '.forge', '.sidekick') for part in parts):
         raise ValueError('Package contains an invalid path or executable plugin folder.')
-    if any(re.fullmatch(r'(?i)(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?', part) for part in parts):
+    if any(re.fullmatch(r'(?i)(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\..*)?', part) for part in parts):
         raise ValueError('Reserved Windows package path.')
     return Path(*parts)
 
@@ -176,7 +183,7 @@ def database_guard(path, baseline=None):
                 continue
             select = ','.join(quoted(column) for column in columns)
             sql = 'SELECT ' + select + ' FROM ' + quoted(name)
-            if name == 'entities': sql += " WHERE kind!='updates'"
+            if name == 'entities': sql += " WHERE kind NOT IN ('updates','update_trust')"
             sql += ' ORDER BY ' + select
             digest = sha256(); count = 0
             for row in db.execute(sql):
@@ -292,17 +299,24 @@ async def _get_bytes(client, url, limit, cancel=None, progress=None, consume=Non
 
 
 class UpdateManager:
-    def __init__(self, service, current_version='5.1.1', install_dir=None, trust_policy=None,
-                 client_factory=None, verifier=authenticode):
+    def __init__(self, service, current_version='5.1.2', install_dir=None, trust_policy=None,
+                 client_factory=None, verifier=authenticode, *, proof_policy=None, _allow_installation=False):
+        # The seed release authenticates downloads, but cannot yet acknowledge
+        # every native workspace draft/attachment before shutting its host down.
+        # Only isolated foundation fixtures opt in to exercising that protocol.
+        if type(_allow_installation) is not bool:
+            raise ValueError('Invalid internal installation capability.')
+        self._installation_enabled = _allow_installation
         self.service, self.store = service, service.store
         self.home = self.store.home
         self.root = self.home / 'runtimes/updates'
         self.root.mkdir(parents=True, exist_ok=True)
         self.current_version = current_version
         version(current_version)
-        self.install_dir = Path(install_dir).resolve() if install_dir else (
-            Path(sys.executable).parent.resolve() if getattr(sys, 'frozen', False) else None)
+        self.install_dir = plain_path(install_dir) if install_dir else (
+            plain_path(Path(sys.executable).parent) if getattr(sys, 'frozen', False) else None)
         self.publishers = tuple(TRUSTED_PUBLISHERS if trust_policy is None else trust_policy)
+        self.proof_keys = normalize_keys(TRUSTED_UPDATE_KEYS if proof_policy is None else proof_policy)
         self.client_factory = client_factory or _client
         self.verifier = verifier
         self.lock, self.cancel_event = threading.RLock(), threading.Event()
@@ -332,13 +346,22 @@ class UpdateManager:
             except (ValueError, OSError, KeyError):
                 self.inspection_required = True
                 self._save(state='error', error='Update journal could not be verified. Inspect the retained backups.')
-        if self.state.get('state') in ('available', 'ready'):
+        if self.state.get('release') and self.state.get('state') in ('available', 'ready', 'installed', 'rolled_back'):
             try:
                 if version((self.state.get('release') or {}).get('version')) <= version(self.current_version):
-                    self._save(state='current', release=None, downloaded=None, signature=None,
+                    self._save(state='current' if self.state['state'] in ('available', 'ready') else self.state['state'],
+                               release=None, release_proof=None, downloaded=None, signature=None,
                                verified=False, received_bytes=0)
             except ValueError:
                 self._save(state='error', verified=False, error='Stored release metadata is invalid. Check again.')
+        if self.state.get('state') == 'ready' and (self.state.get('release') or {}).get('trust_mode') == 'ed25519':
+            try: self._proof(self.state['release'])
+            except Exception:
+                release = {**self.state['release'], 'trust_mode': 'manual',
+                    'verification_error': 'The cached publisher proof is no longer valid. Check for updates again.'}
+                self._save(state='error', release=release, release_proof=None,
+                           downloaded=None, signature=None, verified=False, received_bytes=0,
+                           error='The cached publisher proof is no longer valid. Check for updates again.')
 
     def _save(self, **data):
         with self.lock:
@@ -347,14 +370,63 @@ class UpdateManager:
 
     def status(self):
         with self.lock:
-            return {**self.state, 'current_version': self.current_version, 'repository': REPOSITORY,
+            public = {key: value for key, value in self.state.items() if key != 'release_proof'}
+            mode = (self.state.get('release') or {}).get('trust_mode')
+            supported = (bool(self.proof_keys) if mode == 'ed25519' else
+                         False if mode == 'manual' else bool(self.publishers))
+            configured = bool(self.publishers or self.proof_keys)
+            return {**public, 'current_version': self.current_version, 'repository': REPOSITORY,
                 'channel': self.state.get('channel') if self.state.get('channel') in UPDATE_CHANNELS else 'stable',
                 'inspection_required': self.inspection_required,
-                'automatic_install_available': bool(self.publishers and self.install_dir and not self.inspection_required),
-                'signing_setup_required': not bool(self.publishers),
+                'verified_download_available': bool(supported and not self.inspection_required),
+                'automatic_install_available': bool(self._installation_enabled and supported and self.install_dir and not self.inspection_required),
+                'install_block_reason': None if self._installation_enabled else
+                    'Workspace readiness is not supported in this version. Use the manual installer.',
+                'publisher_proof_configured': bool(self.proof_keys),
+                'signing_setup_required': not configured,
                 'message': 'The previous installer outcome is unknown. Inspect the retained backup and repair Forge manually before updating.' if self.inspection_required else
+                    'Verified downloads are supported. Use the manual installer; in-app installation is unavailable in this version.' if configured and not self._installation_enabled else
+                    'Updates require an authenticated Forge publisher proof. Installation restarts only when you choose.' if self.proof_keys else
                     'Updates require a valid timestamped Windows signature from the approved publisher.' if self.publishers else
                     'Signing setup is required. Unsigned releases can be installed manually; automatic installation stays disabled.'}
+
+    def _trusted_release(self, channel):
+        with self.store._connection() as db:
+            row = db.execute("SELECT data FROM entities WHERE kind='update_trust' AND id=?", (channel,)).fetchone()
+        if row is None: return None
+        try:
+            value = json.loads(row[0])
+            if not isinstance(value, dict): raise ValueError('Invalid publisher trust record.')
+            version(value.get('version'))
+            if type(value.get('revision')) is not int or value['revision'] < 1 or not re.fullmatch('[0-9a-f]{64}', str(value.get('proof_sha256', ''))):
+                raise ValueError('Stored publisher trust record is invalid.')
+            return value
+        except (ValueError, TypeError):
+            raise ValueError('Stored publisher trust record is invalid. Inspect update recovery before continuing.') from None
+
+    def _proof(self, release, descriptor=None, *, now=None):
+        descriptor = descriptor or self.state.get('release_proof') or {}
+        digest = descriptor.get('sha256')
+        if not self.proof_keys or not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
+            raise ValueError('Check for a release with an authenticated publisher proof first.')
+        raw = read_record(plain_path(self.root / 'proofs' / (digest + '.json')))
+        if sha256(raw).hexdigest() != digest or len(raw) != descriptor.get('size'):
+            raise ValueError('Cached publisher proof was modified.')
+        selected = update_channel(descriptor.get('channel'))
+        proof = verify_release(raw, self.proof_keys, expected_version=release['version'],
+            expected_source=release.get('source_commit'), expected_channel='preview' if release.get('prerelease') else 'stable',
+            expected_tag=release['tag'], now=int(time.time()) if now is None else now,
+            current_version=self.current_version, prior=self._trusted_release(selected))
+        installer = next(value for value in proof['artifacts'] if value['name'] == release['name'])
+        if installer['sha256'] != release['sha256'] or installer['size'] != release['size']:
+            raise ValueError('Publisher proof differs from the offered installer.')
+        return raw, proof
+
+    def _installed_proof(self, root, number, source=None):
+        raw = read_record(plain_path(Path(root) / BUILD_NAME))
+        build = verify_build(raw, self.proof_keys, root=root, expected_version=number,
+                             expected_source=source, installed=True)
+        return raw, build
 
     def _begin_check(self, channel):
         with self.lock:
@@ -434,15 +506,38 @@ class UpdateManager:
                     raise ValueError('Invalid release publication state.')
                 if metadata.get('html_url') != 'https://github.com/' + REPOSITORY + '/releases/tag/' + metadata['tag_name']:
                     raise ValueError('Release metadata refers to a different repository.')
+            trusted = self._trusted_release(channel) if self.proof_keys else None
+            if trusted and version(trusted['version']) > version(self.current_version) and (
+                    metadata is None or version(metadata['tag_name']) < version(trusted['version'])):
+                raise ValueError('The release feed is older than the last authenticated update. Check again later.')
             if metadata is None or version(metadata.get('tag_name')) <= version(self.current_version):
                 return self._finish_check(state='current', release=None, downloaded=None, signature=None,
-                                          verified=False, received_bytes=0)
+                                          verified=False, received_bytes=0, release_proof=None)
             release = release_metadata(metadata)
+            descriptor = None
+            release['trust_mode'] = 'authenticode' if self.publishers else 'manual'
+            if self.proof_keys:
+                try:
+                    descriptor = self._check_proof(metadata, release, channel)
+                    if descriptor: release['trust_mode'] = 'ed25519'
+                except Exception:
+                    if self.cancel_event.is_set() or self.shutting_down: raise
+                    release['trust_mode'] = 'manual'
+                    release['verification_error'] = 'Publisher verification failed. Install this release manually or check again.'
+            elif not self.publishers:
+                release['verification_error'] = 'A trusted publisher is not embedded in this installation.'
             # A periodic check of the same release preserves its verified bytes.
             identity = ('version', 'tag', 'name', 'url', 'sha256', 'size')
             same = all((previous.get('release') or {}).get(key) == release[key] for key in identity)
-            staged = previous.get('state') == 'ready' and previous.get('verified') is True and same
+            old_mode = (previous.get('release') or {}).get('trust_mode', 'authenticode')
+            signature = previous.get('signature')
+            signature = signature if isinstance(signature, dict) else {}
+            same_verification = old_mode == release['trust_mode'] and signature.get('version') == release['version'] and (
+                signature.get('mode') == 'ed25519' if release['trust_mode'] == 'ed25519' else
+                signature.get('mode') is None and signature.get('status') == 'Valid')
+            staged = previous.get('state') == 'ready' and previous.get('verified') is True and same and same_verification and release['trust_mode'] != 'manual'
             return self._finish_check(state='ready' if staged else 'available', release=release,
+                release_proof=descriptor,
                 downloaded=previous.get('downloaded') if staged else None,
                 signature=previous.get('signature') if staged else None,
                 verified=staged, received_bytes=release['size'] if staged else 0)
@@ -452,6 +547,39 @@ class UpdateManager:
             self._save(state='cancelled' if cancelled else 'error',
                        error='Update check cancelled.' if cancelled else str(exc)[:400], verified=False,
                        last_check_failed=not cancelled, checked_at=int(time.time())); raise
+
+    def _check_proof(self, metadata, release, channel):
+        candidates = [asset for asset in metadata.get('assets', []) if isinstance(asset, dict) and asset.get('name') == RELEASE_NAME]
+        if not candidates: return None
+        if len(candidates) != 1: raise ValueError('Release has ambiguous publisher proof assets.')
+        asset = candidates[0]
+        url = 'https://github.com/' + REPOSITORY + '/releases/download/' + release['tag'] + '/' + RELEASE_NAME
+        digest, size = asset.get('digest'), asset.get('size')
+        if asset.get('browser_download_url') != url or not isinstance(digest, str) or not re.fullmatch('sha256:[0-9a-f]{64}', digest) or type(size) is not int or not 0 < size <= MAX_RECORD_BYTES:
+            raise ValueError('Publisher proof URL, size or digest is invalid.')
+        chunks = []
+        async def fetch():
+            async with self.client_factory() as client:
+                await _get_bytes(client, url, size, self.cancel_event, consume=chunks.append)
+        asyncio.run(fetch())
+        raw = b''.join(chunks)
+        if len(raw) != size or sha256(raw).hexdigest() != digest[7:]:
+            raise ValueError('Publisher proof failed integrity verification.')
+        proof = verify_release(raw, self.proof_keys, expected_version=release['version'],
+            expected_source=metadata.get('target_commitish') if isinstance(metadata.get('target_commitish'), str) and re.fullmatch('[0-9a-f]{40}', metadata['target_commitish']) else None,
+            expected_channel='preview' if release['prerelease'] else 'stable', expected_tag=release['tag'],
+            now=int(time.time()), current_version=self.current_version, prior=self._trusted_release(channel))
+        installer = next(value for value in proof['artifacts'] if value['name'] == release['name'])
+        if installer['sha256'] != release['sha256'] or installer['size'] != release['size']:
+            raise ValueError('Publisher proof differs from GitHub installer metadata.')
+        with self.lock:
+            if self.cancel_event.is_set() or self.shutting_down: raise ValueError('Update check cancelled.')
+            target = plain_path(self.root / 'proofs' / (digest[7:] + '.json'))
+            atomic_text(target, raw.decode('utf-8'))
+            self.store.save_entity('update_trust', {'id': channel, 'version': proof['version'],
+                'revision': proof['revision'], 'proof_sha256': digest[7:]})
+        release['source_commit'] = proof['source_commit']
+        return {'sha256': digest[7:], 'size': size, 'channel': channel}
 
     def _finish_check(self, **data):
         with self.lock:
@@ -463,9 +591,12 @@ class UpdateManager:
             with self.admission_lock:
                 if self.shutting_down: raise ValueError('The updater is shutting down.')
             if self.inspection_required: raise ValueError('Inspect and repair the previous update before downloading another automatic installer.')
-            if not self.publishers: raise ValueError('Automatic download is disabled until a verified publisher is embedded. Install unsigned previews manually.')
+            if not self.publishers and not self.proof_keys: raise ValueError('Automatic download is disabled until a verified publisher is embedded. Install unsigned previews manually.')
             if self.applying or self.state.get('state') == 'checking' or self.thread and self.thread.is_alive(): raise ValueError('An update operation is already active.')
             release = self._release()
+            if release.get('trust_mode') == 'manual':
+                raise ValueError('This release has no verified publisher. Install it manually or check again.')
+            if release.get('trust_mode') == 'ed25519': self._proof(release)
             self.cancel_event.clear()
             self._save(state='downloading', received_bytes=0, error=None, verified=False)
             with self.admission_lock:
@@ -494,7 +625,12 @@ class UpdateManager:
             if self.cancel_event.is_set(): raise ValueError('Update download cancelled.')
             if partial.stat().st_size != release['size'] or file_hash(partial) != release['sha256']:
                 raise ValueError('Installer failed SHA256 or size verification. Nothing was installed.')
-            signature = require_trust(partial, release['version'], self.publishers, self.verifier)
+            if release.get('trust_mode') == 'ed25519':
+                raw, proof = self._proof(release)
+                verify_artifact(partial, proof, release['name'])
+                signature = {'mode': 'ed25519', 'proof_sha256': sha256(raw).hexdigest(), 'version': release['version']}
+            else:
+                signature = require_trust(partial, release['version'], self.publishers, self.verifier)
             with self.lock:
                 if self.cancel_event.is_set(): raise ValueError('Update download cancelled.')
                 os.replace(partial, complete)
@@ -549,12 +685,18 @@ class UpdateManager:
         if self.state.get('state') in ('checking', 'downloading') or self.thread and self.thread.is_alive():
             raise ValueError('An update operation is already active.')
         release = self._release()
+        if release.get('trust_mode') == 'manual':
+            raise ValueError('This release has no verified publisher. Install it manually or check again.')
         path = plain_path(self.state.get('downloaded') or '')
         if not self.state.get('verified') or not path.is_relative_to(self.root.resolve()) or path.name != 'installer.exe' or not path.is_file():
             raise ValueError('Download and verify the installer first.')
         if version(release.get('version')) <= version(self.current_version): raise ValueError('A stale release cannot replace this version.')
         if file_hash(path) != release['sha256'] or path.stat().st_size != release['size']: raise ValueError('Staged installer was modified.')
-        require_trust(path, release['version'], self.publishers, self.verifier)
+        if release.get('trust_mode') == 'ed25519':
+            _, proof = self._proof(release)
+            verify_artifact(path, proof, release['name'])
+        else:
+            require_trust(path, release['version'], self.publishers, self.verifier)
         return release, path
 
     def _release(self):
@@ -568,15 +710,24 @@ class UpdateManager:
         if release.get('name') != name or release.get('url') != expected or not re.fullmatch(r'[0-9a-f]{64}', str(release.get('sha256', ''))):
             raise ValueError('Stored release metadata is invalid.')
         if type(release.get('size')) is not int or not 0 < release['size'] <= MAX_PACKAGE_BYTES: raise ValueError('Invalid installer size.')
+        if release.get('trust_mode') not in (None, 'authenticode', 'ed25519', 'manual'):
+            raise ValueError('Stored release trust mode is invalid.')
         return release
 
     def apply(self):
+        self._require_installation()
         with self._quiesce():
             if self.applying: raise ValueError('An update is already prepared.')
             self._idle(); release, package = self._package()
             if not self.install_dir or not (self.install_dir / 'Forge.exe').is_file(): raise ValueError('Install Forge on Windows before using automatic updates.')
-            for name in ('Forge.exe', 'ForgeBrowserHost.exe'):
-                require_trust(self.install_dir / name, self.current_version, self.publishers, self.verifier)
+            mode = release.get('trust_mode', 'authenticode')
+            previous_source = None
+            if mode == 'ed25519':
+                _, build = self._installed_proof(self.install_dir, self.current_version)
+                previous_source = build['source_commit']
+            else:
+                for name in ('Forge.exe', 'ForgeBrowserHost.exe'):
+                    require_trust(self.install_dir / name, self.current_version, self.publishers, self.verifier)
             # Quiesce guard is shared with the service dispatcher/run admission.
             self.applying = True
             try:
@@ -601,6 +752,11 @@ class UpdateManager:
                     'rollback_guard': database_guard(backup / 'forge.sqlite3'),
                     'state': 'prepared', 'parent_pid': os.getpid(),
                     'parent_created': psutil.Process().create_time()}
+                if mode == 'ed25519':
+                    data.update(trust_mode=mode, previous_source_commit=previous_source,
+                        source_commit=release['source_commit'], release=dict(release),
+                        release_proof=dict(self.state['release_proof']))
+                    self._installed_proof(backup / 'installation', self.current_version, previous_source)
                 intent = self.root / 'operations' / (identifier + '.json')
                 atomic_text(intent, encode(data))
                 self._save(state='prepared', operation_id=identifier)
@@ -612,6 +768,7 @@ class UpdateManager:
                 raise
 
     def rollback(self):
+        self._require_installation()
         # Rollback is an explicit user decision, and uses the same helper/quiesce
         # path. A committed rollback never executes a downloaded older installer.
         with self._quiesce():
@@ -623,6 +780,9 @@ class UpdateManager:
             data = load_operation(self.home, identifier)
             if data['state'] != 'installed': raise ValueError('No completed update is available to roll back.')
             verify_tree(Path(data['backup']) / 'installation', data['previous_files'])
+            if data.get('trust_mode') == 'ed25519':
+                self._installed_proof(self.install_dir, self.current_version, data['source_commit'])
+                self._installed_proof(Path(data['backup']) / 'installation', data['previous_version'], data['previous_source_commit'])
             try: retain_rollback_state(self.home, data)
             except ValueError:
                 if data.get('state') == 'rollback_blocked':
@@ -636,6 +796,10 @@ class UpdateManager:
             return {'prepared': True, 'operation_id': identifier, 'restart_required': True,
                 'command': [str(Path(data['backup']) / 'installation/Forge.exe'), '--forge-update', identifier,
                     '--forge-home', str(self.home), '--forge-parent-pid', str(os.getpid())]}
+
+    def _require_installation(self):
+        if not self._installation_enabled:
+            raise ValueError('In-app installation and rollback are unavailable in this version. Use the manual installer.')
 
     def diagnostics_export(self):
         # Allowlist rather than attempting to redact arbitrary logs or prompts.
@@ -652,7 +816,8 @@ class UpdateManager:
                 'performance': settings.get('performance') if settings.get('performance') in ('balanced', 'fast', 'quality', 'custom') else None},
             'counts': {'projects': len(self.store.list_projects()), 'chats': len(self.store.list_chats()),
                        'runs': len(self.store.runs()), 'providers': len(self.store.entities('providers'))},
-            'updates': {'state': self.state.get('state') if self.state.get('state') in ('idle', 'checking', 'downloading', 'interrupted', 'error', 'available', 'current', 'ready', 'cancelled', 'prepared', 'applying', 'installed', 'rolled_back') else 'unknown', 'publisher_configured': bool(self.publishers)},
+            'updates': {'state': self.state.get('state') if self.state.get('state') in ('idle', 'checking', 'downloading', 'interrupted', 'error', 'available', 'current', 'ready', 'cancelled', 'prepared', 'applying', 'installed', 'rolled_back') else 'unknown',
+                'publisher_configured': bool(self.publishers or self.proof_keys), 'publisher_proof_configured': bool(self.proof_keys)},
             'privacy': 'No chats, prompts, attachments, identifiers, paths, hostnames, URLs, credentials or raw logs are included.'}
         artifact = self.store.artifact(data)
         return {'artifact': artifact, 'diagnostics': data}
@@ -714,8 +879,64 @@ def load_operation(home, identifier):
     return data
 
 
+def operation_release_proof(home, data, pins):
+    descriptor, release = data.get('release_proof') or {}, data.get('release') or {}
+    digest = descriptor.get('sha256')
+    if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
+        raise ValueError('Prepared publisher proof identity is invalid.')
+    raw = read_record(plain_path(home / 'runtimes/updates/proofs' / (digest + '.json')))
+    if sha256(raw).hexdigest() != digest or len(raw) != descriptor.get('size'):
+        raise ValueError('Prepared publisher proof was modified.')
+    proof = verify_release(raw, pins, expected_version=data['version'], expected_source=data['source_commit'],
+        expected_channel='preview' if release.get('prerelease') else 'stable', expected_tag=release.get('tag'),
+        now=int(time.time()), current_version=data['previous_version'])
+    name = 'Forge-' + data['version'] + '-Setup.exe'
+    installer = next(value for value in proof['artifacts'] if value['name'] == name)
+    if installer['sha256'] != data['sha256'] or installer['size'] != data['size']:
+        raise ValueError('Prepared installer differs from its publisher proof.')
+    return proof
+
+
+def retain_update_trust(restored, current):
+    """Repair/rollback never forgets a newer authenticated release observation."""
+    rows = current.execute("SELECT kind,id,data FROM entities WHERE kind='update_trust'").fetchall()
+    for row in rows:
+        restored.execute('INSERT INTO entities VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data', row)
+
+
+def retire_obsolete_files(root, old_build, new_build):
+    """Remove only unchanged obsolete publisher files, after full preflight.
+
+    Both manifests were authenticated/bound by the helper before this call.
+    Unknown files, changed bytes and missing new files abort before any deletion.
+    Generated uninstaller files and directories are never retirement candidates.
+    """
+    root = plain_path(root)
+    old = {entry['path']: entry for entry in old_build['files']}
+    new = {entry['path']: entry for entry in new_build['files']}
+    expected = {**old, **new}
+    actual = {entry['path']: entry for entry in tree_files(root,
+        wanted={name.casefold(): entry for name, entry in expected.items()}, installed=True)}
+    if any(actual.get(name) != entry for name, entry in new.items()) or any(
+            expected.get(name) != entry for name, entry in actual.items()):
+        raise ValueError('Installed files differ from authenticated update inventories. Nothing was retired.')
+    obsolete = [entry for name, entry in old.items() if name not in new and name in actual]
+    targets = []
+    for entry in obsolete:
+        path = plain_path(root / safe_relative(entry['path']))
+        if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size != entry['size'] or file_hash(path) != entry['sha256']:
+            raise ValueError('An obsolete file changed. Nothing was retired.')
+        targets.append((path, entry))
+    for path, entry in targets:
+        # Recheck immediately before unlink; never follow a replacement junction.
+        checked = plain_path(path)
+        if checked != path or not path.is_file() or path.stat().st_size != entry['size'] or file_hash(path) != entry['sha256']:
+            raise ValueError('An obsolete file changed during retirement. Inspect the retained backup.')
+        path.unlink()
+
+
 def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=None, verifier=authenticode,
-                runner=None, wait_seconds=60):
+                runner=None, wait_seconds=60, proof_policy=None):
     """Native early-entry helper. Does not create a coordinator or migrate state."""
     home = plain_path(home); data = load_operation(home, operation_id)
     if install_dir is not None:
@@ -742,8 +963,15 @@ def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=
     previous = backup / 'installation'
     verify_tree(previous, data['previous_files'])
     policy = TRUSTED_PUBLISHERS if publishers is None else publishers
-    for name in ('Forge.exe', 'ForgeBrowserHost.exe'):
-        require_trust(previous / name, data['previous_version'], policy, verifier)
+    mode = data.get('trust_mode', 'authenticode')
+    if mode not in ('authenticode', 'ed25519'): raise ValueError('Prepared update trust mode is invalid.')
+    pins = normalize_keys(TRUSTED_UPDATE_KEYS if proof_policy is None else proof_policy)
+    if mode == 'ed25519':
+        old_build = verify_build(read_record(previous / BUILD_NAME), pins, root=previous,
+                     expected_version=data['previous_version'], expected_source=data['previous_source_commit'], installed=True)
+    else:
+        for name in ('Forge.exe', 'ForgeBrowserHost.exe'):
+            require_trust(previous / name, data['previous_version'], policy, verifier)
     # A later failed-installation directory is retained outside the immutable
     # snapshot manifest; verify every original file without accepting changes.
     for entry in data['backup_files']:
@@ -753,9 +981,22 @@ def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=
     rollback = data['state'] == 'rollback_prepared'
     if data['state'] not in ('prepared', 'rollback_prepared'): raise ValueError('This update intent has already been consumed.')
     if not rollback:
+        # A prepared intent authorizes the exact installation that was backed
+        # up. A later manual upgrade or edit cannot be replaced by a stale intent.
+        verify_tree(expected, data['previous_files'])
+        if mode == 'ed25519':
+            verify_build(read_record(expected / BUILD_NAME), pins, root=expected,
+                         expected_version=data['previous_version'], expected_source=data['previous_source_commit'], installed=True)
         package = plain_path(data['installer'])
         if file_hash(package) != data['sha256'] or package.stat().st_size != data['size']: raise ValueError('Staged installer was modified.')
-        require_trust(package, data['version'], policy, verifier)
+        if mode == 'ed25519':
+            release_proof = operation_release_proof(home, data, pins)
+            verify_artifact(package, release_proof, 'Forge-' + data['version'] + '-Setup.exe')
+        else:
+            require_trust(package, data['version'], policy, verifier)
+    elif mode == 'ed25519':
+        verify_build(read_record(expected / BUILD_NAME), pins, root=expected,
+                     expected_version=data['version'], expected_source=data['source_commit'], installed=True)
     operation = home / 'runtimes/updates/operations' / (operation_id + '.json')
     rollback_snapshot = retain_rollback_state(home, data) if rollback else None
     data['state'] = 'applying'; atomic_text(operation, encode(data))
@@ -765,8 +1006,17 @@ def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=
             result = (runner or (lambda args: subprocess.run(args, timeout=600, creationflags=subprocess.CREATE_NO_WINDOW)))(command)
             if result.returncode not in (0, 3010): raise ValueError('Installer failed; previous files will be restored.')
             regular_tree(expected)
-            for name in ('Forge.exe', 'ForgeBrowserHost.exe'):
-                require_trust(expected / name, data['version'], policy, verifier)
+            if mode == 'ed25519':
+                raw_build = read_record(expected / BUILD_NAME)
+                build = validated_build_manifest(raw_build, pins, expected_version=data['version'],
+                                                 expected_source=data['source_commit'])
+                bind_release_build(release_proof, raw_build, build)
+                retire_obsolete_files(expected, old_build, build)
+                verify_build(raw_build, pins, root=expected, expected_version=data['version'],
+                             expected_source=data['source_commit'], installed=True)
+            else:
+                for name in ('Forge.exe', 'ForgeBrowserHost.exe'):
+                    require_trust(expected / name, data['version'], policy, verifier)
         else:
             raise _Rollback()
         data['state'] = 'installed'; atomic_text(operation, encode(data))
@@ -783,12 +1033,16 @@ def helper_main(home, operation_id, parent_pid, *, install_dir=None, publishers=
             shutil.move(str(expected), str(failed))
         shutil.copytree(previous, expected)
         verify_tree(expected, data['previous_files'])
+        if mode == 'ed25519':
+            verify_build(read_record(expected / BUILD_NAME), pins, root=expected,
+                         expected_version=data['previous_version'], expected_source=data['previous_source_commit'], installed=True)
         latest = current / 'forge.sqlite3'
         with sqlite3.connect(backup / 'forge.sqlite3') as source, sqlite3.connect(home / 'state/forge.sqlite3') as destination:
             source.backup(destination)
         from forge_channels import quarantine_after_rollback
         with sqlite3.connect(home / 'state/forge.sqlite3') as restored, sqlite3.connect(latest) as current:
             data['channel_recovery'] = quarantine_after_rollback(restored, current)
+            retain_update_trust(restored, current)
         for folder in ROLLBACK_DATA_FOLDERS:
             saved = backup / 'data' / folder
             target = home / folder

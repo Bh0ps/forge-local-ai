@@ -1,0 +1,28 @@
+.mcp-connection-row{display:flex;gap:10px;align-items:center;padding:14px 16px;border-bottom:1px solid var(--border)}
+.mcp-connection-row:last-child{border-bottom:0}
+.mcp-connection-icon{display:flex;align-items:center;justify-content:center;width:32px;height:32px;background:var(--hover);border-radius:8px;color:var(--muted);flex-shrink:0}
+.mcp-connection-icon.enabled{color:var(--accent)}
+.mcp-connection-name{flex:1;min-width:0}
+.mcp-connection-name strong{display:block;font-size:12px;font-weight:550}
+.mcp-connection-name small{display:block;font-size:11px;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mcp-row-actions{display:flex;gap:2px;align-items:center}
+.mcp-editor-intro{color:var(--muted);margin-bottom:18px}
+.mcp-editor .field>label,.mcp-editor .field>span{font-size:12px}
+.mcp-editor .field small{font-size:11px;line-height:1.6}
+.mcp-editor-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.mcp-password{display:flex;align-items:center;gap:4px;border:1px solid var(--border);border-radius:7px;background:var(--surface);padding-right:5px}
+.mcp-password:focus-within{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.mcp-password input{border:0!important;box-shadow:none!important;flex:1;min-width:0}
+.mcp-password .icon-button{flex-shrink:0}
+.mcp-editor .mcp-advanced-link{margin:2px 0 12px;padding:3px 0}
+.mcp-setup-state{display:flex;align-items:flex-start;gap:9px;padding:12px;border-radius:9px;background:var(--hover);font-size:12px;margin:8px 0;color:var(--muted);overflow-wrap:anywhere}
+.mcp-setup-state>svg{margin-top:2px;color:var(--accent)}
+.mcp-setup-state strong{font-size:12px;font-weight:550;color:var(--text)}
+.mcp-setup-state p{margin:4px 0 0;color:var(--muted);font-size:12px}
+.mcp-setup-state a{display:flex;align-items:center;gap:5px;margin-top:5px}
+.mcp-tool-preview{display:flex;gap:5px;flex-wrap:wrap;margin-top:9px}
+.mcp-tool-preview span{padding:2px 6px;border:1px solid var(--border);border-radius:5px;font-size:11px;color:var(--secondary)}
+.mcp-editor .mcp-saved-note{color:var(--muted);font-size:11px;margin-top:0}
+.mcp-editor footer{flex-wrap:wrap}
+.mcp-editor footer .mcp-cancel{margin-right:auto}
+@media(max-width:600px){.mcp-connection-row{padding:12px;gap:8px;flex-wrap:wrap}.mcp-connection-name{min-width:calc(100% - 48px)}.mcp-connection-row>.badge{margin-left:40px}.mcp-row-actions{margin-left:auto}.mcp-editor-grid{grid-template-columns:1fr;gap:0}}

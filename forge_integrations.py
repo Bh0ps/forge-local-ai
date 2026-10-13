@@ -389,6 +389,9 @@ class IntegrationHub:
         self.connections = {}
         self.auth_flows = {}
         self.mcp_requests = {}
+        self.mcp_probes = {}
+        self.mcp_probe_cancels = {}
+        self.mcp_setup_tokens = {}
         self.inspections = {}
         self.skill_index = SkillIndex()
         self.browser = BrowserTools(self.root)
@@ -424,7 +427,10 @@ class IntegrationHub:
         automatic = auth_type not in {"none", "oauth"} and server.get("credential_ref")
         custom = any(name.lower() != "authorization" or auth_type not in {"none", "oauth"}
                      for name in server.get("header_credentials", {}))
-        oauth = auth_type == "oauth" and server.get("oauth_tokens_ref") and self.vault.get(server["oauth_tokens_ref"])
+        try:
+            oauth = auth_type == "oauth" and server.get("oauth_tokens_ref") and self.vault.get(server["oauth_tokens_ref"])
+        except Exception:
+            raise ValueError("Could not read the saved connection credential. Check credential storage and try again.") from None
         public["authenticated"] = bool(automatic or custom or oauth or
                                          (server.get("transport") == "stdio" and server.get("env_credentials")))
         public["connected"] = server["id"] in self.connections and not self.connections[server["id"]].closed
@@ -441,6 +447,8 @@ class IntegrationHub:
 
     def _connection(self, server):
         with self.lock:
+            if self.closed:
+                raise MCPPreflightError("Forge is closing. Open Forge before using this connection.")
             current = self._server(server["id"])
             if current is not server or _mcp_binding(current) != _mcp_binding(server):
                 raise MCPPreflightError("The MCP endpoint changed. Test the current connection before continuing.")
@@ -537,13 +545,34 @@ class IntegrationHub:
                 return result
             if action == "mcp_save":
                 return self._mcp_save(data)
+            if action == "mcp_probe":
+                return self._mcp_probe(data)
+            if action == "mcp_probe_cancel":
+                identity = _identifier(data["probe_id"])
+                with self.lock:
+                    self.mcp_probe_cancels[identity] = time.monotonic()
+                    while len(self.mcp_probe_cancels) > 128:
+                        self.mcp_probe_cancels.pop(next(iter(self.mcp_probe_cancels)))
+                    probe = self.mcp_probes.get(identity)
+                    if probe:
+                        probe["cancel"].set()
+                        connection = probe.get("connection")
+                    else:
+                        connection = None
+                if connection:
+                    connection.shutdown()
+                return {"ok": True}
             if action == "mcp_auth_start":
+                if self.closed:
+                    raise ValueError("Forge is closing. Open Forge before starting sign-in.")
                 server = self._server(data["id"])
                 if server["transport"] == "stdio":
                     raise ValueError("OAuth is available for remote MCP endpoints")
+                identity = _identifier(data.get("flow_id") or uuid.uuid4().hex)
                 self._require_idle(server["id"])
                 self._close_connection(server["id"])
                 flow = OAuthFlow()
+                flow.identity = identity
                 self.auth_flows[server["id"]] = flow
                 server.update(auth_type="oauth", oauth_tokens_ref=server.get("oauth_tokens_ref") or uuid.uuid4().hex,
                               oauth_client_ref=server.get("oauth_client_ref") or uuid.uuid4().hex,
@@ -551,17 +580,28 @@ class IntegrationHub:
                 server.update(tools=[], enabled=False, status="authenticating")
                 server.pop("error", None)
                 self._save()
-                self.connections[server["id"]] = MCPConnection(server, self.vault, oauth_flow=flow)
-                return {"ok": True, "state": "connecting", "id": server["id"]}
+                try:
+                    self.connections[server["id"]] = MCPConnection(server, self.vault, oauth_flow=flow)
+                except Exception as exc:
+                    self._close_connection(server["id"])
+                    server.update(status="error", error=_error(exc, remote=True))
+                    self._save()
+                    raise ValueError(server["error"]) from None
+                return {"ok": True, "state": "connecting", "id": server["id"], "flow_id": flow.identity}
             if action == "mcp_auth_status":
                 server = self._server(data["id"])
                 connection = self.connections.get(server["id"])
                 flow = self.auth_flows.get(server["id"])
+                if data.get("flow_id") and (not flow or getattr(flow, "identity", None) != data["flow_id"]):
+                    raise ValueError("This sign-in attempt is no longer active. Start sign-in again.")
                 if not connection:
                     raise ValueError("Start authentication first")
                 if connection.ready.done():
-                    connection.ready.result()
-                    tools = self._validate_tools(connection.request("list_tools"))
+                    try:
+                        connection.ready.result()
+                        tools = self._validate_tools(connection.request("list_tools"))
+                    except Exception as exc:
+                        raise ValueError(_error(exc, remote=True)) from None
                     with self.lock:
                         if self._server(server["id"]) is not server or self.connections.get(server["id"]) is not connection:
                             raise ValueError("This connection changed during authentication. Connect it again.")
@@ -570,10 +610,14 @@ class IntegrationHub:
                         self._save()
                         if flow:
                             flow.shutdown()
-                    return {"ok": True, "state": "ready", "server": self._public_server(server)}
+                    return {"ok": True, "state": "ready", "flow_id": getattr(flow, "identity", None),
+                            "setup_token": self._setup_token(server), "server": self._public_server(server)}
                 return {"ok": True, "state": "authenticate" if flow and flow.authorization_url else "connecting",
-                        "authorization_url": flow.authorization_url if flow else None}
+                        "flow_id": getattr(flow, "identity", None), "authorization_url": flow.authorization_url if flow else None}
             if action == "mcp_auth_cancel":
+                flow = self.auth_flows.get(data["id"])
+                if data.get("flow_id") and (not flow or getattr(flow, "identity", None) != data["flow_id"]):
+                    return {"ok": True, "stale": True}
                 if self.mcp_requests.get(data["id"]):
                     raise ValueError("This connection has an active tool request. Wait for it to finish before changing the connection.")
                 self._close_connection(data["id"])
@@ -596,14 +640,15 @@ class IntegrationHub:
                         server["status"] = "ready"
                         server.pop("error", None)
                         self._save()
-                    return {"ok": True, "server": self._public_server(server), "tools": server["tools"]}
+                    return {"ok": True, "server": self._public_server(server), "tools": server["tools"],
+                                "setup_token": self._setup_token(server)}
                 except Exception as exc:
                     with self.lock:
                         if self._server(server["id"]) is not server or self.connections.get(server["id"]) is not connection:
                             return {"ok": False, "error": "This connection changed while being tested. Test it again."}
                         self._close_connection(server["id"])
                         server["status"] = "error"
-                        server["error"] = _error(exc)
+                        server["error"] = _error(exc, remote=True)
                         self._save()
                     return {"ok": False, "error": server["error"], "server": self._public_server(server)}
             if action == "mcp_remove":
@@ -615,6 +660,7 @@ class IntegrationHub:
                 for reference in filter(None, references):
                     self.vault.delete(reference)
                 self.config["servers"].remove(server)
+                self.mcp_setup_tokens.pop(server["id"], None)
                 self._save()
                 return {"ok": True}
             if action == "mcp_resources":
@@ -720,10 +766,126 @@ class IntegrationHub:
         except Exception as exc:
             return {"ok": False, "error": _error(exc)}
 
+    def _mcp_probe(self, data):
+        identity = _identifier(data.get("probe_id") or uuid.uuid4().hex)
+        with self.lock:
+            if self.closed:
+                raise ValueError("Forge is closing. Open Forge before testing a connection.")
+        draft = data.get("draft")
+        if not isinstance(draft, dict):
+            raise ValueError("Enter a connection to test.")
+        transport = draft.get("transport", "http")
+        if transport not in {"http", "sse", "stdio"}:
+            raise ValueError("Select HTTP, stdio or legacy SSE transport.")
+        candidate = {"id": "probe-" + identity[:48], "transport": transport, "enabled": False}
+        if transport == "stdio":
+            command = str(draft.get("command", "")).strip()
+            args = draft.get("args", [])
+            if not command or "\x00" in command or not isinstance(args, list) or len(args) > 100 or not all(
+                    isinstance(arg, str) and "\x00" not in arg for arg in args):
+                raise ValueError("Supply an executable and an array of arguments.")
+            candidate.update(command=command, args=args, cwd=draft.get("cwd"))
+        else:
+            candidate["url"] = _safe_url(draft.get("url", ""))
+            if SECRET_NAMES.search(urlsplit(candidate["url"]).query):
+                raise ValueError("Use the authentication field instead of URL query credentials.")
+        auth_type = draft.get("auth_type")
+        if auth_type not in {None, "none", "bearer", "oauth"}:
+            raise ValueError("Select no authentication, bearer token or OAuth.")
+        if auth_type == "oauth":
+            raise ValueError("Save and sign in before verifying an OAuth connection.")
+        token = data.get("token")
+        if token is not None and (not isinstance(token, str) or len(token) > 8192 or any(
+                character in token for character in ("\r", "\n", "\x00"))):
+            raise ValueError("Enter a valid access token.")
+        with self.lock:
+            now = time.monotonic()
+            self.mcp_probe_cancels = {key: timestamp for key, timestamp in self.mcp_probe_cancels.items()
+                                      if now - timestamp < 60}
+            if self.closed:
+                raise ValueError("Forge is closing. Open Forge before testing a connection.")
+            if identity in self.mcp_probe_cancels:
+                raise ValueError("This connection check was cancelled.")
+            if identity in self.mcp_probes or len(self.mcp_probes) >= 8:
+                raise ValueError("A connection check is already running. Let it finish before testing again.")
+            existing = copy.deepcopy(self._server(data["id"])) if data.get("id") else None
+            if existing and _mcp_identity(existing) == _mcp_identity(candidate) and existing.get("auth_type") == auth_type:
+                for key in ("credential_ref", "header_credentials", "env_credentials", "headers", "env"):
+                    if key in existing:
+                        candidate[key] = copy.deepcopy(existing[key])
+            if auth_type is not None:
+                candidate["auth_type"] = auth_type
+            cancel = threading.Event()
+            record = {"cancel": cancel, "connection": None}
+            self.mcp_probes[identity] = record
+        secrets = {}
+        if token:
+            reference = "probe-token-" + uuid.uuid4().hex
+            candidate["credential_ref"] = reference
+            candidate.setdefault("auth_type", "bearer")
+            secrets[reference] = token
+        allowed = _mcp_credential_refs(candidate)
+        vault = self.vault
+        class EphemeralVault:
+            def get(self, reference):
+                if reference in secrets:
+                    return secrets[reference]
+                if reference in allowed:
+                    return vault.get(reference)
+                return None
+            def put(self, *args, **kwargs):
+                raise ValueError("Save this connection before starting authentication.")
+        connection = None
+        try:
+            with self.lock:
+                if self.closed or cancel.is_set():
+                    cancel.set()
+                    raise ValueError("This connection check was cancelled.")
+                # Constructor only starts its worker. Publish it under the same
+                # short admission lock used by cancellation and host shutdown.
+                connection = MCPConnection(candidate, EphemeralVault())
+                record["connection"] = connection
+            if cancel.is_set():
+                raise ValueError("This connection check was cancelled.")
+            tools = self._validate_tools(connection.request("list_tools", cancel=cancel))
+            if cancel.is_set():
+                raise ValueError("This connection check was cancelled.")
+            return {"ok": True, "probe_id": identity, "tool_count": len(tools),
+                    "tools": [{"name": tool["name"], "description": tool["description"][:500]} for tool in tools[:6]]}
+        except Exception as exc:
+            message = "This connection check was cancelled." if cancel.is_set() else (
+                "Connection check timed out. Check the endpoint and try again."
+                if isinstance(exc, concurrent.futures.TimeoutError) else _error(exc, remote=True))
+            raise ValueError(message) from None
+        finally:
+            if connection:
+                connection.shutdown()
+            secrets.clear()
+            with self.lock:
+                self.mcp_probes.pop(identity, None)
+
+    def _setup_token(self, server):
+        # Activation proves the exact saved revision, not only a reusable ID.
+        # This receipt is private coordinator state and is never persisted.
+        with self.lock:
+            if self._server(server["id"]) is not server or server.get("status") != "ready":
+                raise ValueError("This connection changed during setup. Check it again before enabling.")
+            token = uuid.uuid4().hex
+            self.mcp_setup_tokens[server["id"]] = {"token": token, "server": server,
+                "binding": _mcp_binding(server), "expires": time.monotonic() + 600}
+            return token
+
     def _mcp_save(self, data):
         with self.lock:
             identity = _identifier(data.get("id") or uuid.uuid4().hex[:12])
             existing = next((s for s in self.config["servers"] if s["id"] == identity), {})
+            if "setup_token" in data:
+                receipt = self.mcp_setup_tokens.get(identity)
+                if (not receipt or not isinstance(data["setup_token"], str) or
+                        data["setup_token"] != receipt["token"] or receipt["server"] is not existing or
+                        receipt["binding"] != _mcp_binding(existing) or existing.get("status") != "ready" or
+                        time.monotonic() >= receipt["expires"]):
+                    raise ValueError("This connection changed during setup. Check it again before enabling.")
             transport = data.get("transport", existing.get("transport", "http"))
             if transport in {"streamable_http", "streamable-http"}:
                 transport = "http"
@@ -841,6 +1003,7 @@ class IntegrationHub:
                     self.vault.delete(reference)
                 except Exception:
                     pass
+            self.mcp_setup_tokens.pop(identity, None)
             return {"ok": True, "server": self._public_server(server)}
 
     @staticmethod
@@ -1938,9 +2101,17 @@ class IntegrationHub:
         self.browser.reset()
 
     def shutdown(self):
-        if self.closed:
-            return
-        self.closed = True
+        with self.lock:
+            if self.closed:
+                return
+            self.closed = True
+            self.mcp_setup_tokens.clear()
+            probes = list(self.mcp_probes.values())
+            for probe in probes:
+                probe["cancel"].set()
+        for probe in probes:
+            if probe.get("connection"):
+                probe["connection"].shutdown()
         for identity in set(self.connections) | set(self.auth_flows):
             self._close_connection(identity)
         self.browser.shutdown()

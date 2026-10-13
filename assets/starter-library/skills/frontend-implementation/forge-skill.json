@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "2.0.0",
+  "version": "2.1.0",
   "bundle": "design",
   "phases": [
     "implement"
@@ -23,10 +23,12 @@
     "dashboard"
   ],
   "recommended_tools": [
-    "read_file",
-    "edit_file",
-    "run_command",
-    "preview_inspect"
+    "search_files",
+    "read_files",
+    "apply_patch",
+    "command_start",
+    "preview_inspect",
+    "preview_diagnostics"
   ],
   "exclude_triggers": [],
   "resources": [

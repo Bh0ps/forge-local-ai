@@ -8,12 +8,18 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import time
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge_updates import authenticode, file_hash, regular_tree, require_trust, safe_relative, version
+from forge_update_keys import TRUSTED_UPDATE_KEYS
+from forge_update_proof import (BUILD_NAME, RELEASE_NAME, MAX_EXPANDED_BYTES, MAX_RECORD_BYTES,
+    bind_release_build, normalize_keys, plain_root, read_record, relative_path,
+    strict_json, tree_files, validated_build_manifest, verify_artifact, verify_build, verify_release)
 
 
 def run(args, cwd):
@@ -26,8 +32,11 @@ def publisher():
     return (value,) if value else ()
 
 
-def verify_app(app, number, required):
+def verify_app(app, number, required, *, require_proof=False):
     regular_tree(app)
+    proof = app / BUILD_NAME
+    if proof.exists() or proof.is_symlink() or require_proof:
+        verify_build(read_record(proof), normalize_keys(TRUSTED_UPDATE_KEYS), root=app, expected_version=number)
     if required:
         for name in ('Forge.exe', 'ForgeBrowserHost.exe'):
             require_trust(app / name, number, publisher())
@@ -76,7 +85,7 @@ def build(args):
 
 def installer(args):
     app, stage = args.work.resolve() / 'dist/Forge', args.work.resolve() / 'source'
-    verify_app(app, args.version, args.require_signed)
+    verify_app(app, args.version, args.require_signed, require_proof=getattr(args, 'require_publisher_proof', False))
     text = (stage / 'installer.iss').read_text(encoding='utf-8')
     text = re.sub(r'#define AppVersion "[^"]+"', '#define AppVersion "' + args.version + '"', text)
     text = re.sub(r'OutputBaseFilename=.*', 'OutputBaseFilename=Forge-' + args.version + '-Setup', text)
@@ -90,7 +99,7 @@ def installer(args):
 
 def package(args):
     work = args.work.resolve(); app = work / 'dist/Forge'; output = work / 'release'; output.mkdir(exist_ok=True)
-    verify_app(app, args.version, args.require_signed)
+    verify_app(app, args.version, args.require_signed, require_proof=getattr(args, 'require_publisher_proof', False))
     setup = output / ('Forge-' + args.version + '-Setup.exe')
     if not setup.is_file(): raise ValueError('Build the installer first.')
     if args.require_signed: require_trust(setup, args.version, publisher())
@@ -98,7 +107,7 @@ def package(args):
         policy = (work / 'source/forge_release_policy.py').read_text(encoding='utf-8')
         if policy != 'TRUSTED_PUBLISHERS = ' + repr(publisher()) + '\n':
             raise ValueError('The application must be compiled with its protected publisher policy before signing.')
-    files = regular_tree(app)
+    files = tree_files(app)
     archive = output / ('Forge-' + args.version + '-Portable.zip')
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as target:
         for entry in files:
@@ -116,7 +125,85 @@ def package(args):
     print('Packages prepared:', manifest['signing'])
 
 
+def verify_publisher_downloaded(args):
+    """Verify public release bytes without executing either native host."""
+    root = plain_root(args.work)
+    pins = normalize_keys(TRUSTED_UPDATE_KEYS)
+    release = verify_release(read_record(root / RELEASE_NAME), pins, expected_version=args.version,
+        expected_source=getattr(args, 'source_commit', None), expected_channel=getattr(args, 'channel', 'preview'),
+        expected_tag='v' + args.version, now=int(time.time()), current_version='0.0.0')
+    for entry in release['artifacts']:
+        path = root / entry['name']
+        item = path.lstat()
+        if not stat.S_ISREG(item.st_mode) or path.is_symlink() or getattr(item, 'st_file_attributes', 0) & 0x400:
+            raise ValueError('Release artifacts must be regular files.')
+        verify_artifact(path, release, entry['name'])
+    if getattr(args, 'require_signed', False):
+        require_trust(root / ('Forge-' + args.version + '-Setup.exe'), args.version, publisher())
+    names = [item['name'] for item in release['artifacts']] + ['Forge-release.json', RELEASE_NAME]
+    checksums = ''.join(file_hash(root / name) + '  ' + name + '\n' for name in names).encode('ascii')
+    if read_record(root / 'SHA256SUMS.txt') != checksums:
+        raise ValueError('Release checksum file differs from the verified package bytes.')
+    archive = root / ('Forge-' + args.version + '-Portable.zip')
+    destination = root / 'verified-portable'
+    if destination.exists() or destination.is_symlink():
+        raise ValueError('Verification destination must be new.')
+    with zipfile.ZipFile(archive) as source:
+        records = source.infolist()
+        proof_rows = [row for row in records if row.filename == BUILD_NAME]
+        if len(proof_rows) != 1 or not 0 < proof_rows[0].file_size <= MAX_RECORD_BYTES:
+            raise ValueError('Portable package is missing its bounded build proof.')
+        raw_build = source.read(proof_rows[0])
+        build = validated_build_manifest(raw_build, pins, expected_version=args.version,
+                                         expected_source=release['source_commit'])
+        bind_release_build(release, raw_build, build)
+        wanted = {entry['path']: entry for entry in build['files']}
+        wanted[BUILD_NAME] = {'path': BUILD_NAME, 'size': len(raw_build), 'sha256': sha256(raw_build).hexdigest()}
+        if len(records) != len(wanted):
+            raise ValueError('Portable package has an unexpected file set.')
+        seen, total = set(), 0
+        for row in records:
+            path = relative_path(row.filename)
+            mode = row.external_attr >> 16
+            if (row.is_dir() or path.casefold() in seen or path not in wanted
+                    or mode & 0o170000 not in (0, stat.S_IFREG) or row.external_attr & 0x400):
+                raise ValueError('Portable package contains an unsafe or unexpected entry.')
+            seen.add(path.casefold())
+            total += row.file_size
+            if row.file_size != wanted[path]['size'] or total > MAX_EXPANDED_BYTES:
+                raise ValueError('Portable package differs from its bounded file proof.')
+        # All names and declared sizes are checked before creating a destination.
+        for row in records:
+            target = destination / row.filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            digest = sha256()
+            with source.open(row) as data, target.open('xb') as output:
+                for chunk in iter(lambda: data.read(1024 * 1024), b''):
+                    digest.update(chunk)
+                    output.write(chunk)
+            if digest.hexdigest() != wanted[row.filename]['sha256']:
+                raise ValueError('Portable bytes differ from the trusted build proof.')
+    verify_app(destination, args.version, getattr(args, 'require_signed', False), require_proof=True)
+    metadata = strict_json(read_record(root / 'Forge-release.json'))
+    if (not isinstance(metadata, dict) or set(metadata) != {'schema', 'version', 'repository', 'source_commit',
+            'signing', 'publisher_policy_embedded', 'files', 'artifacts', 'update_proof'}
+            or metadata.get('schema') != 1 or type(metadata['schema']) is not int
+            or metadata.get('repository') != release['repository'] or metadata.get('version') != args.version
+            or metadata.get('source_commit') != release['source_commit']
+            or metadata.get('signing') != 'ed25519-publisher-proof' or metadata.get('publisher_policy_embedded') is not True
+            or metadata.get('files') != tree_files(destination) or metadata.get('artifacts') != release['artifacts']):
+        raise ValueError('Release manifest differs from the authenticated package.')
+    proof_meta = {'name': RELEASE_NAME, 'size': (root / RELEASE_NAME).stat().st_size,
+                  'sha256': file_hash(root / RELEASE_NAME)}
+    if metadata.get('update_proof') != proof_meta:
+        raise ValueError('Release manifest has a different publisher proof identity.')
+    print('Publisher signature, exact source, installer, portable tree and file manifest verified.')
+
+
 def verify_downloaded(args):
+    proof = args.work / RELEASE_NAME
+    if proof.exists() or proof.is_symlink() or getattr(args, 'require_publisher_proof', False):
+        return verify_publisher_downloaded(args)
     root = args.work.resolve(); setup = root / ('Forge-' + args.version + '-Setup.exe')
     require_trust(setup, args.version, publisher())
     archive = root / ('Forge-' + args.version + '-Portable.zip')
@@ -157,6 +244,9 @@ def main():
     parser.add_argument('--version', required=True)
     parser.add_argument('--iscc', default='iscc')
     parser.add_argument('--require-signed', action='store_true')
+    parser.add_argument('--require-publisher-proof', action='store_true')
+    parser.add_argument('--source-commit', help='Exact source identity expected when verifying publisher-authenticated downloads')
+    parser.add_argument('--channel', choices=('stable', 'preview'), default='preview')
     args = parser.parse_args(); version(args.version)
     {'build': build, 'installer': installer, 'package': package, 'verify-downloaded': verify_downloaded}[args.stage](args)
 

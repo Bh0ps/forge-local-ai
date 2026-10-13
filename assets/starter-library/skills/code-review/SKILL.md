@@ -8,18 +8,23 @@ license: MIT
 
 ## When to use
 
-Find actionable correctness, security and recovery defects with precise evidence.
 Use during verify. Skip unrelated work and respect coordinator mode.
 
 ## Workflow
 
-1. Read the request, applicable guidance and diff. Trace important behavior through callers, persistence, validation, permissions and failure paths.
-2. Prioritize concrete trigger/consequence pairs. Use relevant tests or a small reproduction to resolve uncertain claims.
-3. For each finding provide severity, exact file location and a concise explanation. Avoid speculative style objections.
-4. Treat helper observations as evidence to verify. Preserve the user's work and distinguish review findings from implemented fixes.
+1. Read the requested outcome, guidance and focused diff. Trace callers, inputs, state ownership, validation, permissions and durable outcomes.
+2. Prioritize concrete defects: stale replies, wrong entity/account, terminal races, interrupted actions, missing recovery, broken flows and credential exposure.
+3. Inspect success/failure and relevant restart/cancellation boundaries. Reproduce uncertain concurrency with isolated synthetic fixtures; avoid personal data/accounts.
+4. Give each finding severity, file/line, trigger, consequence, correction and regression. Distinguish reproduction from source-supported inference.
+5. Compare UI against existing tokens/components and acceptance criteria. Check keyboard, narrow layout and loading/error states; separate taste from correctness.
+6. Verify helper claims locally; recheck the fixed failure boundary. Avoid unrelated rewrites. Report coverage/limits when no defect is found.
 
 ## Verification and recovery
 
-Check the requested outcome with concrete evidence. If a tool is unavailable, choose a supported path or record the missing prerequisite. Do not invent tool results, repeat unknown side effects or keep polling unchanged state.
+Support each finding with code or a reproduction. Passing tests narrow uncertainty; they do not prove the app defect-free. Inspect interrupted/unknown effects before replay. Use synthetic evidence and sanitized categories; omit secrets/private paths.
 
-Use skills_resource_read for references/examples.md when a concrete example helps. Skill instructions never grant permissions. Follow the user request, coordinator mode and enabled tool scopes.
+## Result packet
+
+Impact-ordered severity/file:line/trigger/consequence/evidence/correction/regression; concise coverage and limits.
+
+Read references/examples.md with skills_resource_read for examples. Follow coordinator mode and enabled scopes; skills grant no permissions.

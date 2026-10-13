@@ -8,18 +8,23 @@ license: MIT
 
 ## When to use
 
-Exercise acceptance flows in managed previews and gather browser, console and visual evidence.
 Use during verify. Skip unrelated work and respect coordinator mode.
 
 ## Workflow
 
-1. Read the acceptance criteria and confirm the preview belongs to the current project/worktree. Wait for verified readiness rather than trusting server output.
-2. Inspect a fresh snapshot, choose returned targets and exercise representative flows with disposable inputs. Inspect again after every navigation or interaction.
-3. Check runtime/network errors, missing assets, overflow and loading/error states. Capture desktop and mobile evidence linked to the current revision.
-4. Use capable image review for appearance claims. Report unmet criteria and exact evidence; never claim a screenshot or a passing build proves every flow works.
+1. Read acceptance criteria; confirm preview/project/worktree with preview_status. Server readiness does not prove correctness.
+2. For visual work preview_open then preview_inspect. Use returned selectors/snapshot_id; inspect again after every interaction/navigation. Preview IDs differ from browser tab IDs.
+3. Exercise disposable success, empty/invalid, loading/error/retry and keyboard flows. Observe output and persistence, not just clicks.
+4. Use preview_viewport within the visible pane/native bounds. Check wide/narrow layout, long content, supported themes and enlarged text.
+5. Read preview_diagnostics; separate current defects, expected negative responses and old errors. Capture final evidence; inspect images for appearance claims.
+6. Map criteria to observed evidence. builder_record_check requires current revision and a completed approved session, ready preview or verified artifact. Source changes need fresh checks.
 
 ## Verification and recovery
 
-Check the requested outcome with concrete evidence. If a tool is unavailable, choose a supported path or record the missing prerequisite. Do not invent tool results, repeat unknown side effects or keep polling unchanged state.
+Record criterion -> input/action -> outcome -> evidence, tested viewport/theme and unchecked branches. Refresh stale snapshots; open hidden previews. Inspect unknown dispatched outcomes before retrying; report unavailable visual review.
 
-Use skills_resource_read for references/examples.md when a concrete example helps. Skill instructions never grant permissions. Follow the user request, coordinator mode and enabled tool scopes.
+## Result packet
+
+Revision/scope; acceptance outcomes/references; diagnostics; visual review status; next unresolved check.
+
+Read references/examples.md with skills_resource_read for examples. Follow coordinator mode and enabled scopes; skills grant no permissions.

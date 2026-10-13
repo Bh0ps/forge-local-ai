@@ -32,7 +32,7 @@ def updater(tmp_path):
     (install / 'Forge.exe').write_bytes(b'Synthetic installed host')
     service = SimpleNamespace(store=store, jobs=SimpleNamespace(lock=threading.RLock()))
     manager = UpdateManager(service, '5.1.0', install, (), verifier=lambda path: {
-        'status': 'Valid', 'publisher': PUBLISHER, 'timestamped': True, 'version': '5.1.1'})
+        'status': 'Valid', 'publisher': PUBLISHER, 'timestamped': True, 'version': '5.1.1'}, proof_policy={}, _allow_installation=True)
     return manager
 
 

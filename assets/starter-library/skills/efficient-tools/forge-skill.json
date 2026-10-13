@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "2.0.0",
+  "version": "2.1.0",
   "bundle": "build",
   "phases": [
     "discover",
@@ -21,8 +21,14 @@
     "context budget"
   ],
   "recommended_tools": [
+    "tools_search",
+    "tools_load",
     "search_files",
-    "read_file",
+    "read_files",
+    "apply_patch",
+    "command_start",
+    "command_wait",
+    "command_read",
     "artifact_read"
   ],
   "exclude_triggers": [],

@@ -1,0 +1,54 @@
+name: Verify publisher-authenticated release bytes
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Exact tag of a publisher-authenticated draft or published release
+        required: true
+        type: string
+      channel:
+        description: Expected release channel
+        required: true
+        default: preview
+        type: choice
+        options: [preview, stable]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_CHANNEL: ${{ inputs.channel }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12.10'
+          architecture: x64
+      - name: Bind verification to the exact checked-out tag
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REPOSITORY -ne 'Bh0ps/forge-local-ai') { throw 'Wrong repository' }
+          if ($env:RELEASE_TAG -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') { throw 'Invalid release tag' }
+          git fetch origin "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE) { throw 'Tag fetch failed' }
+          $tagCommit = git rev-parse 'FETCH_HEAD^{commit}'
+          $headCommit = git rev-parse HEAD
+          if ($tagCommit -ne $headCommit) { throw 'Run this verifier at the exact tagged source' }
+          $release = gh release view $env:RELEASE_TAG --repo Bh0ps/forge-local-ai --json tagName,isPrerelease | ConvertFrom-Json
+          if ($LASTEXITCODE -or $release.tagName -ne $env:RELEASE_TAG) { throw 'Exact release not found' }
+          if (($env:RELEASE_CHANNEL -eq 'preview') -ne $release.isPrerelease) { throw 'Release channel differs' }
+          "FORGE_RELEASE_VERSION=$($env:RELEASE_TAG.Substring(1))" >> $env:GITHUB_ENV
+          "FORGE_SOURCE_COMMIT=$headCommit" >> $env:GITHUB_ENV
+      - name: Install exact verification dependencies
+        run: python -m pip install --require-hashes -r requirements-build.lock
+      - name: Download the five public release assets
+        run: |
+          New-Item -ItemType Directory -Path C:/ForgePublisherVerification | Out-Null
+          gh release download $env:RELEASE_TAG --repo Bh0ps/forge-local-ai --dir C:/ForgePublisherVerification --pattern "Forge-$env:FORGE_RELEASE_VERSION-Setup.exe" --pattern "Forge-$env:FORGE_RELEASE_VERSION-Portable.zip" --pattern Forge-release.json --pattern Forge-update-proof.json --pattern SHA256SUMS.txt
+          if ($LASTEXITCODE) { throw 'Publisher-authenticated assets are incomplete' }
+      - name: Verify pinned publisher, source, package paths and every application file
+        run: python scripts/release_build.py verify-downloaded --work C:/ForgePublisherVerification --version "$env:FORGE_RELEASE_VERSION" --source-commit "$env:FORGE_SOURCE_COMMIT" --channel "$env:RELEASE_CHANNEL" --require-publisher-proof

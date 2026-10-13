@@ -8,18 +8,23 @@ license: MIT
 
 ## When to use
 
-Implement working pages and components with real interaction, coherent state and the existing framework.
 Use during implement. Skip unrelated work and respect coordinator mode.
 
 ## Workflow
 
-1. Read the related component, styles, state owner and callers. Preserve framework conventions and existing user work.
-2. Implement the smallest complete user flow. Keep state in an appropriate owner, use stable keys and handle loading/error/empty cases.
-3. Connect controls to real behavior. Avoid decorative buttons, invented network results and hard-coded success paths.
-4. Run relevant type/build checks, open the managed preview and exercise the main flow. Inspect runtime errors before proceeding to visual refinement.
+1. Read component, caller, state owner, styles/tokens and check scripts. Preserve framework, dependencies and visual identity.
+2. Build one complete flow with existing controls/icons. Implement real loading, empty, error, success and retry states; never invent server results.
+3. Bind replies to current entity/request generation; invalidate on close, scope change and unmount. Preserve drafts, selections and reading intent.
+4. Use native semantics, stable IDs and accessible names. Verify open/close/Escape focus, double-submit, delayed replies and cancellation.
+5. Reuse spacing/type/palettes. Check narrow layouts, enlarged text and supported themes. Stop continuous motion while hidden; remove it for reduced motion. Never animate streaming characters.
+6. Run relevant repository checks, then exercise the real preview flow and failure/retry path. Fix observed defects before recording evidence.
 
 ## Verification and recovery
 
-Check the requested outcome with concrete evidence. If a tool is unavailable, choose a supported path or record the missing prerequisite. Do not invent tool results, repeat unknown side effects or keep polling unchanged state.
+Demonstrate the user outcome, keyboard path and one asynchronous/failure boundary; types/build only prove compilation. Repair lifecycle guards rather than hiding errors; preserve checks and use actual recovery for failed/unknown actions.
 
-Use skills_resource_read for references/examples.md when a concrete example helps. Skill instructions never grant permissions. Follow the user request, coordinator mode and enabled tool scopes.
+## Result packet
+
+Before/after behavior; components/state owner; tested states/keyboard/races; check evidence; unverified surfaces.
+
+Read references/examples.md with skills_resource_read for examples. Follow coordinator mode and enabled scopes; skills grant no permissions.

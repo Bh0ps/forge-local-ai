@@ -74,6 +74,10 @@ class Bridge:
             data = {} if data is None else data
             if not isinstance(data, dict):
                 raise ValueError('Expected an object')
+            if action in ('update_apply', 'update_rollback'):
+                # Publisher verification does not prove that window-only work
+                # is durable. This seed cannot acknowledge a safe native handoff.
+                raise ValueError('In-app installation and restore are unavailable in this version. Save your work and use the public installer for a manual update.')
             service = self._ensure_service()
             if action == 'artifact_save_as':
                 # Only an explicit user download opens this dialog. Agent tools
@@ -117,17 +121,6 @@ class Bridge:
             if action == 'settings' and data.get('emergency_shortcut'):
                 EmergencyHotkey.parse(data['emergency_shortcut'])
             result = service.dispatch(action, data)
-            if action in ('update_apply','update_rollback') and result.get('prepared'):
-                if not getattr(sys,'frozen',False):
-                    service.update_manager.applying=False
-                    raise ValueError('Apply updates from the installed Windows app.')
-                import subprocess
-                try:
-                    subprocess.Popen(result['command'],creationflags=subprocess.CREATE_NO_WINDOW,close_fds=True)
-                except OSError:
-                    service.update_manager.applying=False
-                    raise ValueError('The update helper could not start. The prepared backup is retained; retry from Updates.') from None
-                threading.Timer(.3,self.quit).start()
             if action == 'settings' and data.get('emergency_shortcut') and self._hotkey:
                 self._hotkey.stop()
                 self._hotkey = EmergencyHotkey(self._lifecycle.emergency_stop, data['emergency_shortcut'])
@@ -434,18 +427,7 @@ def main():
     if '--smoke-test' in sys.argv and not os.getenv('FORGE_DATA_DIR'):
         raise ValueError('Native smoke requires an explicit disposable FORGE_DATA_DIR.')
     if '--forge-update' in sys.argv:
-        import argparse
-        import subprocess
-        from forge_updates import helper_main
-        parser=argparse.ArgumentParser()
-        parser.add_argument('--forge-update',required=True)
-        parser.add_argument('--forge-home',required=True)
-        parser.add_argument('--forge-parent-pid',required=True,type=int)
-        args=parser.parse_args()
-        result=helper_main(args.forge_home,args.forge_update,args.forge_parent_pid)
-        if result.get('restart_command'):
-            subprocess.Popen(result['restart_command'],creationflags=subprocess.CREATE_NO_WINDOW,close_fds=True)
-        return
+        raise SystemExit('In-app installation is unavailable in this version. Save your work and use the manual installer.')
     import webview
     import uvicorn
     from model_manager import create_app

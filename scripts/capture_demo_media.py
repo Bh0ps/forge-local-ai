@@ -71,6 +71,12 @@ SKILLS = [
      'description': 'Understand the project before choosing the next step.'},
 ]
 
+DEMO_CONNECTION = {'id': 'research', 'name': 'Research tools', 'url': 'https://tools.example/mcp',
+                   'transport': 'http', 'auth_type': 'bearer', 'authenticated': True,
+                   'enabled': True, 'status': 'ready', 'tools': [
+                       {'name': 'search', 'description': 'Find related sources'},
+                       {'name': 'read_page', 'description': 'Read a selected page'}]}
+
 
 @contextmanager
 def production_server(directory=ROOT / 'frontend/dist'):
@@ -170,6 +176,16 @@ class DemoFixture:
                 result = {'skills': SKILLS}
             elif action == 'spaces':
                 result = {'spaces': self.spaces}
+            elif action == 'mcp_servers':
+                result = {'servers': [DEMO_CONNECTION]}
+            elif action == 'mcp_probe':
+                # A deterministic UI demonstration, never a remote SDK session.
+                # No saved/typed token value exists in this disposable fixture.
+                result = {'ok': True, 'tool_count': 2, 'tools': DEMO_CONNECTION['tools']}
+            elif action == 'mcp_probe_cancel':
+                result = {'ok': True}
+            elif action in ('mcp_save', 'mcp_auth_start'):
+                raise ValueError('Public demonstrations never save credentials or connect external accounts.')
             else:
                 result = {'first_run': False, 'projects': [self.project], 'chats': [self.chat],
                           'runs': [], 'goals': [], 'documents': [], 'actions': [], 'questions': [], 'schedules': []}
@@ -374,6 +390,26 @@ def main():
                 page.get_by_role('button', name='Settings', exact=True).click()
                 page.get_by_role('heading', name='Workspace appearance', exact=True).wait_for()
                 png(page, args.output / f'forge-{MEDIA_VERSION}-settings.png')
+                page.get_by_role('button', name='MCP connections', exact=True).click()
+                trigger = page.get_by_role('button', name='Configure Research tools', exact=True)
+                trigger.click()
+                page.get_by_role('dialog', name='Configure MCP connection').wait_for()
+                frames = [pixels(page)]
+                page.get_by_role('button', name='Test connection', exact=True).click()
+                page.get_by_text('Connection verified', exact=True).wait_for()
+                frames.append(pixels(page))
+                png(page, args.output / f'forge-{MEDIA_VERSION}-connections-dark.png')
+                page.keyboard.press('Escape')
+                assert trigger.evaluate('(element)=>element===document.activeElement')
+                frames.append(pixels(page))
+                gif(frames, args.output / f'forge-{MEDIA_VERSION}-connections.gif')
+                trigger.click()
+                page.get_by_role('button', name='Test connection', exact=True).click()
+                page.get_by_text('Connection verified', exact=True).wait_for()
+                page.set_viewport_size({'width': 390, 'height': 1000})
+                page.evaluate("document.documentElement.dataset.theme='light'")
+                png(page, args.output / f'forge-{MEDIA_VERSION}-connections-light.png')
+                page.keyboard.press('Escape')
                 assert not errors, errors
                 assert not blocked_requests, 'The demo attempted a request outside its isolated loopback servers.'
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')

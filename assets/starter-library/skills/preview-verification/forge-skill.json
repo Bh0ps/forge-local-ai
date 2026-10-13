@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "2.0.0",
+  "version": "2.1.0",
   "bundle": "design",
   "phases": [
     "verify"
@@ -19,11 +19,16 @@
     "ui test"
   ],
   "recommended_tools": [
+    "builder_read",
+    "preview_status",
+    "preview_open",
     "preview_inspect",
-    "preview_click",
     "preview_type",
+    "preview_key",
+    "preview_viewport",
+    "preview_diagnostics",
     "preview_screenshot",
-    "preview_diagnostics"
+    "builder_record_check"
   ],
   "exclude_triggers": [],
   "resources": [
