@@ -10,7 +10,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from runtime import Jobs
-from forge_host import PairingAuthority
+from forge_host import HostLifecycle, PairingAuthority
 
 
 def request(**extra):
@@ -235,7 +235,7 @@ def bridge_class():
     tree = ast.parse(source.read_text(encoding='utf-8'), filename=str(source))
     definition = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Bridge')
     namespace = {'Core': FakeCore, 'Jobs': Jobs, 'threading': threading,
-                 'PairingAuthority': PairingAuthority, 'Path': Path,
+                 'PairingAuthority': PairingAuthority, 'HostLifecycle': HostLifecycle, 'Path': Path,
                  'log': logging.getLogger('forge-test')}
     exec(compile(ast.Module(body=[definition], type_ignores=[]), str(source), 'exec'), namespace)
     return namespace['Bridge']
