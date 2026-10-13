@@ -1,4 +1,23 @@
-# Forge 5.1.1 demo media
+# Forge demo media
+
+The 5.1.4 screenshots use the synthetic **Tide Studio** fixture in a disposable
+workspace. They contain no personal conversations, project folders, account
+details or API keys. The connection test is simulated; no model inference runs.
+PNG files contain no embedded text metadata.
+
+| File | Demonstration |
+| --- | --- |
+| `forge-5.1.4-goal-mode.png` | A Goal mode selected with Enter and an ordinary editable prompt. |
+| `forge-5.1.4-context.png` | Context capacity colors and reasoning information. |
+| `forge-5.1.4-engine-presets.png` | Editable LM Studio setup and explicitly advertised model facts. |
+| `forge-5.1.4-helper-summary.png` | Retained helper findings after its temporary conversation was removed. |
+
+These images were captured from the production frontend and visually reviewed.
+Private keyboard, narrow light layout, enlarged-text and reduced-motion checks
+also passed. Their logs, browser profile and application state are not included.
+
+## Previous 5.1.1 captures
+
 
 These screenshots and animations use the synthetic **Tide Studio** fixture in a
 disposable workspace. The chat, project, notes and sample application are demo
