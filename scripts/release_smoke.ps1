@@ -1,7 +1,46 @@
 param([Parameter(Mandatory=$true)][string]$Executable, [Parameter(Mandatory=$true)][string]$Output)
 $ErrorActionPreference = 'Stop'
+function Read-ForgeSmokeReport {
+    param([string]$Path)
+    $value = [pscustomobject]@{ data=$null; state='missing' }
+    $stream = $null
+    try {
+        $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+        $current = $item
+        while ($null -ne $current) {
+            if (($current.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $value.state='unsafe'; return $value }
+            $current = if ($current -is [System.IO.FileInfo]) { $current.Directory } else { $current.Parent }
+        }
+        if ($item -isnot [System.IO.FileInfo] -or $item.LinkType) { $value.state='unsafe'; return $value }
+        $value.state='invalid'
+        $stream = [System.IO.File]::Open($Path, 'Open', 'Read', ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+        $limit = 1048576
+        if ($stream.Length -gt $limit) { $value.state='too-large'; return $value }
+        $buffer = New-Object byte[] ($limit + 1)
+        $count = 0
+        while ($count -le $limit) {
+            $read = $stream.Read($buffer, $count, $buffer.Length - $count)
+            if (-not $read) { break }
+            $count += $read
+        }
+        if ($count -gt $limit -or $stream.Length -gt $limit) { $value.state='too-large'; return $value }
+        $item.Refresh()
+        if (-not $item.Exists -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { $value.state='unsafe'; return $value }
+        $text = (New-Object System.Text.UTF8Encoding($false, $true)).GetString($buffer, 0, $count).TrimStart([char]0xFEFF).Trim()
+        if (-not $text.StartsWith('{') -or -not $text.EndsWith('}')) { return $value }
+        $data = $text | ConvertFrom-Json -ErrorAction Stop
+        if ($data -isnot [pscustomobject]) { return $value }
+        $value.data=$data; $value.state='ready'
+    } catch {
+        # Raw file content, paths and parsing exceptions never leave this reader.
+    } finally {
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+    return $value
+}
 function Write-ForgeSmokeDiagnostics {
-    param([object]$SmokeData, [string]$Gate, [object]$ExitCode)
+    param([object]$SmokeData, [string]$Gate, [object]$ExitCode,
+          [string]$ReportState='unrecorded', [object]$CheckpointData=$null, [string]$CheckpointState='unrecorded')
     function Check-Status($Value, [bool]$Passed) {
         if ($null -eq $Value) { return 'missing' }
         if ($Passed) { return 'pass' }
@@ -55,8 +94,13 @@ function Write-ForgeSmokeDiagnostics {
         'builder:preview_inspect','builder:preview_type','builder:preview_click','builder:preview_viewport',
         'builder:preview_diagnostics','builder:preview_screenshot','standalone-start','standalone-open',
         'standalone-input-target','standalone-button-target','standalone-screenshot')
+    $checkpointPhases = $phases + @('startup-imports','startup-imports-ready','logging-start','logging-ready',
+        'singleton-start','singleton-ready','service-start','service-ready','http-start','http-ready',
+        'background-start','background-ready','host-hooks-start','host-hooks-ready','window-create',
+        'window-created','webview-start','startup-failed','smoke-failed','smoke-complete')
     $types = @('ValueError','RuntimeError','TimeoutError','StopIteration','KeyError','TypeError','AttributeError',
-        'OSError','FileNotFoundError','PermissionError','BrowserGuard','JavascriptException','WebViewException')
+        'OSError','FileNotFoundError','PermissionError','BrowserGuard','JavascriptException','WebViewException',
+        'ImportError','ModuleNotFoundError')
     $hasError = $null -ne $SmokeData -and $null -ne $SmokeData.PSObject.Properties['error']
     $category = 'none'; $message = $null
     if ($hasError) {
@@ -68,8 +112,20 @@ function Write-ForgeSmokeDiagnostics {
     $phase = 'unrecorded'; $errorType = 'unclassified'
     if ($phases -contains $SmokeData.smoke_phase) { $phase = $SmokeData.smoke_phase }
     if ($types -contains $SmokeData.error_type) { $errorType = $SmokeData.error_type }
+    $checkpointPhase='unrecorded'; $checkpointErrorType='unclassified'; $checkpointErrorCategory='none'
+    if ($checkpointPhases -contains $CheckpointData.phase) { $checkpointPhase=$CheckpointData.phase }
+    if ($types -contains $CheckpointData.error_type) { $checkpointErrorType=$CheckpointData.error_type }
+    if (@('startup-failure','smoke-failure') -contains $CheckpointData.error_category) { $checkpointErrorCategory=$CheckpointData.error_category }
+    $states=@('missing','invalid','unsafe','too-large','ready','unrecorded')
+    if ($states -notcontains $ReportState) { $ReportState='unrecorded' }
+    if ($states -notcontains $CheckpointState) { $CheckpointState='unrecorded' }
+    $gates=@('process-timeout','report-missing','report-invalid','lifecycle-browser','library','builder-preview','standalone-preview')
+    if ($gates -notcontains $Gate) { $Gate='unclassified' }
+    if ($ExitCode -isnot [int] -and $ExitCode -isnot [long]) { $ExitCode=$null }
     $summary = [ordered]@{ gate=$Gate; phase=$phase; process_exit=$ExitCode; error_present=$hasError;
-        error_category=$category; error_type=$errorType; safe_error=$message; checks=[ordered]@{
+        error_category=$category; error_type=$errorType; safe_error=$message; report_state=$ReportState;
+        checkpoint_state=$CheckpointState; checkpoint_phase=$checkpointPhase;
+        checkpoint_error_type=$checkpointErrorType; checkpoint_error_category=$checkpointErrorCategory; checks=[ordered]@{
             ready=(Check-Status $SmokeData.ready ($SmokeData.ready -eq 'complete'))
             title=(Check-Status $SmokeData.title ($SmokeData.title -eq 'Forge'))
             composer=(Check-Status $SmokeData.ui.composer ($SmokeData.ui.composer -eq $true))
@@ -107,13 +163,20 @@ function Write-ForgeSmokeDiagnostics {
             standalone_bridge=(Check-Status $SmokeData.native_standalone_preview.bridge_exposed ($SmokeData.native_standalone_preview.bridge_exposed -eq 'undefined'))
             standalone_screenshot=(Check-Status $SmokeData.native_standalone_preview.screenshot_bytes ($SmokeData.native_standalone_preview.screenshot_bytes -gt 1000))
         } }
-    Write-Host ('Forge native smoke diagnostics: ' + ($summary | ConvertTo-Json -Compress -Depth 4))
+    $safe = $summary | ConvertTo-Json -Compress -Depth 4
+    if ($script:ForgeSmokeDiagnosticPath) {
+        try { [System.IO.File]::WriteAllText($script:ForgeSmokeDiagnosticPath, $safe, (New-Object System.Text.UTF8Encoding($false))) }
+        catch { } # Diagnostic persistence must not replace the native gate failure.
+    }
+    Write-Host ('Forge native smoke diagnostics: ' + $safe)
 }
 $target = (Resolve-Path -LiteralPath $Executable).Path
 $folder = [System.IO.Path]::GetFullPath($Output)
 if (Test-Path -LiteralPath $folder) { throw 'Smoke output must be a new disposable folder.' }
 New-Item -ItemType Directory -Path $folder | Out-Null
 $report = Join-Path $folder 'native-smoke.json'
+$checkpoint = Join-Path $folder 'native-smoke-checkpoint.json'
+$script:ForgeSmokeDiagnosticPath = Join-Path $folder 'native-smoke-diagnostics.json'
 $info = New-Object System.Diagnostics.ProcessStartInfo
 $info.FileName = $target
 $info.Arguments = '--smoke-test --native-browser-smoke'
@@ -122,12 +185,19 @@ $info.CreateNoWindow = $true
 $info.EnvironmentVariables['FORGE_DATA_DIR'] = Join-Path $folder 'state'
 $info.EnvironmentVariables['LOCAL_AI_SMOKE_PATH'] = $report
 $process = [System.Diagnostics.Process]::Start($info)
-if (-not $process.WaitForExit(120000)) { Write-ForgeSmokeDiagnostics $null 'process-timeout' $null; throw 'Native smoke timed out. Inspect the disposable session; no production process was stopped.' }
-if (-not (Test-Path -LiteralPath $report)) { Write-ForgeSmokeDiagnostics $null 'report-missing' $process.ExitCode; throw 'Native smoke did not produce a report. Check WebView2 and Windows runtime prerequisites.' }
-try { $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json }
-catch { Write-ForgeSmokeDiagnostics $null 'report-invalid' $process.ExitCode; throw 'Native smoke report is invalid.' }
-if ($result.error -or $result.title -ne 'Forge' -or -not $result.close_hides -or -not $result.native_browser.fixture_updated -or $result.native_browser.bridge_exposed -ne 'undefined') { Write-ForgeSmokeDiagnostics $result 'lifecycle-browser' $process.ExitCode; throw 'Native lifecycle/browser smoke failed. See the disposable report.' }
-if (-not $result.library.rendered -or $result.library.starter_skills -ne 24 -or $result.library.discover_cards -lt 24) { Write-ForgeSmokeDiagnostics $result 'library' $process.ExitCode; throw 'Packaged library smoke failed. See the disposable report.' }
-if (-not $result.native_preview.fixture_updated -or -not $result.native_preview.separate_controller -or -not $result.native_preview.separate_profile -or $result.native_preview.bridge_exposed -ne 'undefined' -or -not $result.native_preview.snapshot_guarded -or -not $result.native_preview.viewport_verified -or -not $result.native_preview.diagnostics_captured -or $result.native_preview.screenshot_bytes -le 1000 -or -not $result.native_preview.stopped) { Write-ForgeSmokeDiagnostics $result 'builder-preview' $process.ExitCode; throw 'Isolated native Builder preview smoke failed. See the disposable report.' }
-if (-not $result.native_standalone_preview.pane_visible -or -not $result.native_standalone_preview.fixture_updated -or -not $result.native_standalone_preview.without_builder -or $result.native_standalone_preview.bridge_exposed -ne 'undefined' -or $result.native_standalone_preview.screenshot_bytes -le 1000) { Write-ForgeSmokeDiagnostics $result 'standalone-preview' $process.ExitCode; throw 'Native standalone plan preview smoke failed. See the disposable report.' }
+if (-not $process.WaitForExit(120000)) {
+    $partial = Read-ForgeSmokeReport $report
+    $progress = Read-ForgeSmokeReport $checkpoint
+    Write-ForgeSmokeDiagnostics $partial.data 'process-timeout' $null $partial.state $progress.data $progress.state
+    throw 'Native smoke timed out. Inspect the disposable session; no production process was stopped.'
+}
+$partial = Read-ForgeSmokeReport $report
+$progress = Read-ForgeSmokeReport $checkpoint
+if ($partial.state -eq 'missing') { Write-ForgeSmokeDiagnostics $null 'report-missing' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native smoke did not produce a report. Check WebView2 and Windows runtime prerequisites.' }
+if ($partial.state -ne 'ready') { Write-ForgeSmokeDiagnostics $null 'report-invalid' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native smoke report is invalid.' }
+$result = $partial.data
+if ($result.error -or $result.title -ne 'Forge' -or -not $result.close_hides -or -not $result.native_browser.fixture_updated -or $result.native_browser.bridge_exposed -ne 'undefined') { Write-ForgeSmokeDiagnostics $result 'lifecycle-browser' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native lifecycle/browser smoke failed. See the disposable report.' }
+if (-not $result.library.rendered -or $result.library.starter_skills -ne 24 -or $result.library.discover_cards -lt 24) { Write-ForgeSmokeDiagnostics $result 'library' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Packaged library smoke failed. See the disposable report.' }
+if (-not $result.native_preview.fixture_updated -or -not $result.native_preview.separate_controller -or -not $result.native_preview.separate_profile -or $result.native_preview.bridge_exposed -ne 'undefined' -or -not $result.native_preview.snapshot_guarded -or -not $result.native_preview.viewport_verified -or -not $result.native_preview.diagnostics_captured -or $result.native_preview.screenshot_bytes -le 1000 -or -not $result.native_preview.stopped) { Write-ForgeSmokeDiagnostics $result 'builder-preview' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Isolated native Builder preview smoke failed. See the disposable report.' }
+if (-not $result.native_standalone_preview.pane_visible -or -not $result.native_standalone_preview.fixture_updated -or -not $result.native_standalone_preview.without_builder -or $result.native_standalone_preview.bridge_exposed -ne 'undefined' -or $result.native_standalone_preview.screenshot_bytes -le 1000) { Write-ForgeSmokeDiagnostics $result 'standalone-preview' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native standalone plan preview smoke failed. See the disposable report.' }
 Write-Host 'Native workspace, library, HUD, background close, research browser and isolated Builder preview fixtures passed.'
