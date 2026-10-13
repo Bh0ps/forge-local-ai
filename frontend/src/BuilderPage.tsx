@@ -35,6 +35,15 @@ function PreviewPane({ preview, reload = 0, onError }: {preview: BuilderPreview;
     let disposed = false, pending = false, dirty = false, last = '';
     let frame = 0;
     function schedule() { if (!disposed && !frame) frame = requestAnimationFrame(() => { frame = 0; void bind(); }); }
+    function openPane() {
+      if (disposed || !pane.current) return;
+      const r = pane.current.getBoundingClientRect();
+      if (!document.querySelector('.modal-backdrop, dialog[open]') &&
+          (r.y < 0 || r.x < 0 || r.right > innerWidth + 1 || r.bottom > innerHeight - 28)) {
+        pane.current.scrollIntoView?.({block: 'start', inline: 'nearest', behavior: 'instant'});
+      }
+      last = ''; schedule();
+    }
     async function bind() {
       if (disposed || !pane.current) return;
       if (pending) { dirty = true; return; }
@@ -61,8 +70,8 @@ function PreviewPane({ preview, reload = 0, onError }: {preview: BuilderPreview;
     const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(schedule) : null;
     resize?.observe(pane.current);
     const observer = new MutationObserver(schedule); observer.observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'open', 'hidden']});
-    window.addEventListener('resize', schedule); window.addEventListener('scroll', schedule, true); schedule();
-    return () => { disposed = true; cancelAnimationFrame(frame); resize?.disconnect(); observer.disconnect(); window.removeEventListener('resize', schedule); window.removeEventListener('scroll', schedule, true); void api('preview_browser_hide').catch(() => {}); };
+    window.addEventListener('resize', schedule); window.addEventListener('scroll', schedule, true); window.addEventListener('forge:preview-open', openPane); openPane();
+    return () => { disposed = true; cancelAnimationFrame(frame); resize?.disconnect(); observer.disconnect(); window.removeEventListener('resize', schedule); window.removeEventListener('scroll', schedule, true); window.removeEventListener('forge:preview-open', openPane); void api('preview_browser_hide').catch(() => {}); };
   }, [preview.id, preview.status]);
   if (!isNative()) return <iframe key={`${preview.id}-${reload}`} className="builder-preview-frame" title="Local application preview" src={preview.url || undefined} sandbox="allow-scripts allow-forms allow-same-origin" />;
   return <div className="builder-preview-frame" id="forge-preview-panel" data-forge-browser-panel="forge-preview-panel" ref={pane}><p>Opening the separate local preview…</p></div>;

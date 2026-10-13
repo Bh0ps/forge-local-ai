@@ -145,13 +145,25 @@ class EmbeddedWebView2Page(WebView2Page):
             self.hide()
             raise
 
+    def _contained_layout(self):
+        snapshot = self._layout()
+        viewport = snapshot.get('viewport') or {}
+        try:
+            # This only decides whether to request the frontend's open/scroll
+            # action. bind still validates against the real native client/DPI.
+            validate_bounds({'panel_id': self.panel_id}, snapshot,
+                (0, 0, viewport.get('width', 0), viewport.get('height', 0)), self.panel_id)
+            return True
+        except (BrowserGuard, TypeError):
+            return False
+
     def show(self, activate=True):
-        if not self._layout().get('visible'):
+        if not self._contained_layout():
             event = 'forge:preview-open' if self.panel_id == 'forge-preview-panel' else 'forge:browser-open'
             self._main_evaluate('window.dispatchEvent(new CustomEvent('+json.dumps(event)+'));true')
             deadline = time.monotonic()+3
             while time.monotonic()<deadline:
-                if self._layout().get('visible'): break
+                if self._contained_layout(): break
                 time.sleep(.05)
         self.bind()
         if activate:

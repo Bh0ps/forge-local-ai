@@ -75,7 +75,11 @@ classified as check outputs. Tracked source files and conflicting existing
 source files remain part of verification. Older command sessions need a fresh
 check to establish an automatic source snapshot.
 
-Research and preview browsers ignore stale navigation completions and guard pending Back/Forward/Reload actions, so an older page load cannot make a new request appear ready.
+Research and preview browsers ignore stale navigation completions and guard
+pending Back/Forward/Reload actions, so an older page load cannot make a new
+request appear ready. Explicitly opening a native preview brings its panel into
+view on short windows. Ordinary scrolling still hides a panel outside the
+workspace, and native bounds continue to be checked independently.
 
 The Forge-authored dependency attribution checksum matches a clean LF source
 checkout. Upstream license text is unchanged.
@@ -88,16 +92,14 @@ that backup; older applications cannot open a migrated workspace.
 
 Validation on Windows, 12–13 October 2026:
 
-- Backend cumulative coverage: 1,818 passed, one skipped across 1,819 tests.
-  Prior coverage had 1,813 passes and one skip across 1,814 tests; the final
-  native/browser/integration check passed 73 cases, including five additional
-  navigation/history regressions. Earlier focused checks passed all 61
-  continuation/delegation cases and all 22 license-collection cases.
-  One legacy compaction fixture exceeded its eight-second deadline under parallel
-  load and passed unchanged in 3.43 seconds when rerun serially.
-- Frontend: 204 tests passed across 20 files; TypeScript and production Vite build passed.
-- Packaged Windows: workspace navigation, Library, HUD, background close,
-  research browser isolation and isolated Builder/standalone previews passed.
+- The Windows release gate runs all backend tests in four disjoint shards,
+  frontend tests, TypeScript compilation and a production Vite build.
+- Packaged Windows checks exercise workspace navigation, Library, HUD,
+  background close, research browser isolation and Builder/standalone previews
+  on disposable state. A failed native check prevents package publication.
+- Release checks verify compiled source, package hashes, dependency notices and
+  absence of personal state or credentials. The exact results and tested commit
+  are recorded in the release notes and [Windows CI runs](https://github.com/Bh0ps/forge-local-ai/actions/workflows/windows-ci.yml).
 - Live OpenRouter: a synthetic fixture completed two rounds and one tool call,
   pinning `dots-studio/dots-3-note-preview:free` served by AtlasCloud. Only
   synthetic task content was used.
@@ -107,7 +109,6 @@ Validation on Windows, 12–13 October 2026:
 - Native motion: the real Windows host paused the welcome animation on tray
   hide and minimize, and resumed it on restore, even though WebView2 continued
   to report the document as visible.
-- Compiled Python: 60 bundled modules/scripts matched the final source.
 
 The synthetic live check verifies tool continuation for the tested route;
 model quality and future free-provider availability can vary.

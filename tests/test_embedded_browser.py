@@ -77,3 +77,30 @@ def test_invalid_browser_panel_request_has_no_navigation_effect(tmp_path):
         with pytest.raises(BrowserGuard): browser.dispatch('show', data)
         assert not browser.view.visible and not browser.view.effects
     finally: browser.shutdown()
+
+
+def test_explicit_preview_open_requests_below_fold_pane_and_preserves_contained_layout():
+    from embedded_browser import EmbeddedWebView2Page
+    snapshot = layout()
+    snapshot['rect'].update(y=720, height=240)
+    page = EmbeddedWebView2Page.__new__(EmbeddedWebView2Page)
+    page.panel_id = 'forge-preview-panel'
+    page._layout = lambda: deepcopy(snapshot)
+    opened, bound = [], []
+    def dispatch(script):
+        opened.append(script)
+        snapshot['visible'] = True
+        snapshot['rect']['y'] = 100
+        return True
+    def bind():
+        bound.append(validate_bounds({'panel_id': page.panel_id}, snapshot,
+            (0, 0, 1200, 800), page.panel_id))
+    page._main_evaluate, page.bind = dispatch, bind
+    page.show(activate=False)
+    assert len(opened) == 1 and 'forge:preview-open' in opened[0]
+    assert bound[-1] == (800, 100, 400, 240)
+    page.show(activate=False)
+    assert len(opened) == 1 and len(bound) == 2
+    snapshot['visible'] = False
+    page.show(activate=False)
+    assert len(opened) == 2 and len(bound) == 3

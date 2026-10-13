@@ -679,6 +679,10 @@ def main():
                             deadline = time.monotonic()+10
                             while not api._window.evaluate_js("!!document.getElementById('forge-preview-panel')") and time.monotonic()<deadline:
                                 time.sleep(.05)
+                            # On short desktops the controls can put the pane
+                            # below its native owner's viewport. Scroll as a user
+                            # would; the frontend still validates/binds real bounds.
+                            api._window.evaluate_js("document.getElementById('forge-preview-panel')?.scrollIntoView({block:'start',inline:'nearest',behavior:'instant'});true")
                             # The actual frontend sizes and binds the child to
                             # host-inspected viewport bounds.
                             deadline = time.monotonic()+20

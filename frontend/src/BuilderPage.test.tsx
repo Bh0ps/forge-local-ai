@@ -56,18 +56,38 @@ describe('Builder brief and completion evidence', () => {
     await waitFor(() => expect(call).toHaveBeenCalledWith('artifact_save_as', {id: 'artifact'}));
     expect(screen.getByText(/Visual inspection pending/)).toBeTruthy();
   });
-  it('keeps the native preview inside its owner viewport and updates after parent scrolling', async () => {
-    let top = 300;
+  it('opens short native previews on request while preserving ordinary user scrolling', async () => {
+    let top = innerHeight - 100;
     const preview = {id: 'preview', builder_id: 'builder', status: 'ready', url: 'http://127.0.0.1:1234/'};
     const call = bridge({builder_get: {...record, previews: [preview]}, preview_browser_status: {builder_id: 'builder'}, preview_browser_show: {ok: true}, preview_browser_hide: {ok: true}, preview_status: {previews: [preview]}});
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function(this: HTMLElement) {
       const height = this.id === 'forge-preview-panel' ? Number.parseInt(this.style.height) || 735 : 0;
       return {x: 100, y: top, top, left: 100, width: 500, height, right: 600, bottom: top + height, toJSON: () => ({})} as DOMRect;
     });
-    render(<BuilderPage projects={[project]}/>); await screen.findByLabelText('Objective');
-    await userEvent.click(screen.getByRole('button', {name: 'Preview'}));
-    await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_show', expect.objectContaining({id: 'preview', rect: expect.objectContaining({y: 300, height: innerHeight - 328})})));
-    top = 220; fireEvent.scroll(window);
-    await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_show', expect.objectContaining({rect: expect.objectContaining({y: 220, height: innerHeight - 248})})));
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
+    const scroll = vi.fn(function(this: HTMLElement) {if (this.id === 'forge-preview-panel') {top = 300; fireEvent.scroll(window);}});
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {configurable: true, value: scroll});
+    try {
+      const view = render(<BuilderPage projects={[project]}/>); await screen.findByLabelText('Objective');
+      await userEvent.click(screen.getByRole('button', {name: 'Preview'}));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_show', expect.objectContaining({id: 'preview', rect: expect.objectContaining({y: 300, height: innerHeight - 328})})));
+      expect(scroll).toHaveBeenCalledTimes(1);
+      expect(scroll).toHaveBeenLastCalledWith({block: 'start', inline: 'nearest', behavior: 'instant'});
+      top = innerHeight - 100; fireEvent.scroll(window);
+      await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_hide', {}));
+      expect(document.getElementById('forge-preview-panel')?.getBoundingClientRect().height).toBeGreaterThan(0);
+      expect(scroll).toHaveBeenCalledTimes(1);
+      const shown = call.mock.calls.filter(([action]) => action === 'preview_browser_show').length;
+      await act(async () => {window.dispatchEvent(new Event('forge:preview-open'));});
+      await waitFor(() => expect(call.mock.calls.filter(([action]) => action === 'preview_browser_show').length).toBe(shown + 1));
+      expect(scroll).toHaveBeenCalledTimes(2);
+      top = 220; fireEvent.scroll(window);
+      await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_show', expect.objectContaining({rect: expect.objectContaining({y: 220, height: innerHeight - 248})})));
+      expect(scroll).toHaveBeenCalledTimes(2);
+      view.unmount();
+    } finally {
+      if (descriptor) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', descriptor);
+      else delete (HTMLElement.prototype as {scrollIntoView?: unknown}).scrollIntoView;
+    }
   });
 });
