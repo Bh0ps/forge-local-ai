@@ -17,11 +17,14 @@ async function ready() { await act(async () => { window.dispatchEvent(new Event(
 
 describe('Forge workspace', () => {
   beforeEach(() => { vi.clearAllMocks(); });
-  it('keeps the model list closed and loads capabilities only when opened', async () => {
+  it('keeps the model list closed, reads selected context metadata, and loads other model capabilities only when opened', async () => {
     const { call } = bridge(); render(<App />); await ready();
-    expect(screen.queryByRole('dialog', { name: 'Choose model' })).toBeNull(); expect(call.mock.calls.some(([action]) => action === 'show')).toBe(false);
+    expect(screen.queryByRole('dialog', { name: 'Choose model' })).toBeNull();
+    await waitFor(() => expect(call).toHaveBeenCalledWith('show', { model: 'vision-coder:9b', provider_id: 'ollama' }));
+    expect(call.mock.calls.filter(([action]) => action === 'show').every(([, data]) => data?.model === 'vision-coder:9b')).toBe(true);
     await userEvent.click(screen.getByRole('button', { name: 'vision coder:9b' }));
     expect(await screen.findByRole('dialog', { name: 'Choose model' })).toBeTruthy(); await waitFor(() => expect(screen.getAllByText('Vision').length).toBe(2));
+    expect(call).toHaveBeenCalledWith('show', { model: 'large-coder:27b', provider_id: 'ollama' });
     expect(screen.getAllByText('128K context').length).toBe(2);
   });
   it('preserves a draft across navigation and HUD switching', async () => {
@@ -37,18 +40,25 @@ describe('Forge workspace', () => {
     const { call } = bridge({ settings: (data: Record<string, unknown>) => ({ ...DEFAULT_SETTINGS, ...data }) }); render(<App />); await ready();
     await userEvent.click(screen.getByRole('button', { name: 'Settings' })); const range = screen.getByRole('slider', { name: /Context window/ }) as HTMLInputElement;
     expect(range.min).toBe('2048'); expect(range.max).toBe('262144'); expect(range.step).toBe('2048');
-    fireEvent.change(range, { target: { value: '262144' } }); await waitFor(() => expect(call).toHaveBeenCalledWith('settings', { context: 262144 }));
+    fireEvent.change(range, { target: { value: '262144' } }); fireEvent.pointerUp(range);
+    await waitFor(() => expect(call).toHaveBeenCalledWith('settings', { context: 262144, adaptive_context_locked: true }));
   });
   it('keeps newer context selections while older queued saves return', async () => {
     const pending: { context: number; resolve: (value: unknown) => void }[] = [];
-    bridge({ settings: (data: Record<string, unknown>) => new Promise(resolve => pending.push({ context: Number(data.context), resolve })) }); render(<App />); await ready();
+    const { call } = bridge({ settings: (data: Record<string, unknown>) => new Promise(resolve => pending.push({ context: Number(data.context), resolve })) }); render(<App />); await ready();
     await userEvent.click(screen.getByRole('button', { name: 'Settings' })); const range = screen.getByRole('slider', { name: /Context window/ }) as HTMLInputElement;
-    fireEvent.change(range, { target: { value: '4096' } }); fireEvent.change(range, { target: { value: '8192' } });
-    await waitFor(() => expect(pending.length).toBe(1)); await act(async () => { pending.shift()!.resolve({ ...DEFAULT_SETTINGS, context: 4096 }); });
+    fireEvent.change(range, { target: { value: '4096' } }); fireEvent.pointerUp(range);
+    await waitFor(() => expect(pending.length).toBe(1)); expect(pending[0].context).toBe(4096);
+    fireEvent.change(range, { target: { value: '8192' } }); fireEvent.pointerUp(range); expect(pending).toHaveLength(1);
+    await act(async () => { pending.shift()!.resolve({ ...DEFAULT_SETTINGS, context: 4096, adaptive_context_locked: true }); });
     await waitFor(() => expect(pending.length).toBe(1)); expect(range.value).toBe('8192');
-    fireEvent.change(range, { target: { value: '32768' } }); await act(async () => { pending.shift()!.resolve({ ...DEFAULT_SETTINGS, context: 8192 }); });
+    fireEvent.change(range, { target: { value: '32768' } }); fireEvent.pointerUp(range); expect(pending).toHaveLength(1);
+    await act(async () => { pending.shift()!.resolve({ ...DEFAULT_SETTINGS, context: 8192, adaptive_context_locked: true }); });
     await waitFor(() => expect(pending.length).toBe(1)); expect(range.value).toBe('32768');
-    await act(async () => { const final = pending.shift()!; expect(final.context).toBe(32768); final.resolve({ ...DEFAULT_SETTINGS, context: final.context }); }); expect(range.value).toBe('32768');
+    await act(async () => { const final = pending.shift()!; expect(final.context).toBe(32768); final.resolve({ ...DEFAULT_SETTINGS, context: final.context, adaptive_context_locked: true }); }); expect(range.value).toBe('32768');
+    expect(call.mock.calls.filter(([action]) => action === 'settings').map(([, data]) => data)).toEqual([
+      { context: 4096, adaptive_context_locked: true }, { context: 8192, adaptive_context_locked: true }, { context: 32768, adaptive_context_locked: true },
+    ]);
   });
   it('never silently selects the first model when no preference was saved', async () => {
     bridge({ bootstrap: { settings: DEFAULT_SETTINGS, projects: [], chats: [], runs: [], capabilities: {} } }); render(<App />); await ready();
@@ -57,7 +67,8 @@ describe('Forge workspace', () => {
   it('routes /todo through the shared command registry and opens the durable goal panel', async () => {
     const { call } = bridge({ command: { id: 'todo-run', chat_id: 'todo-chat', status: 'running', mode: 'goal' }, poll: { events: [], finished: false, status: 'running' }, goals: { goals: [] } }); render(<App />); await ready();
     await userEvent.type(screen.getByRole('textbox', { name: 'Message Forge' }), '/todo Build the feature'); await userEvent.click(screen.getByRole('button', { name: 'Send message' }));
-    await waitFor(() => expect(call).toHaveBeenCalledWith('command', expect.objectContaining({ text: '/todo Build the feature' }))); expect(await screen.findByText('Active goals')).toBeTruthy(); expect(screen.getByRole('button', { name: 'Stop generation' })).toBeTruthy();
+    await waitFor(() => expect(call).toHaveBeenCalledWith('command', expect.objectContaining({ text: 'Build the feature', command_mode: 'todo' }))); expect(await screen.findByText('Active goals')).toBeTruthy(); expect(screen.getByRole('button', { name: 'Stop generation' })).toBeTruthy();
+    expect(call.mock.calls.filter(([action]) => action === 'command')).toHaveLength(1);
   });
   it('rejects backend errors instead of showing a fake success', async () => {
     bridge({ bad_action: { error: 'Permission denied' } }); await expect(api('bad_action')).rejects.toThrow('Permission denied');

@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from test_forge_core import service
@@ -61,7 +64,8 @@ def test_bootstrap_and_goal_views_share_guidance_and_progress(tmp_path):
         goal,run=tracked(svc)
         svc.store.update_run(run['id'],planner_assignment={'state':'unavailable','reason':'Advisory deadline'})
         active=svc.dispatch('goals',{'active_only':True})['goals']
-        assert svc.bootstrap()['version']=='5.1.3' and svc.bootstrap()['goals']==active
+        declared=json.loads((Path(__file__).resolve().parents[1]/'frontend/package.json').read_text(encoding='utf-8'))['version']
+        assert svc.bootstrap()['version']==declared and svc.bootstrap()['goals']==active
         detailed=svc.dispatch('goal_get',{'id':goal['id']})
         assert detailed['planner_assignment']['state']=='unavailable'
         assert detailed['progress_summary']['total']==2 and detailed['progress_summary']['verified']==0

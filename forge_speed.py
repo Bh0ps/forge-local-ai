@@ -12,8 +12,16 @@ class TokenSpeedEstimator:
         if not text: return
         now=self.clock() if now is None else now
         if not math.isfinite(now): return
+        self.observe_bytes(len(text.encode('utf-8')),now=now)
+
+    def observe_bytes(self,count,now=None):
+        """Reuse an already counted UTF-8 fragment without retaining its text."""
+        if type(count) is not int or count<0: raise ValueError('Output byte count must be a nonnegative integer.')
+        if not count: return
+        now=self.clock() if now is None else now
+        if not math.isfinite(now): return
         if self.first is None: self.first=now
-        self.total+=len(text.encode('utf-8'))/4
+        self.total+=count/4
         self.samples.append((now,self.total))
         # Retain the last point before the cutoff for a stable full interval.
         while len(self.samples)>2 and self.samples[1][0]<now-self.window: self.samples.popleft()

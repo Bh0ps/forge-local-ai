@@ -180,7 +180,13 @@ class ForgeStore(Store):
         if archived is not None and type(archived) is not bool:
             raise ValueError('Archived filter must be true, false or null.')
         with self._connection() as db:
-            where=[]; parameters=[]
+            where=["NOT (EXISTS (SELECT 1 FROM runs h WHERE h.chat_id=chats.id AND h.parent_id IS NOT NULL "
+                "AND COALESCE(json_extract(h.data,'$.helper_chat_owned'),1)=1 "
+                "AND CAST(json_extract(h.data,'$.request_message_id') AS INTEGER)=(SELECT MIN(m.id) FROM messages m WHERE m.chat_id=chats.id)) "
+                "AND NOT EXISTS (SELECT 1 FROM runs u WHERE u.chat_id=chats.id AND u.parent_id IS NULL) "
+                "AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id=chats.id AND m.role='user' "
+                "AND m.id NOT IN (SELECT CAST(json_extract(h.data,'$.request_message_id') AS INTEGER) FROM runs h WHERE h.chat_id=chats.id) "
+                "AND COALESCE(json_extract(m.metadata,'$.interaction_run_id'),'') NOT IN (SELECT h.id FROM runs h WHERE h.chat_id=chats.id)))"]; parameters=[]
             if project_id is not None:
                 self._project(db,project_id); where.append('project_id=?'); parameters.append(project_id)
             if archived is not None:
@@ -421,6 +427,8 @@ class ForgeStore(Store):
                     return run,False
             if chat_id:
                 chat=self._chat(db,chat_id)
+                if data.get('parent_id'):
+                    data['helper_chat_owned']=False
                 if chat.get('archived'): raise ValueError('Restore this archived chat before starting a run.')
                 if chat.get('project_id')!=data.get('project_id'): raise ValueError('The chat project changed. Refresh before starting.')
             else:
@@ -429,6 +437,8 @@ class ForgeStore(Store):
                 db.execute('INSERT INTO chats(id,project_id,title,model,created_at,updated_at) VALUES(?,?,?,?,?,?)',
                     (chat_id,data.get('project_id'),data['request'].splitlines()[0][:70],data['settings']['model'],stamp,stamp))
                 chat=self._chat(db,chat_id)
+                if data.get('parent_id'):
+                    data['helper_chat_owned']=True
             active=db.execute("SELECT id FROM runs WHERE chat_id=? AND status NOT IN ('completed','cancelled','failed','paused','interrupted')",(chat_id,)).fetchone()
             if active: raise ValueError('This chat already has an active run.')
             if data.get('goal_id') and not data.get('parent_id'):

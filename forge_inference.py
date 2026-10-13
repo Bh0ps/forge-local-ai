@@ -114,17 +114,21 @@ class InferenceQueue:
 
 class OllamaProvider:
     def __init__(self,core):
-        self.core=core; self.thinking_cache={}; self.metadata_lock=threading.RLock()
+        self.core=core; self.thinking_cache={}; self.metadata_lock=threading.RLock(); self.metadata_generation=0
     def models(self): return self.core.dispatch('models',{}).get('models',[])
     def capabilities(self,model):
+        with self.metadata_lock: generation=self.metadata_generation
         info=self.core.dispatch('show',{'model':model})
         with self.metadata_lock:
-            self.thinking_cache.pop(model,None)
-            self.thinking_cache[model]=thinking_metadata(info)
-            if len(self.thinking_cache)>64: self.thinking_cache.pop(next(iter(self.thinking_cache)))
+            if generation==self.metadata_generation:
+                self.thinking_cache.pop(model,None)
+                self.thinking_cache[model]=thinking_metadata(info)
+                if len(self.thinking_cache)>64: self.thinking_cache.pop(next(iter(self.thinking_cache)))
         return info
     def invalidate_metadata(self):
-        with self.metadata_lock: self.thinking_cache.clear()
+        with self.metadata_lock:
+            self.metadata_generation+=1
+            self.thinking_cache.clear()
     def estimate_tokens(self,messages,tools): return estimated_prompt_tokens(messages,tools,AGENT_SYSTEM_PROMPT)
     def generate(self,data,cancel):
         with self.metadata_lock: cached=self.thinking_cache.get(data['model'])
@@ -148,7 +152,34 @@ class CompatibleProvider:
             result=client.get(self.base+'/models',headers=self._headers()); result.raise_for_status()
             return [{'name':m['id'],'model':m['id'],'capabilities':self.config.get('capabilities',[])} for m in result.json().get('data',[])]
     def capabilities(self,model):
-        return {'capabilities':self.config.get('capabilities',[]),'model_info':{'local.context_length':self.config.get('context_limit',32768)}}
+        limit=self.config.get('context_limit')
+        configured=type(limit) is int and limit>0
+        result={'capabilities':self.config.get('capabilities',[]),
+                'model_info':{'local.context_length':limit} if configured else {},
+                'context_limit_source':'configured' if configured else 'unknown'}
+        if self.config.get('preset_id')=='lm-studio':
+            from forge_provider_metadata import fetch_provider_metadata
+            token=self.vault.get(self.config['credential_ref']) if self.vault and self.config.get('credential_ref') else None
+            facts=fetch_provider_metadata(self.config,token=token,model=model)
+            result['metadata_state']=facts['state']
+            if facts['state']=='available' and len(facts['models'])==1:
+                fact=facts['models'][0]
+                result['advertised_metadata']=fact
+                instances=fact['loaded_instances']
+                exact=[item for item in instances if item['model']==model]
+                matching=exact
+                effective=matching[0]['context_length'] if len(matching)==1 else None
+                if effective is not None:
+                    result['model_info']['local.context_length']=min(limit,effective) if configured else effective
+                    result['context_limit_source']='loaded_instance'
+                options=fact['reasoning_options']
+                if options:
+                    # These declarations belong to LM Studio's native API.
+                    # Its chat-completions wire does not advertise a reasoning
+                    # control; never send guessed parameters or enable tools.
+                    result['reasoning']={'control_supported':False, 'advertised_options':options,
+                        'mandatory':'off' not in options and any(option!='off' for option in options)}
+        return result
     def estimate_tokens(self,messages,tools): return estimated_prompt_tokens(messages,tools,AGENT_SYSTEM_PROMPT)
     def prepare_body(self,data,body): return body
     def generate(self,data,cancel):
@@ -305,32 +336,79 @@ class ProviderPool:
         self.instances={}; self.lock=threading.RLock(); self.resource_queues={}
         self.capability_cache={}
         self.model_cache={}
+        self.metadata_epoch=0; self.metadata_revisions={}; self.metadata_pending={}
+        self.metadata_wait_seconds=15
 
     def models(self,identifier='ollama',refresh=False):
-        provider=self.provider(identifier)
-        signature=self.instances.get(identifier,{}).get('signature','default')
-        key=(identifier,signature)
-        with self.lock:
-            cached=self.model_cache.get(key)
-            if not refresh and cached and time.monotonic()-cached[0]<30: return json.loads(json.dumps(cached[1]))
-        result=provider.models()
-        with self.lock: self.model_cache[key]=(time.monotonic(),result)
-        return json.loads(json.dumps(result))
+        return self._metadata(identifier or 'ollama', None, refresh)
 
     def capabilities(self,identifier,model,refresh=False):
-        provider=self.provider(identifier)
-        signature=self.instances.get(identifier,{}).get('signature','default')
-        key=(identifier,model,signature)
-        with self.lock:
-            cached=self.capability_cache.get(key)
-            if not refresh and cached and time.monotonic()-cached[0]<60:
-                return json.loads(json.dumps(cached[1]))
-        result=provider.capabilities(model)
-        with self.lock: self.capability_cache[key]=(time.monotonic(),result)
-        return json.loads(json.dumps(result))
+        return self._metadata(identifier or 'ollama', model, refresh)
+
+    def _metadata(self,identifier,model,refresh):
+        """Share concurrent reads; an invalidated reply cannot revive old state."""
+        for _ in range(4):
+            provider=self.provider(identifier)
+            with self.lock:
+                instance=self.instances.get(identifier,{})
+                if identifier!='ollama' and instance and instance.get('provider') is not provider:
+                    continue
+                signature=instance.get('signature','default')
+                generation=(self.metadata_epoch,self.metadata_revisions.get(identifier,0))
+                cache=self.model_cache if model is None else self.capability_cache
+                key=(identifier,signature) if model is None else (identifier,model,signature)
+                cached=cache.get(key)
+                if not refresh and cached and cached[2] is provider and time.monotonic()-cached[0]<(30 if model is None else 60):
+                    return json.loads(json.dumps(cached[1]))
+                # A supplied stable protocol adapter may have no configuration
+                # registry entry. Bind both cache and flight to its exact object
+                # while retaining signature/generation checks for real profiles.
+                pending_key=(model is not None,key,generation,id(provider))
+                pending=self.metadata_pending.get(pending_key)
+                owner=pending is None
+                if owner:
+                    if len(self.metadata_pending)>=64:
+                        raise ValueError('Model metadata is busy. Retry shortly.')
+                    pending={'event':threading.Event(),'provider':provider}
+                    self.metadata_pending[pending_key]=pending
+            if not owner:
+                if not pending['event'].wait(self.metadata_wait_seconds):
+                    raise ValueError('Model metadata took too long. Retry after checking the engine.')
+                current=self.provider(identifier)
+                with self.lock:
+                    if current is not provider or generation!=(self.metadata_epoch,self.metadata_revisions.get(identifier,0)):
+                        continue
+                if 'error' in pending: raise pending['error']
+                if 'result' in pending: return json.loads(json.dumps(pending['result']))
+                continue
+            try:
+                result=provider.models() if model is None else provider.capabilities(model)
+                result=json.loads(json.dumps(result))
+                current=self.provider(identifier)
+                with self.lock:
+                    if current is not provider or generation!=(self.metadata_epoch,self.metadata_revisions.get(identifier,0)):
+                        raise ValueError('Provider configuration changed during metadata loading. Retry with the current engine.')
+                    cache[key]=(time.monotonic(),result,provider)
+                    while len(cache)>(32 if model is None else 128): cache.pop(next(iter(cache)))
+                    pending['result']=result
+                return json.loads(json.dumps(result))
+            except BaseException as exc:
+                pending['error']=exc
+                raise
+            finally:
+                with self.lock:
+                    self.metadata_pending.pop(pending_key,None)
+                    pending['event'].set()
+        raise ValueError('Provider configuration changed during metadata loading. Retry with the current engine.')
 
     def invalidate(self,identifier=None):
         with self.lock:
+            if identifier: self.metadata_revisions[identifier]=self.metadata_revisions.get(identifier,0)+1
+            else: self.metadata_epoch+=1; self.metadata_revisions.clear()
+            for key,pending in list(self.metadata_pending.items()):
+                if not identifier or key[1][0]==identifier:
+                    self.metadata_pending.pop(key,None)
+                    pending['event'].set()
             self.capability_cache={k:v for k,v in self.capability_cache.items() if identifier and k[0]!=identifier}
             self.model_cache={k:v for k,v in self.model_cache.items() if identifier and k[0]!=identifier}
             providers=([self.ollama] if not identifier or identifier=='ollama' else [])+[
@@ -364,7 +442,7 @@ class ProviderPool:
         return [dict(id='ollama',name='Ollama',kind='ollama',url=self.core.base,managed=False)]+self.store.entities('providers')
     def generate(self,data,cancel,run,purpose='main',background=False):
         identifier=uuid4().hex; provider_id=data.get('provider_id','ollama'); provider=self.provider(provider_id)
-        final={}; text=''; call_bytes=0; submitted=time.monotonic(); start=None; first=None; visible=None
+        final={}; output_bytes=0; encoding_error=None; call_bytes=0; submitted=time.monotonic(); start=None; first=None; visible=None
         from forge_speed import TokenSpeedEstimator
         meter=TokenSpeedEstimator(); last_speed=0
         try:
@@ -390,9 +468,17 @@ class ProviderPool:
                     if message.get('content') and visible is None: visible=time.monotonic()
                     if message.get('tool_calls'):
                         call_bytes=min(2_000_000,call_bytes+len(json.dumps(message['tool_calls'],ensure_ascii=False).encode('utf-8')))
-                    text+=content
                     if content:
-                        meter.observe((packet.get('message',{}).get('content') or '')+(packet.get('message',{}).get('thinking') or ''))
+                        try:
+                            fragment_bytes=len(content.encode('utf-8'))
+                        except UnicodeEncodeError as error:
+                            # Preserve malformed-output failure and final accounting
+                            # behavior without keeping the prior valid transcript.
+                            encoding_error=error
+                            meter.observe(content)
+                        else:
+                            output_bytes+=fragment_bytes
+                            meter.observe_bytes(fragment_bytes)
                         moment=time.monotonic(); estimate=meter.estimate(moment)
                         if estimate is not None and run.get('id') and moment-last_speed>=.5:
                             self.store.event(run['id'],'stream_speed',tps=estimate,estimated=True,
@@ -408,6 +494,7 @@ class ProviderPool:
             prompt=final.get('prompt_eval_count',usage.get('prompt_tokens'))
             output=final.get('eval_count',usage.get('completion_tokens'))
             if start is None: prompt=0; output=0
+            if output is None and encoding_error is not None: raise encoding_error
             details=usage.get('prompt_tokens_details')
             details=details if isinstance(details,dict) else {}
             cached=final.get('prompt_eval_cached_count',details.get('cached_tokens',0))
@@ -431,7 +518,7 @@ class ProviderPool:
             self.store.record_usage(dict(id=identifier,run_id=run.get('id'),project_id=run.get('project_id'),
                 provider=provider_id,model=final.get('provider_model') or data['model'],purpose=purpose,
                 input_tokens=prompt if prompt is not None else provider.estimate_tokens(data['messages'],data.get('tools',[])),
-                cached_input_tokens=cached,output_tokens=output if output is not None else (len(text.encode('utf-8'))+call_bytes+2)//3,
+                cached_input_tokens=cached,output_tokens=output if output is not None else (output_bytes+call_bytes+2)//3,
                 estimated=estimated,decode_seconds=decode,total_seconds=duration,cancelled=cancel.is_set(),
                 phase_timings=phase_timings,token_breakdown=data.get('token_breakdown',{})))
             speed=output/decode if output is not None and decode>0 else None
@@ -441,8 +528,8 @@ class ProviderPool:
                                  phase_timings=phase_timings,token_breakdown=data.get('token_breakdown',{}),
                                  requested_model=data['model'],actual_model=final.get('provider_model') or data['model'],response_provider=final.get('response_provider'))
 
-def memory_telemetry():
-    result={'gpus':[],'ram_available':None}
+def _sample_memory_telemetry():
+    result={'gpus':[],'ram_available':None,'probe_state':'unavailable'}
     try:
         output=subprocess.run(['nvidia-smi','--query-gpu=name,memory.total,memory.used,utilization.gpu',
                                '--format=csv,noheader,nounits'],capture_output=True,text=True,timeout=5,
@@ -451,12 +538,62 @@ def memory_telemetry():
             for line in output.stdout.splitlines():
                 name,total,used,util=[p.strip() for p in line.split(',')]
                 result['gpus'].append(dict(name=name,total_mb=int(total),used_mb=int(used),utilization=int(util)))
-    except (OSError,ValueError,subprocess.TimeoutExpired): pass
+            result['probe_state']='ok' if result['gpus'] else 'unavailable'
+        else: result['probe_state']='failed'
+    except OSError: pass
+    except (ValueError,subprocess.TimeoutExpired): result['probe_state']='failed'; result['gpus']=[]
     try:
         import psutil
         memory=psutil.virtual_memory(); result.update(ram_available=memory.available,ram_total=memory.total)
-    except ImportError: pass
+    except (ImportError,OSError): pass
     return result
+
+
+class MemoryTelemetrySampler:
+    """Throttle GPU subprocesses without serializing callers behind refresh I/O."""
+    def __init__(self, sample=None, clock=None):
+        self.sample=sample or _sample_memory_telemetry; self.clock=clock or time.monotonic
+        self.lock=threading.Lock(); self.cached=None; self.sampled_at=0; self.pending=None
+
+    def read(self):
+        with self.lock:
+            age=max(0,self.clock()-self.sampled_at)
+            if self.cached is not None and age<5:
+                return {**json.loads(json.dumps(self.cached)), 'sample_age_seconds':age, 'stale':False}
+            if self.pending is not None:
+                if self.cached is not None:
+                    # Stale GPU values never masquerade as a fresh hardware
+                    # decision while another caller samples the current state.
+                    return {**json.loads(json.dumps(self.cached)), 'probe_state':'refreshing',
+                            'sample_age_seconds':age, 'stale':True}
+                pending=self.pending; owner=False
+            else:
+                pending=self.pending=threading.Event(); owner=True
+        if not owner:
+            if not pending.wait(6):
+                return {'gpus':[], 'ram_available':None, 'probe_state':'refreshing',
+                        'sample_age_seconds':None, 'stale':True}
+            return self.read()
+        result=None
+        try:
+            result=self.sample()
+            result=json.loads(json.dumps(result))
+        except Exception:
+            result={'gpus':[], 'ram_available':None, 'probe_state':'failed'}
+        finally:
+            with self.lock:
+                # Publication and the pending flag change together. No caller
+                # observes a finished sample before its timestamp is committed.
+                if result is not None: self.cached=result; self.sampled_at=self.clock()
+                self.pending=None; pending.set()
+        return {**json.loads(json.dumps(result)), 'sample_age_seconds':0, 'stale':False}
+
+
+_memory_telemetry_sampler=MemoryTelemetrySampler()
+
+
+def memory_telemetry():
+    return _memory_telemetry_sampler.read()
 
 ENGINE_PROFILES=[
     dict(id='ollama-balanced',name='Ollama balanced',engine='ollama',version='0.35.1',

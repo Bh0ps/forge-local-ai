@@ -2,7 +2,9 @@ import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import { Bot, Send, Check, ChevronDown, Download, Eye, Folder, Gauge, GitBranch, LoaderCircle, Mic, Monitor, Plug, Plus, RefreshCw, Search, Settings2, Shield, Sparkles, Terminal, Trash2, Wrench, X } from 'lucide-react';
 import { api, bytesLabel, errorText, friendlyModel } from './api';
 import { Badge, Empty, ErrorNotice, Field, IconButton, Modal, PageHeader, Toggle, useResource } from './components';
-import type { Model, Settings } from './types';
+import type { Model, Settings, Provider } from './types';
+import { EngineEditor } from './engineEditor';
+export { EngineEditor } from './engineEditor';
 import { McpSettings } from './mcpSettings';
 import { ContextSettings } from './contextSettings';
 import { DictationSettings } from './dictationSettings';
@@ -17,7 +19,7 @@ const OpenRouterSettings = lazy(() => import('./openRouterSettings').then(m => (
 const ChannelSettings = lazy(() => import('./channelSettings').then(m => ({ default: m.ChannelSettings })));
 const UpdateSettings = lazy(() => import('./updateSettings').then(m => ({ default: m.UpdateSettings })));
 
-interface Props { openSetup?: () => void; settings: Settings; onChange: (delta: Partial<Settings>) => Promise<void>; applyRecommendation: (id: string) => Promise<void>; models: Model[]; refreshModels: () => Promise<void>; tab: string; setTab: (tab: string) => void; capabilities: Record<string, unknown>; notify: (message: string) => void; }
+interface Props { openSetup?: () => void; onContextChange?: (delta: Partial<Settings>) => Promise<void>; settings: Settings; onChange: (delta: Partial<Settings>) => Promise<void>; applyRecommendation: (id: string) => Promise<void>; models: Model[]; refreshModels: () => Promise<void>; tab: string; setTab: (tab: string) => void; capabilities: Record<string, unknown>; notify: (message: string) => void; }
 const sections = [
   { id: 'general', group: 'Workspace', label: 'General', icon: Settings2, keywords: 'appearance theme accent motion workspace name conversation context tokens response length temperature reasoning web research goal limits time minutes generated token model round tool invocation startup launch sign-in' },
   { id: 'dictation', group: 'Workspace', label: 'Dictation', icon: Mic, keywords: 'voice microphone speech language transcribe' },
@@ -47,7 +49,7 @@ export function SettingsPage(props: Props) {
     const items = matches.filter(section => section.group === group);
     return items.length ? <div className="settings-nav-group" key={group}><span className="settings-nav-label">{group}</span>{items.map(section => <button aria-current={resolvedTab === section.id ? 'page' : undefined} className={resolvedTab === section.id ? 'active' : ''} key={section.id} onClick={() => setTab(section.id)}><section.icon size={16} aria-hidden="true" /><span>{section.label}</span></button>)}</div> : null;
   })}{query && <p className="settings-search-status" role="status">{matches.length ? `${matches.length} matching ${matches.length === 1 ? 'section' : 'sections'}` : 'No matching settings. Try “models” or “appearance”.'}</p>}</nav><div className="settings-content"><Suspense fallback={<p className="muted">Loading settings…</p>}>
-    {resolvedTab === 'general' && <><h2>Workspace appearance</h2><AppearanceSettings settings={settings} onChange={onChange}/><h2>General</h2><section className="settings-card"><div className="setting-row"><div><span>Appearance</span><small>Follow Windows or choose a theme.</small></div><select aria-label="Appearance" value={settings.theme} onChange={e => void onChange({ theme: e.target.value as Settings['theme'] })}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></div><Toggle label="Launch at sign-in" description="Start the background coordinator when Windows starts." checked={Boolean(settings.startup)} onChange={startup => void onChange({ startup })} /></section><h2>Conversation</h2><section className="settings-card"><Toggle label="Model reasoning" description="Request and display reasoning when the model supports this control." checked={settings.thinking} onChange={thinking => void onChange({ thinking })} /><Toggle label="Web research" description="Allow research tools within your permission profile." checked={settings.web} onChange={web => void onChange({ web })} /><ContextSettings settings={settings} onChange={onChange} /><div className="setting-row"><div><span>Response length</span><small>Maximum generated tokens per response.</small></div><select aria-label="Response length" value={settings.tokens} onChange={e => void onChange({ tokens: Number(e.target.value) })}><option value="1024">Short · 1K</option><option value="2048">Standard · 2K</option><option value="4096">Long · 4K</option><option value="8192">Extended · 8K</option></select></div></section><details className="settings-advanced" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}><summary><Settings2 size={16} aria-hidden="true" /><span>Advanced conversation settings<small>Temperature and limits for tracked goals</small></span><ChevronDown size={16} aria-hidden="true" /></summary><section className="settings-card"><div className="setting-row"><div><span>Temperature</span><small>Lower values favor more consistent answers.</small></div><input className="small-range" type="range" aria-label="Temperature" min="0" max="1" step="0.1" value={settings.temperature} onChange={e => void onChange({ temperature: Number(e.target.value) })} /><output>{settings.temperature.toFixed(1)}</output></div></section><h2>Goal limits</h2><section className="settings-card goal-budget-grid">{[['goal_minutes', 'Time limit (minutes)', 60], ['goal_tokens', 'Generated token limit', 100000], ['goal_rounds', 'Model round limit', 128], ['goal_tools', 'Tool invocation limit', 256]].map(([key, label, fallback]) => <Field label={String(label)} key={key}><input type="number" min="1" value={Number((settings.goal_limits as Record<string,number> | undefined)?.[String(key).replace('goal_', '')] || fallback)} onChange={e => { const value = Number(e.target.value); if (value > 0 && Number.isSafeInteger(value)) void onChange({ goal_limits: { ...(settings.goal_limits as Record<string,number> || {}), [String(key).replace('goal_', '')]: value } }); }} /></Field>)}</section></details></>}
+    {resolvedTab === 'general' && <><h2>Workspace appearance</h2><AppearanceSettings settings={settings} onChange={onChange}/><h2>General</h2><section className="settings-card"><div className="setting-row"><div><span>Appearance</span><small>Follow Windows or choose a theme.</small></div><select aria-label="Appearance" value={settings.theme} onChange={e => void onChange({ theme: e.target.value as Settings['theme'] })}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></div><Toggle label="Launch at sign-in" description="Start the background coordinator when Windows starts." checked={Boolean(settings.startup)} onChange={startup => void onChange({ startup })} /></section><h2>Conversation</h2><section className="settings-card"><Toggle label="Web research" description="Allow research tools within your permission profile." checked={settings.web} onChange={web => void onChange({ web })} /><ContextSettings settings={settings} onChange={props.onContextChange || onChange} onReasoningChange={onChange} /><div className="setting-row"><div><span>Response length</span><small>Maximum generated tokens per response.</small></div><select aria-label="Response length" value={settings.tokens} onChange={e => void onChange({ tokens: Number(e.target.value) })}><option value="1024">Short · 1K</option><option value="2048">Standard · 2K</option><option value="4096">Long · 4K</option><option value="8192">Extended · 8K</option></select></div></section><details className="settings-advanced" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}><summary><Settings2 size={16} aria-hidden="true" /><span>Advanced conversation settings<small>Temperature and limits for tracked goals</small></span><ChevronDown size={16} aria-hidden="true" /></summary><section className="settings-card"><div className="setting-row"><div><span>Temperature</span><small>Lower values favor more consistent answers.</small></div><input className="small-range" type="range" aria-label="Temperature" min="0" max="1" step="0.1" value={settings.temperature} onChange={e => void onChange({ temperature: Number(e.target.value) })} /><output>{settings.temperature.toFixed(1)}</output></div></section><h2>Goal limits</h2><section className="settings-card goal-budget-grid">{[['goal_minutes', 'Time limit (minutes)', 60], ['goal_tokens', 'Generated token limit', 100000], ['goal_rounds', 'Model round limit', 128], ['goal_tools', 'Tool invocation limit', 256]].map(([key, label, fallback]) => <Field label={String(label)} key={key}><input type="number" min="1" value={Number((settings.goal_limits as Record<string,number> | undefined)?.[String(key).replace('goal_', '')] || fallback)} onChange={e => { const value = Number(e.target.value); if (value > 0 && Number.isSafeInteger(value)) void onChange({ goal_limits: { ...(settings.goal_limits as Record<string,number> || {}), [String(key).replace('goal_', '')]: value } }); }} /></Field>)}</section></details></>}
     {resolvedTab === 'github' && <GitHubSettings notify={notify} />}
     {resolvedTab === 'openrouter' && <OpenRouterSettings notify={notify} settings={settings} onChange={onChange} />}
     {resolvedTab === 'connections' && <ChannelSettings models={props.models} notify={notify} />}
@@ -64,7 +66,7 @@ export function SettingsPage(props: Props) {
   </Suspense></div></div></>;
 }
 
-interface Provider { id: string; name: string; type?: string; kind?: string; url?: string; base_url?: string; model?: string; enabled?: boolean; capabilities?: string[]; context_limit?: number; fromDefault?: boolean; }
+
 function ModelsSettings({ models, refreshModels, settings, onChange, notify, setTab }: Props) {
   const [catalogTab, setCatalogTab] = useState('installed');
   const providers = useResource<Provider>('providers', 'providers'); const [edit, setEdit] = useState<Provider | null>(null); const [search, setSearch] = useState(''); const [download, setDownload] = useState(''); const [busy, setBusy] = useState(''); const [deleteModel, setDeleteModel] = useState<Model | null>(null);
@@ -77,61 +79,6 @@ function ModelsSettings({ models, refreshModels, settings, onChange, notify, set
   </>;
 }
 
-export function EngineEditor({ provider, close, saved }: { provider: Provider; close: () => void; saved: () => Promise<void> }) {
-  const [draft, setDraft] = useState({ ...provider });
-  const [apiKey, setApiKey] = useState('');
-  const [operation, setOperation] = useState<'test' | 'save' | null>(null);
-  const [result, setResult] = useState<{ title: string; detail?: string; error?: boolean } | null>(null);
-  const pending = useRef(false), generation = useRef(0);
-  useEffect(() => () => { generation.current++; }, []);
-  function cancel() { generation.current++; setApiKey(''); close(); }
-  function update(delta: Partial<Provider>) {
-    setDraft(current => ({ ...current, ...delta })); setResult(null);
-    if ('type' in delta || 'base_url' in delta) setApiKey('');
-  }
-  function endpoint() {
-    const url = (draft.base_url || draft.url || '').trim();
-    try {
-      const parsed = new URL(url);
-      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error();
-    } catch { throw new Error('Enter an HTTP or HTTPS endpoint without embedded credentials, query parameters or fragments.'); }
-    return { kind: draft.type === 'ollama' ? 'ollama' : 'openai-compatible', url };
-  }
-  async function run(action: 'test' | 'save') {
-    if (pending.current) return;
-    const request = generation.current;
-    pending.current = true; setOperation(action); setResult(null);
-    try {
-      const profile = endpoint();
-      if (action === 'test') {
-        const tested = await api<{ ok?: boolean; model_count?: number; models?: unknown[] }>('provider_test', { draft: profile, id: draft.id || undefined, api_key: apiKey || undefined });
-        if (request !== generation.current) return;
-        if (tested.ok === false) throw new Error('This endpoint did not confirm a connection.');
-        const count = tested.model_count ?? (Array.isArray(tested.models) ? tested.models.length : undefined);
-        if (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0) throw new Error('The endpoint replied without a model list. Check its API compatibility.');
-        setResult({ title: 'Connection verified', detail: count ? `${count} ${count === 1 ? 'model is' : 'models are'} available. Save this engine to use it in Forge.` : 'The endpoint responded, but it does not advertise any models. Load a model in the engine before chatting.' });
-      } else {
-        if (!draft.name.trim()) throw new Error('Give this engine a name before saving.');
-        await api('provider_save', { ...profile, name: draft.name.trim(), id: draft.id || undefined, api_key: apiKey || undefined, ...(draft.id ? {} : { enabled: true }) });
-        if (request !== generation.current) return;
-        setApiKey(''); await saved();
-      }
-    } catch (error) {
-      if (request === generation.current) setResult({ title: action === 'test' ? 'Could not verify this connection' : 'Could not save this engine', detail: errorText(error), error: true });
-    } finally {
-      if (request === generation.current) { pending.current = false; setOperation(null); }
-    }
-  }
-  return <Modal title={provider.id ? 'Configure engine' : 'Add local engine'} close={cancel}><form className="engine-editor" aria-busy={Boolean(operation)} onSubmit={event => { event.preventDefault(); void run('save'); }}>
-    <p className="engine-note">{provider.fromDefault ? 'Your default Ollama connection stays available. Save a separate endpoint, then choose it as your active engine.' : 'Connect Ollama, LM Studio or another compatible engine. Testing checks the connection before you save it.'}</p>
-    <Field label="Name"><input autoFocus value={draft.name} required disabled={Boolean(operation)} onChange={event => update({ name: event.target.value })} placeholder="My local engine" /></Field>
-    <Field label="Provider" hint="LM Studio and llama.cpp use OpenAI-compatible mode."><select value={draft.type} disabled={Boolean(operation)} onChange={event => update({ type: event.target.value })}><option value="ollama">Ollama</option><option value="openai">OpenAI-compatible local endpoint</option></select></Field>
-    <Field label="Base URL" hint={draft.type === 'ollama' ? 'Ollama usually listens at http://127.0.0.1:11434.' : 'Use the engine’s API URL, usually ending in /v1.'}><input type="url" value={draft.base_url || ''} required disabled={Boolean(operation)} onChange={event => update({ base_url: event.target.value })} placeholder={draft.type === 'ollama' ? 'http://127.0.0.1:11434' : 'http://127.0.0.1:1234/v1'} /></Field>
-    <Field label="API key (optional)" hint={provider.id ? 'Leave blank to keep the saved key for this endpoint. A different endpoint needs its own key.' : 'Local engines often need no key. Keys are stored in the operating system credential store when you save.'}><input type="password" autoComplete="off" value={apiKey} disabled={Boolean(operation)} onChange={event => { setApiKey(event.target.value); setResult(null); }} /></Field>
-    {result && <div className={`connection-feedback${result.error ? ' error' : ''}`} role={result.error ? 'alert' : 'status'}>{result.error ? <Plug size={16} aria-hidden="true" /> : <Check size={16} aria-hidden="true" />}<div><strong>{result.title}</strong>{result.detail && <p>{result.detail}</p>}</div></div>}
-    <footer><button type="button" className="text-button engine-cancel" onClick={cancel}>Cancel</button><button type="button" className="secondary" disabled={Boolean(operation)} onClick={() => void run('test')}>{operation === 'test' ? <LoaderCircle size={14} className="spin" aria-hidden="true" /> : <Plug size={14} aria-hidden="true" />}{operation === 'test' ? 'Testing…' : 'Test connection'}</button><button className="primary" disabled={Boolean(operation)}>{operation === 'save' && <LoaderCircle size={14} className="spin" aria-hidden="true" />}{operation === 'save' ? 'Saving…' : 'Save engine'}</button></footer>
-  </form></Modal>;
-}
 
 function PermissionsSettings({ settings, onChange }: Props) {
   const profiles: { id: Settings['permission_profile']; title: string; description: string }[] = [{ id: 'always_ask', title: 'Always Ask', description: 'Read connected project files. Ask before edits, commands, computer actions and unknown MCP operations.' }, { id: 'full_access', title: 'Full Access', description: 'Run enabled tools automatically within your configured scopes.' }, { id: 'deny_access', title: 'Deny Access', description: 'Chat with your model while every tool is disabled.' }];

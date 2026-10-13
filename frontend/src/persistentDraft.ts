@@ -3,12 +3,13 @@ import { api, errorText } from './api';
 import { updateReadiness, useReadinessParticipant, type ReadinessReason, type SaveConfirmation, type RetainedRegistration } from './updateReadiness';
 
 export interface DraftScope { scope_kind: 'chat' | 'new_chat' | 'builder'; project_id?: string | null; chat_id?: string; builder_id?: string; }
-export interface DraftContent { text?: string; document_ids?: string[]; skills?: string[]; space_ids?: string[]; brief?: Record<string, unknown>; base_revision?: number; }
+export type DraftCommandMode = 'goal' | 'plan' | 'do' | 'builder' | 'todo';
+export interface DraftContent { text?: string; document_ids?: string[]; skills?: string[]; space_ids?: string[]; command_mode?: DraftCommandMode | null; brief?: Record<string, unknown>; base_revision?: number; }
 interface DraftRecord { revision: number; content: DraftContent; stale_refs?: unknown[]; scope_available?: boolean; }
 const encoded = (value: DraftContent) => JSON.stringify(value);
 interface ScopeState {revision:number;saved:string;ready:boolean;blocked:boolean;scope:DraftScope;failure?:ReadinessReason;stale?:boolean;unavailable?:boolean;deliveries?:Set<string>}
 interface LocalSnapshot {key:string;content:DraftContent;fingerprint:string}
-interface PrivateSession {latest:{current:Map<string,LocalSnapshot>};records:{current:Map<string,ScopeState>};queue:{current:Promise<void>};pending:{current:number};deletedChats:Set<string>;registration:RetainedRegistration}
+interface PrivateSession {latest:{current:Map<string,LocalSnapshot>};records:{current:Map<string,ScopeState>};intentRevisions:Map<string,number>;queue:{current:Promise<void>};pending:{current:number};deletedChats:Set<string>;registration:RetainedRegistration}
 // A Builder view can unmount while its controller still owns unsaved work.
 // Only that owner's callback registration is shared with readiness.
 const retainedSessions=new Map<string,PrivateSession>();
@@ -19,7 +20,7 @@ function privateSession(owner?:string):PrivateSession {
   if(bridge){sessions=nativeSessions.get(bridge) || new Map<string,PrivateSession>();nativeSessions.set(bridge,sessions);}
   const previous=owner && sessions.get(owner);if(previous)return previous;
   const session:PrivateSession={
-    latest:{current:new Map()},records:{current:new Map()},queue:{current:Promise.resolve()},pending:{current:0},deletedChats:new Set(),
+    latest:{current:new Map()},records:{current:new Map()},intentRevisions:new Map(),queue:{current:Promise.resolve()},pending:{current:0},deletedChats:new Set(),
     registration:{handle:{current:null},latest:{current:{inspect:()=>({reasons:[]}),flushAndConfirm:async()=>({ok:true,receipts:[]})}}},
   };
   if(owner)sessions.set(owner,session);return session;
@@ -30,6 +31,8 @@ export function usePersistentDraft(scope: DraftScope, content: DraftContent, res
   const key = JSON.stringify(scope), fingerprint = encoded(content);
   const session=useRef<PrivateSession|undefined>(undefined);session.current ||= privateSession(owner);
   const latest=session.current.latest,records=session.current.records,queue=session.current.queue,pending=session.current.pending;
+  const intentRevisions=session.current.intentRevisions;
+  const changedIntent=(scopeKey:string)=>intentRevisions.set(scopeKey,(intentRevisions.get(scopeKey) || 0)+1);
   const deleted=(target:DraftScope)=>target.scope_kind==='chat' && session.current!.deletedChats.has(target.chat_id || '');
   const visited=useRef(new Set<string>()),localRestore=useRef<LocalSnapshot|undefined>(undefined);
   const current = useRef({ key, content, fingerprint }); current.current = { key, content, fingerprint };
@@ -68,7 +71,7 @@ export function usePersistentDraft(scope: DraftScope, content: DraftContent, res
   },session.current.registration);
   useLayoutEffect(()=>{const retained=localRestore.current;if(enabled && retained?.key===key){localRestore.current=undefined;current.current=retained;restoreRef.current(retained.content);}},[key,enabled]);
   const observed=useRef({key,fingerprint});
-  useLayoutEffect(()=>{if(observed.current.key!==key || observed.current.fingerprint!==fingerprint){observed.current={key,fingerprint};readiness.changed();}},[key,fingerprint]);
+  useLayoutEffect(()=>{if(observed.current.key!==key || observed.current.fingerprint!==fingerprint){if(observed.current.key===key)changedIntent(key);observed.current={key,fingerprint};readiness.changed();}},[key,fingerprint]);
   useEffect(() => { mounted.current=true; return () => { mounted.current=false; }; }, []);
   async function confirmSavedDeliveries(record:ScopeState,captured:LocalSnapshot) {
     if(deleted(record.scope) || !record.ready || record.blocked || record.revision<1 || record.saved!==captured.fingerprint || latest.current.get(captured.key)?.fingerprint!==captured.fingerprint)return;
@@ -110,15 +113,17 @@ export function usePersistentDraft(scope: DraftScope, content: DraftContent, res
     setStatus(''); setConflict(false);
     if (records.current.has(key)){const existing=records.current.get(key)!;if(existing.failure || existing.blocked){setConflict(true);setStatus('Draft kept in this window. Reload the saved draft to reconcile.');}return () => { const captured = latest.current.get(key); if (captured) void save(captured); };}
     const initial = current.current.fingerprint;
+    const initialIntent = intentRevisions.get(key) || 0;
     const initialContent=current.current.content;
-    const hadLocalWork=scope.scope_kind!=='builder' && Boolean(initialContent.text || initialContent.document_ids?.length || initialContent.skills?.length || initialContent.space_ids?.length);
+    const hadLocalWork=scope.scope_kind!=='builder' && Boolean(initialContent.text || initialContent.command_mode || initialContent.document_ids?.length || initialContent.skills?.length || initialContent.space_ids?.length);
     const record: {revision:number;saved:string;ready:boolean;blocked:boolean;scope:DraftScope;failure?:ReadinessReason;stale?:boolean;unavailable?:boolean} = { revision: 0, saved: initial, ready: false, blocked: false, scope }; records.current.set(key, record);
     void api<DraftRecord>('draft_get', {...scope}).then(result => {
       if(deleted(scope))return;
       record.revision = result.revision || 0; record.ready = true; record.stale=Boolean(result.stale_refs?.length); record.unavailable=result.scope_available===false;
       const restored = result.content || {};
-      // Typing and attachment changes during restoration always win locally.
-      if (!hadLocalWork && current.current.key === key && current.current.fingerprint === initial && Object.keys(restored).length) {
+      // A deliberate edit followed by clearing still wins over a delayed read.
+      // Fingerprint equality alone cannot distinguish that from an untouched draft.
+      if (!hadLocalWork && (intentRevisions.get(key) || 0) === initialIntent && current.current.key === key && current.current.fingerprint === initial && Object.keys(restored).length) {
         record.saved = encoded(restored); restoreRef.current(restored);
         setStatus(result.stale_refs?.length ? 'Draft restored; some references are unavailable' : 'Draft restored locally');
       } else { record.saved = encoded(restored); void save(latest.current.get(key) || current.current); }
@@ -174,6 +179,7 @@ export function usePersistentDraft(scope: DraftScope, content: DraftContent, res
     if(deleted(target))return;
     readiness.changed();
     const targetKey=JSON.stringify(target), captured={key:targetKey,content:value,fingerprint:encoded(value)};
+    if(latest.current.get(targetKey)?.fingerprint!==captured.fingerprint)changedIntent(targetKey);
     latest.current.set(targetKey,captured);
     const record=records.current.get(targetKey);
     if(record) { if(record.ready) void save(captured); return; }
@@ -188,7 +194,7 @@ export function usePersistentDraft(scope: DraftScope, content: DraftContent, res
   /** Only the acknowledged user-delete path may revoke these owned drafts. */
   function forgetChat(id:string){
     session.current!.deletedChats.add(id);readiness.changed();
-    for(const [scopeKey,record] of records.current){if(record.scope.scope_kind==='chat' && record.scope.chat_id===id){records.current.delete(scopeKey);latest.current.delete(scopeKey);}}
+    for(const [scopeKey,record] of records.current){if(record.scope.scope_kind==='chat' && record.scope.chat_id===id){records.current.delete(scopeKey);latest.current.delete(scopeKey);intentRevisions.delete(scopeKey);}}
     if(scope.scope_kind==='chat' && scope.chat_id===id){localRestore.current=undefined;setStatus('');setConflict(false);}
     readiness.settled();
   }

@@ -148,6 +148,7 @@ class WorkspaceUI:
         def group(run, ancestors=(), include_attempts=True):
             settings = run.get('settings') or {}
             progress = run.get('progress_summary') or {}
+            retired = run.get('helper_cleanup') or {}
             tool = last_tools.get(run['id'])
             step = progress.get('activity') or statuses.get(run['id'])
             if not step and tool:
@@ -177,8 +178,9 @@ class WorkspaceUI:
             return dict(run_id=run['id'], request_message_id=run.get('request_message_id'), status=run['status'],
                 mode=run.get('mode', 'chat'), model=run.get('returned_model_last') or settings.get('model'),
                 provider_id=settings.get('provider_id'), created_at=run.get('created_at'), updated_at=run.get('updated_at'),
-                current_step=step or run['status'].replace('_', ' '), summary=progress.get('blocker') or run.get('recovery') or '',
-                tool_count=counts.get(run['id'], 0) + sum(item['tool_count'] for item in attempts), helper_count=len(children), children=children,
+                current_step=step or run['status'].replace('_', ' '), summary=progress.get('blocker') or run.get('recovery') or retired.get('summary') or '',
+                conversation_removed=bool(retired), summary_truncated=retired.get('summary_truncated', False),
+                tool_count=counts.get(run['id'], retired.get('tool_count', 0)) + sum(item['tool_count'] for item in attempts), helper_count=len(children), children=children,
                 attempts=attempts,
                 assignment_id=run.get('assignment_id'), attempt=run.get('attempt', 1), retry_count=run.get('retry_count', 0),
                 failure=_failure(run.get('failure')), finish_reason=run.get('last_finish_reason'),

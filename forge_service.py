@@ -24,7 +24,7 @@ from storage import _now
 
 COMMANDS=[dict(name=name,description=description) for name,description in (
  ('builder','Develop an idea through a guided conversation'),('build','Accept the Builder brief and start implementation'),
- ('plan','Inspect and prepare a plan; Build starts implementation'),('todo','Run the saved plan as a durable Markdown checklist'),
+ ('plan','Inspect and prepare a plan; Build starts implementation'),('do','Start the requested task'),('todo','Run the saved plan as a durable Markdown checklist'),
  ('goal','Work through a saved checklist'),('pause','Pause the active run'),('resume','Continue a saved run'),
  ('status','Show current progress'),('compact','Save a continuity checkpoint'),('new','Create a new chat'),
  ('project','Select or create a project'),('model','Select a model'),('agents','Configure or launch an agent'),
@@ -34,7 +34,7 @@ COMMANDS=[dict(name=name,description=description) for name,description in (
 # Reads stay responsive while a consistent update snapshot drains mutations.
 READ_ACTIONS=frozenset(('bootstrap','commands','projects','chats','get_chat','attachment','tasks',
     'runs','poll','plans','plan_get','unknown_actions','goals','goal_get','spaces','agents','schedules',
-    'usage','providers','models','show','permission_overrides','storage_info','setup_status',
+    'usage','providers','provider_presets','models','show','permission_overrides','storage_info','setup_status',
     'openrouter_status','github_status','github_repos','channel_list','channel_notifications',
     'memory_list','memory_export','update_status','browser_status','browser_native_status',
     'dictation_status','runtime_status','hf_status','performance_status','pending_questions',
@@ -58,6 +58,12 @@ NATIVE_IO_ACTIONS=frozenset(('browser_native_open','browser_native_show','browse
     'preview_browser_type','preview_browser_key','preview_browser_select','preview_browser_scroll',
     'preview_browser_wait','preview_stop','project_delete','emergency_stop'))
 NATIVE_CONTROL_ACTIONS=NATIVE_IO_ACTIONS|frozenset(('browser_native_status','preview_browser_status'))
+# Exact engine operations may wait on HTTP or metadata workers. Their manager
+# commits under the admission gate; the counted lease protects update snapshots
+# while keeping cancellation and configuration edits responsive during I/O.
+PERFORMANCE_IO_ACTIONS=frozenset(('performance','performance_apply','performance_benchmarks',
+    'performance_benchmark','performance_calibrate','performance_tune','performance_calibrations',
+    'performance_profile_accept','performance_cancel','performance_warm','performance_release'))
 
 class AgentLaunchRejected(ValueError):
     """Preflight failed before any worktree, child or remote request was created."""
@@ -80,6 +86,7 @@ class ForgeService:
         self.schedule_lock=threading.RLock()
         self.admission_lock=threading.RLock()
         self._native_io_pending=0
+        self._performance_io_pending=0
         self.memory_manager=None; self.channel_manager=None; self.setup_manager=None; self.update_manager=None; self.openrouter_manager=None; self.github_manager=None
         self.interaction_manager=None
         self.builder_manager=None; self._command_sessions=None
@@ -361,7 +368,10 @@ class ForgeService:
         if action.startswith(('browser_native_','preview_browser_')) and action not in NATIVE_CONTROL_ACTIONS:
             raise ValueError('Unknown native browser control.')
         if action in NATIVE_IO_ACTIONS:
-            with self._native_io_lease(action):
+            with ForgeService._native_io_lease(self,action):
+                return self._dispatch(action,data)
+        if action=='provider_test' or action in PERFORMANCE_IO_ACTIONS:
+            with ForgeService._engine_io_lease(self,action):
                 return self._dispatch(action,data)
         if action in READ_ACTIONS or action in ('pause','cancel','goal_pause','approve') or action=='settings' and not data:
             return self._dispatch(action,data)
@@ -371,18 +381,21 @@ class ForgeService:
             if self.update_manager and self.update_manager.applying and action not in ('quit','emergency_stop'):
                 raise ValueError('Forge is preparing an update. Changes are paused until restart.')
             automatic=getattr(self.update_manager,'automatic_downloads',None)
-            if automatic and action in ('start_chat','resume','command','plan_build','goal_resume','agent_start',
+            foreground=action in ('start_chat','resume','command','plan_build','goal_resume','agent_start',
                     'builder_start','builder_start_goal','schedule_run','dictation_start','dictation_upload',
-                    'performance_benchmark','performance_calibrate','performance_warm','performance_release',
+                    'performance_benchmark','performance_calibrate','performance_tune','performance_warm','performance_release',
                     'setup_scan','setup_install_engine','setup_download_model','setup_verify','setup_browser_verify','setup_retry',
-                    'hf_download','hf_import','hf_retry','runtime_install','runtime_validate','runtime_start','ai_workflow_verify','pull'):
+                    'hf_download','hf_import','hf_retry','runtime_install','runtime_validate','runtime_start','ai_workflow_verify','pull')
+            if foreground: ForgeService._performance_changed(self,'foreground_work')
+            if automatic and foreground:
                 automatic.changed('active_work')
             return self._dispatch(action,data)
 
     @contextmanager
     def _native_io_lease(self,action):
         with self.admission_lock:
-            self._check_native_io_admission(action)
+            ForgeService._check_native_io_admission(self,action)
+            ForgeService._performance_changed(self,'foreground_work')
             self._native_io_pending=getattr(self,'_native_io_pending',0)+1
         try:
             yield
@@ -397,6 +410,34 @@ class ForgeService:
                 (manager.applying or getattr(manager,'shutting_down',False))):
             raise ValueError('Native browser work is paused while Forge closes or prepares an update.')
 
+    @contextmanager
+    def _engine_io_lease(self,action):
+        performance=action in PERFORMANCE_IO_ACTIONS
+        with self.admission_lock:
+            manager=getattr(self,'update_manager',None)
+            stopped=getattr(self,'stop_event',None)
+            if action!='performance_cancel' and ((stopped is not None and stopped.is_set()) or manager and
+                    (manager.applying or getattr(manager,'shutting_down',False))):
+                raise ValueError('Engine work is paused while Forge closes or prepares an update.')
+            if not performance: ForgeService._performance_changed(self,'foreground_work')
+            if action in ('performance_benchmark','performance_calibrate','performance_tune','performance_warm','performance_release'):
+                automatic=getattr(manager,'automatic_downloads',None)
+                if automatic:automatic.changed('active_work')
+            self._native_io_pending=getattr(self,'_native_io_pending',0)+1
+            if performance: self._performance_io_pending=getattr(self,'_performance_io_pending',0)+1
+        try:
+            yield
+        finally:
+            with self.admission_lock:
+                self._native_io_pending-=1
+                if performance: self._performance_io_pending-=1
+
+    def _performance_changed(self,reason):
+        # Never initialize a manager or perform metadata I/O for this signal.
+        manager=getattr(self,'performance_manager',None)
+        if manager is not None and hasattr(manager,'changed'):
+            manager.changed(reason)
+
     def _dispatch(self,action,data):
         if action in ('start_chat','command','plan_build','builder_start','builder_start_goal') and data.get('client_submission_id'):
             return self.get_submissions().admit(action,data,lambda clean:self._dispatch(action,clean))
@@ -405,6 +446,9 @@ class ForgeService:
         if action.startswith('ai_workflow_'): return self.get_ai_workflow().dispatch(action,data)
         if action=='bootstrap': return self.bootstrap()
         if action=='settings':
+            if data and any(key in data for key in ('provider_id','model','context','thinking','tokens',
+                    'temperature','num_thread','keep_alive')):
+                ForgeService._performance_changed(self,'selection_changed')
             result=self.store.update_settings(data) if data else self.store.get_settings()
             automatic=getattr(self.update_manager,'automatic_downloads',None)
             if automatic and data and any(k in data for k in ('update_checks','update_auto_download','update_channel')):
@@ -510,7 +554,7 @@ class ForgeService:
             # lease prevents update preparation, while a new preview cannot
             # resolve the removed project during its cleanup.
             with self.admission_lock:
-                self._check_native_io_admission(action)
+                ForgeService._check_native_io_admission(self,action)
                 result=dispatch_chat(self,action,data)
             if self.builder_manager and hasattr(self.builder_manager,'close_project'):
                 self.builder_manager.close_project(result['deleted'])
@@ -588,6 +632,9 @@ class ForgeService:
         if action=='schedule_run': return self.schedule_run(self.store.entity('schedules',data['id']))
         if action=='usage': return self.store.usage(data.get('period','all'),data.get('timezone',self.store.get_settings()['timezone']),data.get('model'),data.get('project_id'))
         if action=='providers': return {'providers':self.providers.configurations()}
+        if action=='provider_presets':
+            from forge_provider_presets import provider_presets
+            return provider_presets()
         if action=='provider_save': return self.provider_save(data)
         if action=='provider_test':
             if 'draft' in data:
@@ -605,6 +652,7 @@ class ForgeService:
         if action.startswith('performance'):
             with self.manager_lock:
                 if self.performance_manager is None:
+                    if action=='performance_cancel': return {'ok':True}
                     from forge_performance import PerformanceManager
                     self.performance_manager=PerformanceManager(self)
             return self.performance_manager.dispatch(action,data)
@@ -908,10 +956,19 @@ class ForgeService:
             return ProjectTools(project['path'],self.store.home/'backups').execute('write_file',{'path':data.get('path','FORGE_TODO.md'),'content':goal['markdown']})
 
     def command(self,data):
+        selected=data.get('command_mode')
+        if selected is not None and (not isinstance(selected,str) or selected not in ('goal','plan','do','builder','todo')):
+            raise ValueError('Choose Goal, Plan, Do, Builder or To-do mode.')
+        data={key:value for key,value in data.items() if key!='command_mode'}
+        if not isinstance(data.get('text',''),str): raise ValueError('Enter command text.')
         text=data.get('text','').strip(); parts=text.split(maxsplit=1)
         head=parts[0] if parts else ''; argument=parts[1] if len(parts)>1 else ''; name=head.lstrip('/').lower()
         if name=='to-do': name='todo'
-        if name not in {c['name'] for c in COMMANDS}: raise ValueError('Unknown command. Use /help.')
+        known={command['name'] for command in COMMANDS}
+        # Recognized slash actions take precedence; paths remain prompt text.
+        if selected is not None and (not head.startswith('/') or name not in known):
+            name=selected; argument=text
+        if name not in known: raise ValueError('Unknown command. Use /help.')
         arguments={**data,'text':argument.strip()}
         if name=='help': return {'commands':COMMANDS,'message':'Choose a slash command in the composer.'}
         if name=='new': return {'chat':self.store.create_chat(data.get('project_id'),model=data.get('model','')),'navigate':'chat'}
@@ -948,6 +1005,7 @@ class ForgeService:
         if name=='plan':
             if not argument: return {'message':'Use /plan followed by the task.'}
             return self.jobs.start({**arguments,'mode':'plan'})
+        if name=='do': return self.jobs.start(arguments)
         current=next((r for r in self.store.runs() if r['chat_id']==data.get('chat_id') and (r['status'] not in TERMINAL if name in ('pause','status') else True)),None)
         if name=='status': return {'run':current,'message':current.get('checkpoint','No active run.') if current else 'No active run.'}
         if name in ('pause','resume','compact'):
@@ -1162,6 +1220,8 @@ class ForgeService:
         if child.get('parent_id')!=parent['id']: raise ValueError('This is not a child of the current run.')
         seconds=args.get('wait_seconds',120)
         if type(seconds) not in (int,float) or not 0<=seconds<=300: raise ValueError('Wait must be between 0 and 300 seconds.')
+        retired=self._retired_helper_result(child,cancel)
+        if retired is not None: return retired
         wake=threading.Event()
         def changed(event):
             if event.get('run_id')==identifier and event.get('type') in ('done','approval','question','error','status'):
@@ -1179,12 +1239,17 @@ class ForgeService:
                     wake.clear(); child=self.store.run(identifier)
             child=self.store.run(identifier)
         finally: self.store.unsubscribe_events(changed)
+        retired=self._retired_helper_result(child,cancel)
+        if retired is not None: return retired
         with self.store._connection() as db:
             later=db.execute("SELECT MIN(CAST(json_extract(data,'$.request_message_id') AS INTEGER)) FROM runs WHERE chat_id=? AND id<>? AND CAST(json_extract(data,'$.request_message_id') AS INTEGER)>?",
                 (child['chat_id'],child['id'],child['request_message_id'])).fetchone()[0]
             rows=db.execute("SELECT * FROM messages WHERE chat_id=? AND id>=? AND (? IS NULL OR id<?) AND role IN ('user','assistant') ORDER BY id DESC LIMIT 12",
                 (child['chat_id'],child['request_message_id'],later,later)).fetchall()
             messages=[dict(id=row['id'],role=row['role'],content=row['content']) for row in reversed(rows)]
+        if not rows:
+            retired=self._retired_helper_result(self.store.run(identifier),cancel)
+            if retired is not None: return retired
         final_row=next((row for row in rows if row['role']=='assistant'),None)
         final_meta=json.loads(final_row['metadata']) if final_row else {}
         assistant=final_row['content'] if final_row and not final_meta.get('tool_calls') and final_meta.get('status','complete')=='complete' else ''
@@ -1211,6 +1276,27 @@ class ForgeService:
                 'Reword the original bounded task without changing its objective; call delegate_agent with retry_of='+child['id']+' for a fresh free-router attempt. Preserve its scopes and completed evidence.' if retryable else
                 'Resume cannot replay this incomplete signed exchange. Inspect the saved work and request explicit recovery; a new unrelated helper does not satisfy this required assignment.' if (child.get('failure') or {}).get('category')=='incomplete_provider_state' else
                 'Inspect the helper activity or pending approval/question; call agent_result to wait again. Do not treat unfinished work as complete.'}
+
+    @staticmethod
+    def _retired_helper_result(child,cancel):
+        cleanup=child.get('helper_cleanup')
+        if not isinstance(cleanup,dict) or cleanup.get('version')!=1 or child['status'] not in TERMINAL:
+            return None
+        summary=cleanup.get('summary')
+        summary=summary if isinstance(summary,str) else ''
+        response=summary[:8000]
+        successful=child['status']=='completed' and bool(response.strip())
+        public={key:child.get(key) for key in ('id','chat_id','parent_id','agent_id','project_id',
+            'workspace_project_id','worktree_id','status','mode','readonly','rounds','tools','output_tokens',
+            'assignment_id','retry_of','attempt','retry_count','assignment_required')}
+        public['settings']={key:child.get('settings',{}).get(key) for key in ('provider_id','model','context')}
+        return {'run':public,'messages':[],'response':response,'finished':True,'successful':successful,
+            'conversation_removed':True,'summary_truncated':cleanup.get('summary_truncated') is True or len(summary)>8000,
+            'result_consumed':child.get('result_consumed') is True,'retry_available':False,'retries_remaining':0,
+            'required':child.get('assignment_required',True),'unavailable':not successful and not child.get('assignment_required',True),
+            'needs_attention':not successful,'waiting':False,'cancelled_wait':cancel.is_set(),
+            'next_action':'Use the retained helper summary and parent evidence to continue review.' if successful else
+                'The temporary helper conversation was retired. Inspect the saved parent result and retained summary.'}
 
     def openrouter_setup_agents(self):
         """Explicit one-click setup preserves all previously edited profiles."""
@@ -1246,10 +1332,14 @@ class ForgeService:
         data={**previous,**supplied,'url':supplied.get('url') or supplied.get('base_url') or previous.get('url',''),
               'kind':supplied.get('kind') or supplied.get('type') or previous.get('kind','openai-compatible')}
         from forge_provider_probe import validate_api_key,validate_endpoint
+        from forge_provider_presets import validate_preset
         url=validate_endpoint(data.get('url','')); data['url']=url
+        if 'preset_id' not in supplied and previous and previous.get('kind')!=data['kind']:
+            data.pop('preset_id',None)
+        if 'preset_id' in data: data['preset_id']=validate_preset(data['preset_id'],data['kind'])
         for key in ('token','api_key'):
             if key in data: data[key]=validate_api_key(data[key])
-        allowed={'id','name','kind','url','base_url','type','credential_ref','capabilities','context_limit','managed','runtime_id','enabled','updated_at','resource_id','independent_resource'}
+        allowed={'id','name','kind','url','base_url','type','credential_ref','capabilities','context_limit','managed','runtime_id','enabled','updated_at','resource_id','independent_resource','preset_id'}
         if data.get('resource_id') and (not isinstance(data['resource_id'],str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',data['resource_id'])):
             raise ValueError('Use a short resource identifier.')
         if 'independent_resource' in data and type(data['independent_resource']) is not bool: raise ValueError('Independent resource must be true or false.')
@@ -1263,11 +1353,15 @@ class ForgeService:
                 raise ValueError('Credentials could not be saved in the operating system store. Try saving the engine again.') from None
         profile.setdefault('kind','openai-compatible'); profile.setdefault('name','Local endpoint')
         profile['base_url']=profile['url']; profile['type']=profile['kind']
+        ForgeService._performance_changed(self,'provider_changed')
         saved=self.store.save_entity('providers',profile)
         self.providers.invalidate(saved['id'])
         if self.performance_manager:
-            self.performance_manager.cache.pop(saved['id'],None)
-            self.performance_manager.status_cache.pop('engine:'+saved['id'],None)
+            if hasattr(self.performance_manager,'invalidate'):
+                self.performance_manager.invalidate(saved['id'])
+            else:
+                self.performance_manager.cache.pop(saved['id'],None)
+                self.performance_manager.status_cache.pop('engine:'+saved['id'],None)
         return saved
     def performance(self):
         return self.dispatch('performance')

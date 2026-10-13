@@ -145,8 +145,10 @@ describe('mid-run steering', () => {
     expect(call).toHaveBeenCalledWith('command', expect.objectContaining({ text: '/status', chat_id: 'chat' }));
     fireEvent.change(input, { target: { value: '/goal another task' } }); fireEvent.keyDown(input, { key: 'Enter' });
     await screen.findByText(/Pause this run before starting another workflow/);
-    expect(input.value).toBe('/goal another task');
+    expect(input.value).toBe('another task');
+    expect(screen.getByText('Next request: Goal')).toBeTruthy();
     expect(call.mock.calls.filter(([action]) => action === 'run_steer')).toHaveLength(0);
     expect(call.mock.calls.filter(([action]) => action === 'command')).toHaveLength(1);
+    expect(call.mock.calls.filter(([action]) => action === 'start_chat')).toHaveLength(0);
   });
 });

@@ -28,20 +28,43 @@ def validate_api_key(value):
 
 
 def probe_provider(service, data):
-    from core import Core
-    from forge_inference import CompatibleProvider, OllamaProvider
+    from forge_provider_metadata import ProviderProbeRevoked, fetch_json, fetch_provider_metadata, require_current
+    from forge_provider_presets import validate_preset
 
     draft = data.get('draft')
     if not isinstance(draft, dict) or draft.get('kind') not in ('ollama', 'openai-compatible'):
         raise ValueError('Choose Ollama or an OpenAI-compatible engine to test.')
     url = validate_endpoint(draft.get('url'))
     token = validate_api_key(data.get('api_key'))
-    if not token and data.get('id'):
+    if 'metadata' in data and type(data['metadata']) is not bool:
+        raise ValueError('Metadata testing must be true or false.')
+    saved = None
+    identifier = data.get('id')
+    if identifier:
         identifier = data['id']
         if not isinstance(identifier, str) or len(identifier) > 255:
             raise ValueError('Select an existing engine or test a new endpoint.')
         saved = (dict(kind='ollama', url=service.providers.core.base) if identifier == 'ollama'
                  else service.store.entity('providers', identifier))
+    preset = draft.get('preset_id', saved.get('preset_id') if saved else None)
+    # Old editors may change protocol without knowing about saved presets.
+    if 'preset_id' not in draft and saved and saved.get('kind') != draft['kind']:
+        preset = None
+    preset = validate_preset(preset, draft['kind'])
+
+    def current():
+        if saved is None:
+            return True
+        try:
+            now = (dict(kind='ollama', url=service.providers.core.base) if identifier == 'ollama'
+                   else service.store.entity('providers', identifier))
+            return now == saved
+        except Exception:
+            return False
+
+    cancel = getattr(service, 'stop_event', None)
+    require_current(cancel, current)
+    if not token and saved:
         # A key saved for one endpoint must never be forwarded to an edited one.
         if (saved.get('kind') == draft['kind'] and saved.get('url', '').rstrip('/') == url
                 and saved.get('credential_ref')):
@@ -51,18 +74,22 @@ def probe_provider(service, data):
                 token = validate_api_key(service.vault.get(saved['credential_ref']))
             except Exception:
                 raise ValueError('Saved credentials could not be read. Enter a key to test this connection.') from None
-
-    class EphemeralCredential:
-        def get(self, reference):
-            return token if reference == 'probe' else None
-
-    config = dict(url=url, kind=draft['kind'], credential_ref='probe' if token else None)
-    provider = (OllamaProvider(Core(base=url if url.endswith('/api') else url + '/api'))
-                if draft['kind'] == 'ollama' else CompatibleProvider(config, EphemeralCredential()))
+    config = dict(url=url, kind=draft['kind'], preset_id=preset)
+    catalog_url = ((url if url.endswith('/api') else url + '/api') + '/tags'
+                   if draft['kind'] == 'ollama' else url + '/models')
     try:
-        models = provider.models()
+        catalog = fetch_json(catalog_url, token=token, cancel=cancel, current=current)
+        models = catalog.get('models' if draft['kind'] == 'ollama' else 'data')
         if not isinstance(models, list) or len(models) > 10000:
             raise ValueError('Invalid catalog')
+        for item in models:
+            if not isinstance(item, dict):
+                raise ValueError('Invalid catalog')
+            name = (item.get('name', item.get('model')) if draft['kind'] == 'ollama' else item.get('id'))
+            if not isinstance(name, str) or not name or len(name) > 512 or any(ord(char) < 32 for char in name):
+                raise ValueError('Invalid catalog')
+    except ProviderProbeRevoked:
+        raise
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
         message = ('Authentication failed. Check the API key.' if status in (401, 403) else
@@ -76,4 +103,8 @@ def probe_provider(service, data):
     except Exception:
         raise ValueError('The engine returned an invalid model catalog. Check its status and base URL.') from None
     # Counts are sufficient for setup. Remote responses and raw errors are not diagnostics.
-    return {'ok': True, 'model_count': len(models)}
+    result = {'ok': True, 'model_count': len(models)}
+    if data.get('metadata') is True:
+        result['metadata'] = fetch_provider_metadata(config, token=token, cancel=cancel, current=current)
+    require_current(cancel, current)
+    return result

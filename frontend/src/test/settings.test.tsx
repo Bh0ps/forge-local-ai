@@ -126,7 +126,7 @@ describe('local engine connection editor', () => {
     const test = screen.getByRole('button', { name: 'Test connection' });
     fireEvent.click(test); fireEvent.click(test);
     fireEvent.submit(test.closest('form')!);
-    expect(call).toHaveBeenCalledTimes(1);
+    expect(call.mock.calls.filter(([action]) => action === 'provider_test' || action === 'provider_save')).toHaveLength(1);
     expect(call).toHaveBeenCalledWith('provider_test', { draft: { kind: 'openai-compatible', url: provider.base_url }, id: undefined, api_key: undefined });
     expect((screen.getByRole('button', { name: 'Save engine' }) as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByLabelText('Base URL') as HTMLInputElement).disabled).toBe(true);
@@ -188,7 +188,7 @@ describe('local engine connection editor', () => {
     await userEvent.type(screen.getByLabelText('API key (optional)'), 'synthetic-only');
     const save = screen.getByRole('button', { name: 'Save engine' });
     fireEvent.submit(save.closest('form')!); fireEvent.submit(save.closest('form')!);
-    expect(call).toHaveBeenCalledOnce();
+    expect(call.mock.calls.filter(([action]) => action === 'provider_save')).toHaveLength(1);
     expect(call).toHaveBeenCalledWith('provider_save', { id: 'existing', name: provider.name, kind: 'openai-compatible', url: provider.base_url, api_key: 'synthetic-only' });
     await act(async () => finish({ id: 'existing' }));
     expect(saved).toHaveBeenCalledOnce();
@@ -199,7 +199,7 @@ describe('local engine connection editor', () => {
     render(<EngineEditor provider={provider} close={vi.fn()} saved={vi.fn(async () => {})} />);
     fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'http://name:secret@127.0.0.1:1234/v1' } });
     await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
-    expect(call).not.toHaveBeenCalled(); expect(screen.getByRole('alert').textContent).toContain('without embedded credentials');
+    expect(call.mock.calls.some(([action]) => action === 'provider_test' || action === 'provider_save')).toBe(false); expect(screen.getByRole('alert').textContent).toContain('without embedded credentials');
     fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: provider.base_url } });
     expect(screen.queryByRole('alert')).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));

@@ -12,6 +12,7 @@ from storage import _now
 
 CONFLICT = 'Draft changed in another window. Reload or keep your local edits.'
 KINDS = {'chat', 'new_chat', 'builder'}
+COMMAND_MODES = {'goal', 'plan', 'do', 'builder', 'todo'}
 
 
 class DraftManager:
@@ -80,7 +81,7 @@ class DraftManager:
     def content(self, data, scope):
         if not isinstance(data, dict):
             raise ValueError('Draft content must be an object.')
-        allowed = {'text', 'document_ids', 'skills', 'space_ids', 'brief', 'base_revision'}
+        allowed = {'text', 'document_ids', 'skills', 'space_ids', 'brief', 'base_revision', 'command_mode'}
         if set(data) - allowed:
             raise ValueError('Drafts store text and references only; unsent images remain in session memory.')
         text = data.get('text', '')
@@ -88,6 +89,11 @@ class DraftManager:
             raise ValueError('Draft text must contain at most 72,000 characters.')
         result = {'text': text, 'document_ids': self._references(data.get('document_ids'), 20),
                   'skills': self._references(data.get('skills'), 32), 'space_ids': self._references(data.get('space_ids'), 5)}
+        if 'command_mode' in data:
+            mode = data['command_mode']
+            if scope['kind'] == 'builder' or mode is not None and (not isinstance(mode, str) or mode not in COMMAND_MODES):
+                raise ValueError('Choose a supported chat command mode.')
+            result['command_mode'] = mode
         if 'brief' in data:
             if scope['kind'] != 'builder' or not isinstance(data['brief'], dict):
                 raise ValueError('Brief drafts belong to a Builder.')

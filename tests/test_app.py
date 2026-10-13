@@ -47,7 +47,7 @@ def test_actual_http_errors(monkeypatch):
     real=httpx.Client
     def mock_handler(request): return httpx.Response(404,json={'error':'model missing'})
     monkeypatch.setattr(httpx,'Client',lambda **kw:real(transport=httpx.MockTransport(mock_handler)))
-    with pytest.raises(ValueError,match='model missing'): Core().dispatch('show',{'model':'missing'})
+    with pytest.raises(ValueError,match=r'Ollama rejected the request \(HTTP 404\)'): Core().dispatch('show',{'model':'missing'})
 
 def test_research_sources(monkeypatch):
     import ddgs

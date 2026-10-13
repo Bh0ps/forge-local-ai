@@ -60,7 +60,7 @@ def test_cache_detached_and_explicit_invalidation(tmp_path):
     pool.invalidate(); assert not pool.model_cache and not pool.capability_cache
 
 
-def test_adaptive_only_approved_profile_and_unlocked_settings(tmp_path):
+def test_legacy_adaptive_record_cannot_change_selection_even_when_old_locks_are_open(tmp_path):
     store=ForgeStore(tmp_path)
     profile=store.save_entity('calibrations',{'id':'cal-one','validated':True,'provider_id':'ollama',
         'model':'fixture','model_digest':'weights-a','median_total_seconds':1,
@@ -69,7 +69,7 @@ def test_adaptive_only_approved_profile_and_unlocked_settings(tmp_path):
     locked=adaptive_settings(store,{},current,ProviderPool(Core(),store))
     assert locked['context']==32768
     unlocked=adaptive_settings(store,{}, {**current,'adaptive_context_locked':False},ProviderPool(Core(),store))
-    assert unlocked['context']==16384
+    assert unlocked['context']==32768
     assert adaptive_settings(store,{}, {**current,'adaptive_profile_ids':[]})['context']==32768
     stale=SimpleNamespace(models=lambda identifier:[{'name':'fixture','digest':'weights-b'}])
     assert adaptive_settings(store,{}, {**current,'adaptive_context_locked':False},stale)['context']==32768

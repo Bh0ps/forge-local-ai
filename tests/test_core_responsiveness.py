@@ -147,7 +147,7 @@ def test_stream_returns_incremental_packets_and_closes_connection(monkeypatch):
 
 
 @pytest.mark.parametrize(('body', 'message'), [
-    (b'{"error":"model is missing"}\n', 'model is missing'),
+    (b'{"error":"model is missing"}\n', 'Ollama rejected the request'),
     (b'not-json\n', 'invalid response stream'),
     (b'{"message":{"content":"unfinished"},"done":false}\n', 'before completing'),
     (b'{"message":{"content":{}}}\n', 'invalid message'),
@@ -160,7 +160,7 @@ def test_stream_failures_are_visible(monkeypatch, body, message):
 
 def test_stream_reports_http_error(monkeypatch):
     install_async_transport(monkeypatch, lambda request: httpx.Response(404, json={'error': 'model missing'}))
-    with pytest.raises(ValueError, match='model missing'):
+    with pytest.raises(ValueError, match=r'Ollama rejected the request \(HTTP 404\)'):
         list(Core().stream_chat(CHAT))
 
 

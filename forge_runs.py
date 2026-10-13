@@ -374,6 +374,13 @@ class RunManager:
         self.workflow=WorkflowCoordinator(self.store,service)
         self.cadence=VerificationCadence(self)
         self.store.recover()
+        try: self._cleanup_helpers()
+        except (ValueError, OSError): pass
+
+    def _cleanup_helpers(self):
+        from forge_helper_cleanup import cleanup_helpers
+        with self.lock:
+            return cleanup_helpers(self.store, self.jobs)
     def start(self,data,*,channel=None):
         from forge_builder_guide import prepare
         data=prepare(self.store,data)
@@ -1777,7 +1784,8 @@ class RunManager:
                 # An unsafe Resume cannot erase the original explicit refusal.
                 # Its fresh reworded retry is independent of the archived state.
                 self.store.update_run(identifier,failure=run['failure'])
-            elif hasattr(exc,'diagnostics'):self.store.update_run(identifier,failure=exc.diagnostics())
+            elif hasattr(exc,'diagnostics'):
+                self.store.update_run(identifier,failure={**exc.diagnostics(),'provider_id':run['settings']['provider_id']})
             if not job['cancel'].is_set(): self.store.event(identifier,'error',text=failure,resumable=True)
         finally:
             if partial or thinking or partial_details:
@@ -1794,7 +1802,11 @@ class RunManager:
                 self.store.finish_run(identifier,dict(status=status,phase='checkpoint',recovery=failure if status=='paused' else None,
                     review_pending=False if status=='completed' else self.store.run(identifier).get('review_pending',False),
                     elapsed_seconds=initial_elapsed+time.monotonic()-started),dict(cancelled=status=='cancelled',paused=status=='paused',chat_id=run['chat_id'],status=status))
-                self.jobs.pop(identifier,None)
             if status=='completed' and run['settings'].get('memory_suggestions',True) and hasattr(self.service,'get_memory'):
                 try: self.service.get_memory().suggest_from_run(self.store.run(identifier))
                 except Exception: pass
+            with self.lock: self.jobs.pop(identifier,None)
+            # Cleanup is retryable on the next startup/worker completion. Never
+            # turn a safely committed result into failure for maintenance I/O.
+            try: self._cleanup_helpers()
+            except (ValueError, OSError): pass

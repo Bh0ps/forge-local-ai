@@ -25,6 +25,19 @@ MAX_SUMMARY_CHARACTERS = 6000
 MAX_TOOL_CALLS = 32
 
 
+class OllamaRequestFailure(ValueError):
+    """An engine failure with fixed public text, never its response body."""
+    def __init__(self, status=None):
+        self.http_status=status if type(status) is int and 400<=status<=599 else None
+        self.category={401:'authentication',403:'access_denied',429:'quota'}.get(self.http_status,'provider_error')
+        suffix=' (HTTP '+str(self.http_status)+')' if self.http_status else ''
+        super().__init__('Ollama rejected the request'+suffix+'. Check the model and engine status, then retry.')
+
+    def diagnostics(self):
+        return {'provider_id':'ollama','category':self.category,
+                **({'http_status':self.http_status} if self.http_status is not None else {})}
+
+
 def thinking_metadata(info):
     """Detach only thinking-control facts from already acquired /show metadata."""
     if not isinstance(info, dict): return {}
@@ -166,12 +179,14 @@ class Core:
             result = response.json() if response.content else {}
         except ValueError:
             if response.is_error:
-                raise ValueError(response.text[:1500] or f'Ollama returned HTTP {response.status_code}.') from None
+                raise OllamaRequestFailure(response.status_code) from None
             raise ValueError('Ollama returned an invalid response. Try again.') from None
+        if response.is_error:
+            raise OllamaRequestFailure(response.status_code) from None
         if not isinstance(result, dict):
             raise ValueError('Ollama returned an invalid response. Try again.')
-        if response.is_error or result.get('error'):
-            raise ValueError(str(result.get('error') or f'Ollama returned HTTP {response.status_code}.')[:1500])
+        if result.get('error'):
+            raise OllamaRequestFailure(response.status_code) from None
         return result
 
     @staticmethod
@@ -457,7 +472,8 @@ class Core:
                 if not isinstance(packet, dict):
                     raise ValueError('Ollama returned an invalid response stream. Try again.')
                 if packet.get('error'):
-                    raise ValueError(str(packet['error'])[:1500])
+                    code=packet['error'].get('code') if isinstance(packet['error'],dict) else None
+                    raise OllamaRequestFailure(code) from None
                 message = packet.get('message', {})
                 if (not isinstance(message, dict)
                         or any(not isinstance(message.get(key, ''), str) for key in ('content', 'thinking'))):

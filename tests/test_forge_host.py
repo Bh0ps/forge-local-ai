@@ -1,7 +1,9 @@
 """Host security and lifecycle tests never inspect or control real apps."""
 import base64
 import io
+import json
 import os
+from pathlib import Path
 import threading
 import time
 from types import SimpleNamespace
@@ -106,7 +108,8 @@ def test_host_origin_and_content_guards(browser):
     assert client.get('/bundle.js').status_code == 200
     assert client.get('/%2e%2e/test_forge_host.py').status_code == 404
     health = client.get('/api/v1/health').json()
-    assert health['app'] == 'Forge' and health['version'] == '5.1.3'
+    declared=json.loads((Path(__file__).resolve().parents[1]/'frontend/package.json').read_text(encoding='utf-8'))['version']
+    assert health['app'] == 'Forge' and health['version'] == declared
 
 
 def test_cursor_events_json_and_sse(browser):

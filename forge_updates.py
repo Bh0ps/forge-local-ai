@@ -803,7 +803,7 @@ class UpdateManager:
             raise ValueError('The previous update outcome needs inspection. Repair Forge manually before another install or rollback.')
         pending=getattr(self.service,'_native_io_pending',0)
         if type(pending) is not int or pending!=0:
-            raise ValueError('Wait for native browser and preview work to finish before updating.')
+            raise ValueError('Wait for native browser, preview and engine checks to finish before updating.')
         from native_browser import NativeBrowser
         research=getattr(getattr(getattr(self.service,'integrations',None),'browser',None),'native',None)
         preview=getattr(getattr(getattr(self.service,'builder_manager',None),'previews',None),'browser',None)
@@ -811,7 +811,7 @@ class UpdateManager:
             if isinstance(browser,NativeBrowser):
                 pending=browser.pending_io()
                 if type(pending) is not int or pending!=0:
-                    raise ValueError('Wait for native browser and preview work to finish before updating.')
+                    raise ValueError('Wait for native browser, preview and engine checks to finish before updating.')
         if any(getattr(job.get('thread'), 'is_alive', lambda: False)() for job in getattr(self.service.jobs, 'jobs', {}).values()):
             raise ValueError('Wait for agent and memory workers to finish before updating.')
         for run in self.store.runs():
