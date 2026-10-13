@@ -102,7 +102,7 @@ describe('Forge 5.0.1 Builder state',()=>{
 
 describe('Forge 5.0.1 connection and navigation clarity',()=>{
   it('updates Scheduled counts from enabled schedules, independently from active chats',async()=>{
-    bridge({schedules:{schedules:[{id:'one',name:'Daily review',prompt:'Review',enabled:true},{id:'two',name:'Paused review',prompt:'Review',enabled:false},{id:'three',name:'Research',prompt:'Read',enabled:true}]},agents:{agents:[]}});const count=vi.fn();render(<SchedulesPage projects={[]} notify={()=>{}} onRun={()=>{}} onCount={count}/>);await screen.findByText('Daily review');expect(count).toHaveBeenCalledWith(2);
+    bridge({schedules:{schedules:[{id:'one',name:'Daily review',prompt:'Review',enabled:true},{id:'two',name:'Paused review',prompt:'Review',enabled:false},{id:'three',name:'Research',prompt:'Read',enabled:true}]},agents:{agents:[]}});const count=vi.fn();render(<SchedulesPage projects={[]} notify={()=>{}} onRun={()=>{}} onCount={count}/>);await screen.findByText('Daily review');await waitFor(()=>expect(count).toHaveBeenCalledWith(2));
   });
   it('distinguishes authenticated metadata from verified workflow and configures only explicitly',async()=>{
     const connection={enabled:true,connected:true,remote_consent:true,data_collection:'deny'};const status={configuration:{state:'configured'},authentication:{state:'verified'},free_capacity:{state:'available',remaining:10},profiles:{state:'ready'},workflow:{state:'unverified'}};

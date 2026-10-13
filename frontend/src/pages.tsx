@@ -1,6 +1,6 @@
 import { SkillSelector } from './skillWorkbench';
 import { ToolSelector } from './toolSelector';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Activity, ArrowUpRight, Bot, CalendarClock, Check, ClipboardList, Download, ExternalLink, Folder, FolderPlus, GitBranch, Layers3, LoaderCircle, Pause, Pencil, Play, Plug, Plus, RefreshCw, Trash2, Wrench, X } from 'lucide-react';
 import { api, compactNumber, errorText, isNative, native, tokenLabel } from './api';
 import { Badge, Empty, ErrorNotice, Field, IconButton, Markdown, Modal, PageHeader, Toggle, useResource } from './components';
@@ -80,14 +80,115 @@ export function activeGoals(goals: Goal[], chats: Chat[]) {
   const chatIds = new Set(chats.map(chat => chat.id));
   return goals.filter(goal => Boolean(goal.chat_id && chatIds.has(goal.chat_id)) && (active.has(goal.status) || ['paused','interrupted'].includes(goal.status) && (goal.execution_mode==='guided' || Boolean(goal.review && ['needs_changes','insufficient_evidence','error','reviewing'].includes(goal.review.status)))));
 }
+export function goalInProject(goal: Goal, projectId: string | null, chats: Chat[]) {
+  const chat = chats.find(item => item.id === goal.chat_id);
+  if (!chat || (chat.project_id || null) !== projectId) return false;
+  const declared = (goal as Goal & { project_id?: string | null }).project_id;
+  return declared === undefined || declared === projectId;
+}
+function goalDetailMarker(goal: Goal) {
+  const hash = (goal as Goal & { markdown_hash?: string }).markdown_hash;
+  return JSON.stringify([goal.revision, hash, goal.run_id, goal.status, goal.review?.status, hash === undefined ? goal.markdown : undefined]);
+}
+function olderGoal(incoming: Goal, existing: Goal) {
+  return typeof incoming.revision === 'number' && typeof existing.revision === 'number' && Number.isSafeInteger(incoming.revision) && Number.isSafeInteger(existing.revision) && incoming.revision < existing.revision;
+}
 export function GoalsPanel({ projectId, chats, version, notify, onRun }: { projectId: string | null; chats: Chat[]; version: number; notify: Notify; onRun: (run: Run) => void }) {
   const data = useResource<Goal>('goals', 'goals', { project_id: projectId, active_only: true }); const [selected, setSelected] = useState<Goal | null>(null); const [markdown, setMarkdown] = useState(''); const [conflict, setConflict] = useState(false);
-  const visible = activeGoals(data.items, chats);
-  const current = selected ? data.items.find(goal => goal.id === selected.id) || selected : null;
-  const shownMarkdown = conflict ? markdown : current?.markdown || markdown;
+  const [opening, setOpening] = useState<{ id: string; projectId: string | null } | null>(null), [mutating, setMutating] = useState(false);
+  const [refreshingDetail, setRefreshingDetail] = useState(false), [detailError, setDetailError] = useState('');
+  const detailRequest = useRef(0), detailMarker = useRef('');
+  const mounted = useRef(true), request = useRef(0), mutationPending = useRef(false), context = useRef({ projectId, chats });
+  const priorProject = useRef(projectId), buttons = useRef(new Map<string, HTMLButtonElement>());
+  context.current = { projectId, chats };
+  if (priorProject.current !== projectId) { priorProject.current = projectId; request.current++; }
+  const visible = activeGoals(data.items.filter(goal => goalInProject(goal, projectId, chats)), chats);
+  const listed = selected && visible.find(goal => goal.id === selected.id);
+  const current = selected && listed && goalInProject(selected, projectId, chats) ? olderGoal(listed, selected) ? selected : { ...selected, ...listed } : null;
+  const currentGoal = useRef<Goal | null>(null); currentGoal.current = current;
+  const pendingGoal = opening?.projectId === projectId ? visible.find(goal => goal.id === opening.id) : undefined;
+  const selectionGeneration = request.current;
+  const controlsPending = mutating || refreshingDetail || Boolean(detailError);
+  const shownMarkdown = markdown;
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; request.current++; }; }, []);
+  useEffect(() => { detailRequest.current++; detailMarker.current = ''; setSelected(null); setOpening(null); setMarkdown(''); setConflict(false); setRefreshingDetail(false); setDetailError(''); }, [projectId]);
   useEffect(() => { let pending=false; const refresh=async()=>{if(pending || document.visibilityState==='hidden')return;pending=true;try{await data.refresh();}finally{pending=false;}};void refresh(); const timer = setInterval(() => void refresh(), 2000); return () => clearInterval(timer); }, [version, projectId]);
-  useEffect(() => { if (selected && !data.loading && !visible.some(goal => goal.id === selected.id)) setSelected(null); }, [data.items, chats, data.loading, selected]);
-  async function open(goal: Goal) { try { const r = await api<{ goal: Goal; markdown: string; conflict?: boolean }>('goal_get', { id: goal.id }); setSelected(r.goal); setMarkdown(r.markdown); setConflict(Boolean(r.conflict || (r.goal as Goal & { external_edits?: boolean }).external_edits)); } catch (e) { notify(errorText(e)); } }
-  async function reconcile(mode: string) { if (!selected) return; try { await api('goal_reconcile', { id: selected.id, mode: mode === 'restore' ? 'overwrite' : mode }); await open(selected); notify('Checklist reconciled.'); } catch (e) { notify(errorText(e)); } }
-  return <div className="goals-panel">{data.error && <ErrorNotice error={data.error} />}<h3>Active goals</h3>{!visible.length && <Empty icon={<ClipboardList size={24} />} title="No active goals" text="Build a plan or use /goal to start tracked work." />}{visible.map(goal => <button key={goal.id} className="goal-item" onClick={() => void open(goal)}><ClipboardList size={14} /><span>{goal.title || goal.text || 'Goal'}</span><Badge>{goal.status}</Badge></button>)}{selected && <div className="goal-detail"><header><strong>{selected.title || 'Goal checkpoint'}</strong><IconButton label="Close goal detail" onClick={() => setSelected(null)}><X size={14} /></IconButton></header>{conflict && <div className="conflict-banner"><strong>Checklist changed outside Forge</strong><p>Choose which version to keep before continuing.</p><button onClick={() => void reconcile('import')}>Use Markdown edits</button><button onClick={() => void reconcile('restore')}>Restore saved state</button></div>}<GuidanceCard assignment={current?.planner_assignment}/>{current && <GoalGuidanceActions goal={current} conflict={conflict} notify={notify} onRequested={goal=>{setSelected(goal);void data.refresh();}}/>}<GoalReviewCard review={current?.review} paused={["paused","interrupted"].includes(current?.status || "")} /><Markdown text={shownMarkdown} />{current && <GoalTaskEvidence goal={current} conflict={conflict} onAccepted={goal=>{setSelected(goal);setMarkdown(goal.markdown||'');void data.refresh();}}/>}<div className="goal-controls"><button className="secondary" disabled={conflict || !["paused","interrupted","failed","ready"].includes(current?.status || "")} onClick={() => void api<Run>('goal_resume', { id: selected.id }).then(run => { onRun(run); void data.refresh(); }).catch(e => notify(errorText(e)))}><Play size={13} />Resume</button><button className="text-button" onClick={() => void api('goal_pause', { id: selected.id }).then(() => void data.refresh()).catch(e => notify(errorText(e)))}><Pause size={13} />Pause</button><button className="text-button" onClick={() => void api('goal_export', { id: selected.id, project_id: projectId }).then(r => notify(String(r.path || 'Checklist exported.'))).catch(e => notify(errorText(e)))}><Download size={13} />Export</button></div>{selected.path && <small className="goal-path">{selected.path}</small>}</div>}</div>;
+  useEffect(() => {
+    if (!data.loading && (selected && !visible.some(goal => goal.id === selected.id) || opening && !pendingGoal)) {
+      request.current++; setSelected(null); setOpening(null); setMarkdown(''); setConflict(false);
+    }
+  }, [data.items, chats, data.loading, selected, opening]);
+  function owned(identity: number, scope: string | null, goal: Goal) {
+    return mounted.current && identity === request.current && context.current.projectId === scope && goalInProject(goal, scope, context.current.chats);
+  }
+  async function open(goal: Goal) {
+    if (!goalInProject(goal, projectId, chats)) return;
+    const identity = ++request.current, scope = projectId;
+    detailRequest.current++; setRefreshingDetail(false); setDetailError('');
+    setSelected(null); setOpening({ id: goal.id, projectId: scope }); setMarkdown(''); setConflict(false);
+    try {
+      const r = await api<{ goal: Goal; markdown: string; conflict?: boolean }>('goal_get', { id: goal.id, project_id: scope });
+      if (!owned(identity, scope, goal)) return;
+      if (r.goal.id !== goal.id || !goalInProject(r.goal, scope, context.current.chats)) throw new Error('This goal is no longer available in this project.');
+      if (!activeGoals([r.goal], context.current.chats).length) { void data.refresh(); return; }
+      detailMarker.current = goalDetailMarker({ ...goal, ...r.goal });
+      data.setItems(items => items.map(item => item.id === goal.id && !olderGoal(r.goal, item) ? { ...item, ...r.goal } : item));
+      setSelected(r.goal); setMarkdown(r.markdown); setConflict(Boolean(r.conflict || (r.goal as Goal & { external_edits?: boolean }).external_edits));
+    } catch (e) { if (owned(identity, scope, goal)) notify(errorText(e)); }
+    finally { if (owned(identity, scope, goal)) setOpening(null); }
+  }
+  function close() {
+    const id = current?.id || pendingGoal?.id;
+    request.current++; detailRequest.current++; setRefreshingDetail(false); setDetailError(''); setSelected(null); setOpening(null); setMarkdown(''); setConflict(false);
+    if (id) queueMicrotask(() => buttons.current.get(id)?.focus());
+  }
+  function changed(goal: Goal) {
+    if (!current || !owned(selectionGeneration, projectId, current) || current.id !== goal.id || !goalInProject(goal, projectId, context.current.chats)) return;
+    const latest = currentGoal.current;
+    if (!latest || latest.id !== goal.id || latest.run_id && goal.run_id !== latest.run_id || olderGoal(goal, latest)) return;
+    detailRequest.current++; setRefreshingDetail(false); setDetailError(''); detailMarker.current = goalDetailMarker({ ...current, ...goal });
+    setSelected(goal); setMarkdown(goal.markdown || ''); data.setItems(items => items.map(item => item.id === goal.id && !olderGoal(goal, item) ? { ...item, ...goal } : item)); void data.refresh();
+  }
+  async function refreshDetail(goal: Goal) {
+    const identity = request.current, scope = projectId, detail = ++detailRequest.current;
+    setRefreshingDetail(true); setDetailError('');
+    try {
+      const result = await api<{ goal: Goal; markdown: string; conflict?: boolean }>('goal_get', { id: goal.id, project_id: scope });
+      if (!owned(identity, scope, goal) || detail !== detailRequest.current) return;
+      if (result.goal.id !== goal.id || !goalInProject(result.goal, scope, context.current.chats)) throw new Error('This goal is no longer available in this project.');
+      if (!activeGoals([result.goal], context.current.chats).length) { setSelected(null); void data.refresh(); return; }
+      setSelected(result.goal); setMarkdown(result.markdown); setConflict(Boolean(result.conflict || (result.goal as Goal & { external_edits?: boolean }).external_edits));
+    } catch (e) { if (owned(identity, scope, goal) && detail === detailRequest.current) setDetailError(errorText(e)); }
+    finally { if (owned(identity, scope, goal) && detail === detailRequest.current) setRefreshingDetail(false); }
+  }
+  const listMarker = listed ? goalDetailMarker(listed) : '';
+  useEffect(() => {
+    if (!current || !listMarker || listMarker === detailMarker.current) return;
+    detailMarker.current = listMarker;
+    void refreshDetail(current);
+  }, [listMarker, selected?.id]);
+  async function mutate(action: 'goal_resume' | 'goal_pause' | 'goal_export' | 'goal_reconcile', mode?: string) {
+    if (!current || mutationPending.current || !goalInProject(current, projectId, context.current.chats)) return;
+    const goal = current, identity = request.current, scope = projectId;
+    mutationPending.current = true; setMutating(true);
+    try {
+      const result = await api<Run & { path?: string }>(action, { id: goal.id, ...(action === 'goal_export' ? { project_id: scope } : {}), ...(mode ? { mode: mode === 'restore' ? 'overwrite' : mode } : {}) });
+      if (!owned(identity, scope, goal)) return;
+      if (action === 'goal_resume') onRun(result);
+      if (action === 'goal_export') notify(result.path || 'Checklist exported.');
+      else if (action === 'goal_reconcile') { notify('Checklist reconciled.'); await open(goal); }
+      else void data.refresh();
+    } catch (e) { if (owned(identity, scope, goal)) notify(errorText(e)); }
+    finally { mutationPending.current = false; if (mounted.current) setMutating(false); }
+  }
+  return <div className="goals-panel">{data.error && <ErrorNotice error={data.error} retry={() => void data.refresh()} />}<h3>Active goals</h3>
+    {data.loading && !visible.length && <p className="muted" role="status">Loading goals…</p>}
+    {!data.loading && !data.error && !visible.length && <Empty icon={<ClipboardList size={24} />} title="No active goals" text="Build a plan or use /goal to start tracked work here." />}
+    {visible.map(goal => <button key={goal.id} ref={element => { if (element) buttons.current.set(goal.id, element); else buttons.current.delete(goal.id); }} className="goal-item" disabled={mutating} aria-expanded={current?.id === goal.id || pendingGoal?.id === goal.id} onClick={() => void open(goal)}><ClipboardList size={14} /><span>{goal.title || goal.text || 'Goal'}</span><Badge>{goal.status}</Badge></button>)}
+    {(current || pendingGoal) && <div className="goal-detail" aria-busy={Boolean(pendingGoal) || mutating || refreshingDetail}><header><strong>{current?.title || pendingGoal?.title || 'Goal checkpoint'}</strong><IconButton label="Close goal detail" disabled={mutating} onClick={close}><X size={14} /></IconButton></header>
+      {pendingGoal && <p className="muted" role="status">Loading goal…</p>}
+      {current && <>{refreshingDetail && <p className="muted" role="status">Refreshing checklist…</p>}{detailError && <ErrorNotice error={detailError} retry={() => void refreshDetail(current)}/>}<div inert={controlsPending || undefined}>{conflict && <div className="conflict-banner"><strong>Checklist changed outside Forge</strong><p>Choose which version to keep before continuing.</p><button disabled={controlsPending} onClick={() => void mutate('goal_reconcile', 'import')}>Use Markdown edits</button><button disabled={controlsPending} onClick={() => void mutate('goal_reconcile', 'restore')}>Restore saved state</button></div>}<GuidanceCard assignment={current.planner_assignment}/><GoalGuidanceActions goal={current} conflict={conflict} notify={notify} onRequested={changed}/><GoalReviewCard review={current.review} paused={["paused","interrupted"].includes(current.status)} /><Markdown text={shownMarkdown} /><GoalTaskEvidence goal={current} conflict={conflict} onAccepted={changed}/></div>
+        <div className="goal-controls"><button className="secondary" disabled={controlsPending || conflict || !["paused","interrupted","failed","ready"].includes(current.status)} onClick={() => void mutate('goal_resume')}><Play size={13} />Resume</button><button className="text-button" disabled={controlsPending || !['queued','running','compacting','reviewing','starting','resuming','waiting_approval','awaiting_approval','waiting_question','awaiting_question'].includes(current.status)} onClick={() => void mutate('goal_pause')}><Pause size={13} />Pause</button><button className="text-button" disabled={controlsPending || projectId === null} onClick={() => void mutate('goal_export')}><Download size={13} />Export</button></div>{projectId === null && <p className="muted">Connect this goal to a project to export its checklist.</p>}{current.path && <small className="goal-path">{current.path}</small>}</>}
+    </div>}
+  </div>;
 }

@@ -67,6 +67,16 @@ chat drafts remain available. The research browser keeps a submitted URL visible
 while navigation waits, preserves later edits and shows failed navigation for
 retry instead of restoring an older address.
 
+The Goals pane stays within its selected project, including Unassigned. Opening
+or closing a goal fences delayed replies so another project's detail cannot
+reappear. Exports use the goal's current project ownership and reject a different
+destination before writing files.
+
+Quit keeps new input closed while allowing Forge to stop its own browser and
+services. Each cleanup step is attempted independently, and a failed step is
+reported without skipping the remaining window cleanup. Native update failures
+remain visible as update status instead of becoming failed status requests.
+
 ## Downloads, trust and recovery
 
 GitHub detection, channel selection and publisher-authenticated downloads retain

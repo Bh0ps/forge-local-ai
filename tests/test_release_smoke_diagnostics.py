@@ -1,10 +1,13 @@
 """Smoke evidence remains bounded and private without launching Forge."""
+import ast
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -80,6 +83,44 @@ def test_ordinary_and_helper_modes_cannot_write_a_stale_smoke_checkpoint(monkeyp
         desktop._smoke_checkpoint('service-start')
 
 
+@pytest.mark.parametrize('failure,expected', [('guard', 'not-executed'),
+    ('timeout', 'outcome-unknown'), ('runtime', 'outcome-unknown')])
+def test_research_smoke_retains_native_refusal_and_unknown_outcome_evidence(tmp_path, failure, expected):
+    from browser_tools import BrowserTools
+    from forge_integrations import IntegrationHub
+    from forge_runs import ToolRegistry
+    from native_browser import BrowserGuard, NativeBrowser
+    errors = {'guard': BrowserGuard('Browser panel bounds must be finite numbers.'),
+        'timeout': TimeoutError('Synthetic browser dispatch timeout'),
+        'runtime': RuntimeError('Synthetic browser initialization failure')}
+    class Page:
+        def ready(self): pass
+        def show(self): raise errors[failure]
+    browser = BrowserTools(tmp_path)
+    native = NativeBrowser(tmp_path, view_factory=lambda changed: Page(), session_check=lambda: True)
+    browser.native = native
+    hub = object.__new__(IntegrationHub)
+    hub.browser = browser
+    service = SimpleNamespace(store=object(), integrations=hub)
+    service.jobs = SimpleNamespace(registry=ToolRegistry(service))
+    result = {}
+    # Execute the shipped smoke helper against the real registry/integration/
+    # native worker path. No WebView2 control, host startup or network is used.
+    source = Path(desktop.__file__).read_text(encoding='utf-8')
+    definition = next(node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == 'tool')
+    namespace = {'service': service, 'browser': browser, 'result': result,
+        'run': {'id': 'synthetic-smoke', 'project_id': None}, 'cancel': threading.Event()}
+    exec(compile(ast.Module(body=[definition], type_ignores=[]), desktop.__file__, 'exec'), namespace)
+    try:
+        with pytest.raises(ValueError):
+            namespace['tool']('browser_navigate', {'url': 'http://127.0.0.1:1/'})
+        assert result == {'tool_failure': expected, 'research_view_created': True}
+    finally:
+        native.view = None
+        browser.shutdown()
+
+
 def test_powershell_reads_bounded_reports_and_redacts_before_persistence(tmp_path):
     shell = shutil.which('pwsh') or shutil.which('powershell')
     if os.name != 'nt' or not shell:
@@ -112,6 +153,22 @@ Write-ForgeSmokeDiagnostics $null $secret ([pscustomobject]@{private=$secret})
 $saved=[IO.File]::ReadAllText($script:ForgeSmokeDiagnosticPath)
 $safe=$saved|ConvertFrom-Json
 if ($saved.Contains($secret) -or $safe.gate -ne 'unclassified' -or $null -ne $safe.process_exit) { throw 'Unknown gate or exit object escaped the closed summary.' }
+foreach ($case in @(
+    @('Integration timed out. Inspect its outcome before retrying a side effect.','integration-timeout','outcome-unknown'),
+    @('Native input is paused while Forge confirms a restart.','native-admission','refused'),
+    @('Browser panel bounds must be finite numbers.','panel-bounds','not-executed'),
+    @('Integration failed (AttributeError). Check the endpoint, authentication and server availability.','integration-attribute','outcome-unknown'))) {
+    $data=[pscustomobject]@{smoke_phase='research-navigate';error_type='ValueError';error=$case[0];tool_failure=$case[2];research_view_created=$true;private=$secret}
+    Write-ForgeSmokeDiagnostics $data 'process-timeout' $null 'ready'
+    $saved=[IO.File]::ReadAllText($script:ForgeSmokeDiagnosticPath)
+    $safe=$saved|ConvertFrom-Json
+    if ($saved.Contains($secret) -or $safe.error_category -ne $case[1] -or $safe.tool_failure -ne $case[2] -or $safe.research_view_created -ne $true -or $safe.gate -ne 'process-timeout') { throw 'Fixed browser/integration refusal evidence was not preserved safely.' }
+}
+$data=[pscustomobject]@{error=$secret;tool_failure=$secret;research_view_created=[pscustomobject]@{private=$secret}}
+Write-ForgeSmokeDiagnostics $data 'process-timeout' $null
+$saved=[IO.File]::ReadAllText($script:ForgeSmokeDiagnosticPath)
+$safe=$saved|ConvertFrom-Json
+if ($saved.Contains($secret) -or $safe.tool_failure -ne 'unrecorded' -or $null -ne $safe.research_view_created -or $safe.error_category -ne 'unclassified') { throw 'Unknown tool status escaped the closed summary.' }
 [IO.File]::WriteAllText($raw, '{invalid')
 if ((Read-ForgeSmokeReport $raw).state -ne 'invalid') { throw 'Malformed report was accepted.' }
 [IO.File]::WriteAllText($raw, ('x' * 1048577))

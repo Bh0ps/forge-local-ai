@@ -129,6 +129,199 @@ def test_locked_native_quit_cannot_destroy_window_or_cancel_input(bridge):
     assert result['ok'] is False and not instance._closing
 
 
+def owned_browser_cleanup(instance, service, tmp_path, events):
+    """Actual teardown chain with raw page methods and inert UI controls."""
+    from browser_tools import BrowserTools
+    from forge_host import HostLifecycle
+    from forge_integrations import IntegrationHub
+    from native_browser import NativeBrowser, WebView2Page
+    native = NativeBrowser(tmp_path, ui_dispatch=instance._native, session_check=lambda: True)
+    page = object.__new__(WebView2Page)
+    page.ui = instance._native
+    page.control = SimpleNamespace(CoreWebView2=SimpleNamespace(Stop=lambda: events.append('browser-stop')))
+    def closed():
+        events.append('browser-close')
+        native._changed('closed')
+    page.form = SimpleNamespace(Close=closed)
+    native.view = page
+    browser = object.__new__(BrowserTools)
+    browser.native, browser.bridge, browser.extension_snapshots = native, None, {}
+    hub = SimpleNamespace(browser=browser)
+    service.emergency_stop = lambda: IntegrationHub.stop(hub)
+    def shutdown():
+        events.append('service-shutdown')
+        native.shutdown()
+    service.shutdown = shutdown
+    instance._lifecycle = HostLifecycle(service, instance._pairing)
+    instance._window.destroy = lambda: events.append('window-destroy')
+    return native
+
+
+def test_owned_quit_stops_and_closes_retained_browser_before_destroying_window(bridge, tmp_path):
+    instance, service, _ = bridge
+    events = []
+    native = owned_browser_cleanup(instance, service, tmp_path, events)
+    try:
+        assert instance.quit() == {'ok': True}
+        assert events == ['browser-stop', 'service-shutdown', 'browser-close', 'window-destroy']
+        assert native.closed and native.view is None
+        assert instance._native_pending == 0 and not instance._owned_teardown.active
+        assert instance.quit() == {'ok': True}
+        assert events.count('window-destroy') == 1
+    finally:
+        native.view = None
+        native.shutdown()
+
+
+def test_owned_quit_does_not_admit_concurrent_native_input(bridge, tmp_path):
+    instance, service, _ = bridge
+    events, failures = [], []
+    native = owned_browser_cleanup(instance, service, tmp_path, events)
+    stop = service.emergency_stop
+    def unrelated():
+        try:
+            instance._native(lambda form: events.append('unrelated-input'))
+        except Exception as exc:
+            failures.append(type(exc))
+    def emergency_stop():
+        worker = threading.Thread(target=unrelated)
+        worker.start()
+        worker.join(2)
+        assert not worker.is_alive()
+        stop()
+    service.emergency_stop = emergency_stop
+    try:
+        assert instance.quit() == {'ok': True}
+        assert failures == [ValueError] and 'unrelated-input' not in events
+        assert 'window-destroy' in events and instance._native_pending == 0
+    finally:
+        native.view = None
+        native.shutdown()
+
+
+def test_native_callback_queued_before_quit_cannot_execute_during_teardown(bridge, monkeypatch):
+    instance, _, form = bridge
+    queued, events = [], []
+    form.InvokeRequired = True
+    form.BeginInvoke = queued.append
+    class Event:
+        def wait(self, duration): return False
+        def set(self): pass
+    monkeypatch.setattr('desktop.threading.Event', Event)
+    with pytest.raises(TimeoutError):
+        instance._native(lambda form: events.append('queued-input'))
+    assert instance._native_pending == 1
+    form.InvokeRequired = False
+    instance._lifecycle = SimpleNamespace(quit=lambda: queued.pop()())
+    instance._window.destroy = lambda: events.append('window-destroy')
+    assert instance.quit() == {'ok': True}
+    assert events == ['window-destroy'] and instance._native_pending == 0
+
+
+def test_owned_teardown_scope_clears_when_custom_lifecycle_cleanup_raises(bridge):
+    instance, _, _ = bridge
+    def unavailable():
+        raise RuntimeError('Synthetic teardown failure')
+    instance._lifecycle = SimpleNamespace(quit=unavailable)
+    destroyed = []
+    instance._window.destroy = lambda: destroyed.append(True)
+    result = instance.quit()
+    assert result == {'ok': False, 'error': 'Forge could not complete owned cleanup.'}
+    assert destroyed == [True] and instance.quit() == result and destroyed == [True]
+    assert not instance._owned_teardown.active
+    with pytest.raises(ValueError):
+        instance._native(lambda form: pytest.fail('Failed teardown cannot grant further native input'))
+
+
+@pytest.mark.parametrize('failure', ['dictation', 'pairing', 'browser-stop', 'service', 'hotkey', 'tray', 'window'])
+def test_failed_owned_cleanup_attempts_all_independent_steps_and_remains_honest(bridge, tmp_path, caplog, failure):
+    instance, service, _ = bridge
+    events = []
+    native = owned_browser_cleanup(instance, service, tmp_path, events)
+    def step(name):
+        events.append(name)
+        if name == failure:
+            raise RuntimeError('Synthetic private cleanup exception and nonce')
+    service.host_dictation.cancel = lambda: step('dictation')
+    instance._lifecycle.pairing = SimpleNamespace(close=lambda: step('pairing'))
+    native.view.control.CoreWebView2.Stop = lambda: step('browser-stop')
+    def shutdown():
+        step('service')
+        native.shutdown()
+    service.shutdown = shutdown
+    server = SimpleNamespace(should_exit=False)
+    instance._lifecycle.server = server
+    instance._hotkey = SimpleNamespace(stop=lambda: step('hotkey'))
+    instance._tray = SimpleNamespace(stop=lambda: step('tray'))
+    instance._window.destroy = lambda: step('window')
+    try:
+        result = instance.quit()
+        assert result == {'ok': False, 'error': 'Forge could not complete owned cleanup.'}
+        assert all(name in events for name in ('dictation', 'pairing', 'browser-stop', 'service', 'hotkey', 'tray', 'window'))
+        assert server.should_exit and instance._closing and not instance._owned_teardown.active
+        count = len(events)
+        assert instance.quit() == result and len(events) == count
+        assert 'Synthetic private cleanup exception and nonce' not in caplog.text
+        assert 'RuntimeError' in caplog.text
+        with pytest.raises(ValueError):
+            instance._native(lambda form: pytest.fail('No reopening after failed owned cleanup'))
+    finally:
+        native.view = None
+        native.shutdown()
+
+
+def test_incomplete_native_handoff_departure_reports_failure_without_minting_stop_proof(bridge, monkeypatch):
+    from forge_native_handoff import HandoffRejected
+    instance, _, _ = bridge
+    instance._trusted_loaded = True
+    instance._update_controller = controller = object()
+    grant = SimpleNamespace(binding=SimpleNamespace(navigation=0, session=None, window_id=instance._window.uid))
+    admitted = []
+    monkeypatch.setattr(instance._update_authority, 'pipe_admission', lambda *args: admitted.append(args))
+    monkeypatch.setattr(instance._update_authority, 'stopped_helper', lambda *args: pytest.fail('Cleanup is not helper stop proof'))
+    instance._lifecycle = SimpleNamespace(quit=lambda: (_ for _ in ()).throw(RuntimeError('Synthetic owned failure')))
+    destroyed = []
+    instance._window.destroy = lambda: destroyed.append(True)
+    transport = object()
+    with pytest.raises(HandoffRejected) as rejected:
+        instance._handoff_depart(controller, grant, transport)
+    assert rejected.value.reason == 'helper_failed'
+    assert admitted == [(grant, transport)] and destroyed == [True]
+    assert instance._closing and instance._quit_complete is False and not instance._owned_teardown.active
+
+
+def test_owned_teardown_preserves_the_lifecycle_service_and_custom_quit_override(bridge):
+    from forge_host import HostLifecycle
+    instance, service, _ = bridge
+    events = []
+    service.shutdown = lambda: pytest.fail('Owned lifecycle service is authoritative')
+    owner = SimpleNamespace(emergency_stop=lambda: events.append('stop'), shutdown=lambda: events.append('shutdown'))
+    instance._lifecycle = HostLifecycle(owner, instance._pairing)
+    instance._window.destroy = lambda: events.append('window')
+    assert instance.quit() == {'ok': True}
+    assert events == ['stop', 'shutdown', 'window']
+    class CustomLifecycle(HostLifecycle):
+        def quit(self): events.append('custom-quit')
+    instance._lifecycle = CustomLifecycle(owner, instance._pairing)
+    # An internal custom lifecycle keeps its own override; no public input is
+    # reopened and the bridge's closing guard stays in force.
+    assert instance._quit_owned() is True
+    assert events[-2:] == ['custom-quit', 'window']
+
+
+@pytest.mark.parametrize('state,error', [('error', 'Check for updates again.'),
+    ('interrupted', 'Inspect the previous update before continuing.'), ('available', None)])
+def test_native_update_status_preserves_renderable_operation_failures(bridge, flow, state, error):
+    instance, _, _ = bridge
+    flow.manager._save(state=state, error=error)
+    expected = flow.manager.dispatch('update_status', {})
+    result = instance._native_update_status(SimpleNamespace(manager=flow.manager), flow.binding)
+    assert 'error' not in result and result['operation_error'] == expected['operation_error'] == error
+    assert result['state'] == expected['state'] == state
+    assert result['current_version'] == expected['current_version']
+    assert flow.manager.state['error'] == error
+
+
 def test_default_handoff_gate_refuses_before_service_window_or_home_loading(bridge, monkeypatch):
     instance, _, _ = bridge
     instance._ensure_service = lambda: pytest.fail('Closed capability cannot touch coordinator state')
