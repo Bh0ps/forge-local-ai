@@ -260,6 +260,7 @@ async def _get_bytes(client, url, limit, cancel=None, progress=None, consume=Non
     async def fetch():
       target_url = url
       for _ in range(4):
+        if cancel is not None and cancel.is_set(): raise ValueError('Update download cancelled.')
         async with client.stream('GET', target_url) as response:
             if response.status_code in (301, 302, 303, 307, 308):
                 next_url = httpx.URL(response.headers.get('location', ''))
@@ -326,6 +327,7 @@ class UpdateManager:
         self.shutting_down = False
         self.thread = None
         self.thread_stop_event = None
+        self.check_policy = None
         self.monitor = None
         self.applying = False
         self.native_handoff = None
@@ -374,6 +376,8 @@ class UpdateManager:
                 self._save(state='error', release=release, release_proof=None,
                            downloaded=None, signature=None, verified=False, received_bytes=0,
                            error='The cached publisher proof is no longer valid. Check for updates again.')
+        from forge_update_downloads import AutomaticDownloads
+        self.automatic_downloads = AutomaticDownloads(self)
 
     def _save(self, **data):
         with self.lock:
@@ -387,7 +391,9 @@ class UpdateManager:
             supported = (bool(self.proof_keys) if mode == 'ed25519' else
                          False if mode == 'manual' else bool(self.publishers))
             configured = bool(self.publishers or self.proof_keys)
-            return {**public, 'current_version': self.current_version, 'repository': REPOSITORY,
+            return {**public, 'automatic_download': self.automatic_downloads.status() if hasattr(self, 'automatic_downloads') else
+                    {'phase': 'off', 'reason': 'disabled', 'attempt_count': 0},
+                'current_version': self.current_version, 'repository': REPOSITORY,
                 'channel': self.state.get('channel') if self.state.get('channel') in UPDATE_CHANNELS else 'stable',
                 'inspection_required': self.inspection_required,
                 'verified_download_available': bool(supported and not self.inspection_required),
@@ -458,14 +464,23 @@ class UpdateManager:
     def check_background(self, channel='stable', *, stop_event=None):
         """Reserve the operation before returning; HTTP never blocks the UI call."""
         channel = update_channel(channel)
+        policy = self.store.update_policy() if stop_event is not None else None
         with self.lock:
             with self.admission_lock:
                 if self.shutting_down or stop_event is not None and stop_event.is_set():
                     raise ValueError('The update check is stopping.')
             previous = self._begin_check(channel)
+            self.check_policy = (stop_event, policy) if stop_event is not None else None
+            if stop_event is not None: self.automatic_downloads.checking(policy)
             def worker():
-                try: self._check(channel, previous)
-                except Exception: pass  # Sanitized failure is already persisted.
+                try:
+                    result = self._check(channel, previous)
+                    if stop_event is not None: self.automatic_downloads.checked(stop_event, policy, result)
+                except Exception as exc:
+                    if stop_event is not None: self.automatic_downloads.check_failed(policy, exc)
+                finally:
+                    with self.lock:
+                        if self.check_policy and self.check_policy[0] is stop_event: self.check_policy = None
             with self.admission_lock:
                 stopped = self.shutting_down or stop_event is not None and stop_event.is_set()
                 if not stopped:
@@ -549,6 +564,15 @@ class UpdateManager:
                 signature.get('mode') == 'ed25519' if release['trust_mode'] == 'ed25519' else
                 signature.get('mode') is None and signature.get('status') == 'Valid')
             staged = previous.get('state') == 'ready' and previous.get('verified') is True and same and same_verification and release['trust_mode'] != 'manual'
+            if staged:
+                # A fresh publisher record alone cannot rearm altered cached bytes.
+                try:
+                    path = plain_path(previous.get('downloaded') or '')
+                    staged = path.is_relative_to(self.root.resolve()) and path.name == 'installer.exe' and path.is_file() and path.stat().st_size == release['size'] and file_hash(path) == release['sha256']
+                    if staged and release['trust_mode'] == 'ed25519':
+                        _, proof = self._proof(release, descriptor)
+                        verify_artifact(path, proof, release['name'])
+                except Exception: staged = False
             return self._finish_check(state='ready' if staged else 'available', release=release,
                 release_proof=descriptor,
                 downloaded=previous.get('downloaded') if staged else None,
@@ -557,8 +581,16 @@ class UpdateManager:
         except Exception as exc:
             # A failed feed check must not leave an old Install button armed.
             cancelled = self.cancel_event.is_set()
+            message = str(exc)[:400]
+            if self.check_policy:
+                from forge_update_downloads import failure_category
+                category = failure_category(exc)
+                message = {'offline': 'The update service could not be reached. Forge will check again later.',
+                    'rate_limited': 'The update service is rate limited. Forge will check again later.',
+                    'server_unavailable': 'The update service is temporarily unavailable. Forge will check again later.'}.get(
+                        category, 'The update could not be authenticated. Check again or use the public releases.')
             self._save(state='cancelled' if cancelled else 'error',
-                       error='Update check cancelled.' if cancelled else str(exc)[:400], verified=False,
+                       error='Update check cancelled.' if cancelled else message, verified=False,
                        last_check_failed=not cancelled, checked_at=int(time.time())); raise
 
     def _check_proof(self, metadata, release, channel):
@@ -587,16 +619,29 @@ class UpdateManager:
             raise ValueError('Publisher proof differs from GitHub installer metadata.')
         with self.lock:
             if self.cancel_event.is_set() or self.shutting_down: raise ValueError('Update check cancelled.')
-            target = plain_path(self.root / 'proofs' / (digest[7:] + '.json'))
-            atomic_text(target, raw.decode('utf-8'))
-            self.store.save_entity('update_trust', {'id': channel, 'version': proof['version'],
-                'revision': proof['revision'], 'proof_sha256': digest[7:]})
+            with self.store._connection(transaction='write') as db:
+                if self.check_policy and self.store._update_policy(db) != self.check_policy[1]:
+                    self.cancel_event.set(); raise ValueError('Update check cancelled.')
+                target = plain_path(self.root / 'proofs' / (digest[7:] + '.json'))
+                atomic_text(target, raw.decode('utf-8'))
+                self.store.save_entity('update_trust', {'id': channel, 'version': proof['version'],
+                    'revision': proof['revision'], 'proof_sha256': digest[7:]}, connection=db)
         release['source_commit'] = proof['source_commit']
         return {'sha256': digest[7:], 'size': size, 'channel': channel}
 
     def _finish_check(self, **data):
         with self.lock:
             if self.cancel_event.is_set(): raise ValueError('Update check cancelled.')
+            if self.check_policy:
+                with self.store._connection(transaction='write') as db:
+                    if self.store._update_policy(db) != self.check_policy[1]:
+                        self.cancel_event.set(); raise ValueError('Update check cancelled.')
+                    if data.get('verified') is True and (data.get('release') or {}).get('trust_mode') == 'ed25519':
+                        self._proof(data['release'], data.get('release_proof'))
+                    state = self.store.save_entity('updates', {**self.state, **data, 'id': 'current',
+                        'last_check_failed': False, 'checked_at': int(time.time())}, connection=db)
+                self.state = state
+                return self.status()
             return self._save(**data, last_check_failed=False, checked_at=int(time.time()))
 
     def download(self):
@@ -610,6 +655,7 @@ class UpdateManager:
             if release.get('trust_mode') == 'manual':
                 raise ValueError('This release has no verified publisher. Install it manually or check again.')
             if release.get('trust_mode') == 'ed25519': self._proof(release)
+            self.automatic_downloads.manual_retry(release, self.state.get('channel', 'stable'))
             self.cancel_event.clear()
             self._save(state='downloading', received_bytes=0, error=None, verified=False)
             with self.admission_lock:
@@ -623,37 +669,132 @@ class UpdateManager:
                 raise ValueError('The updater is shutting down.')
             return self.status()
 
-    def _download(self, release):
+    def _automatic_download(self, candidate, now):
+        from forge_update_downloads import DownloadLease, AutomaticRejected, MAX_ATTEMPTS
+        automatic = self.automatic_downloads
+        with automatic.admission():
+            if self.thread and self.thread.is_alive(): raise AutomaticRejected('active_work')
+            if automatic.candidate is not candidate or automatic.active is not None: raise AutomaticRejected('candidate_changed')
+            if not automatic.history_valid: raise AutomaticRejected('policy_error')
+            history = automatic.history if automatic.history.get('candidate') == candidate.identity else {}
+            if history.get('suppressed'): raise AutomaticRejected('user_cancelled')
+            if history.get('attempt_count', 0) >= MAX_ATTEMPTS: raise AutomaticRejected('retry_exhausted')
+            if history.get('terminal'): raise AutomaticRejected('verification_failed')
+            if now < history.get('not_before', 0): raise AutomaticRejected('fresh_check_required')
+            lease = DownloadLease(candidate, self.cancel_event)
+            self.thread_stop_event = candidate.owner
+            automatic.active = lease
+            self.cancel_event.clear()
+            try:
+                automatic.validate(lease)
+                if self.state.get('state') == 'ready' and self.state.get('verified') is True:
+                    try: self._package()
+                    except Exception:
+                        self._save(state='available', verified=False, downloaded=None, signature=None)
+                    else:
+                        automatic.validate(lease, resources=False)
+                        with self.admission_lock:
+                            automatic.validate_owner(lease)
+                            automatic.active = None; automatic.candidate = None
+                            automatic.phase, automatic.reason = 'ready', 'verified'
+                        return
+                self._proof(candidate.release, candidate.proof)
+                automatic._history(candidate=candidate.identity, attempt_count=history.get('attempt_count', 0) + 1,
+                    not_before=0, suppressed=False, terminal=False)
+                self._automatic_save(lease, state='downloading', received_bytes=0, error=None, verified=False)
+                automatic.phase, automatic.reason = 'downloading', None
+                with self.admission_lock:
+                    if self.shutting_down or candidate.owner.is_set() or lease.cancel.is_set():
+                        raise AutomaticRejected('stopped')
+                    self.thread = threading.Thread(target=self._download, args=(candidate.release,),
+                        kwargs={'automatic': lease}, daemon=True, name='Forge-update-auto-download')
+                    self.thread.start()
+            except Exception:
+                automatic.active = None
+                if self.state.get('state') == 'downloading':
+                    self._save(state='cancelled', verified=False, error='Automatic download stopped. Check the update status before retrying.')
+                raise
+
+    def _automatic_save(self, lease, *, promote=None, **data):
+        automatic = self.automatic_downloads
+        with automatic.admission():
+            promoted = False
+            try:
+                with self.store._connection(transaction='write') as db:
+                    automatic.validate(lease, connection=db)
+                    if promote is not None:
+                        self._proof(lease.candidate.release, lease.candidate.proof)
+                        automatic.validate(lease, resources=False, connection=db)
+                        os.replace(*promote); promoted = True
+                        automatic.validate(lease, resources=False, connection=db)
+                    state = self.store.save_entity('updates', {**self.state, **data, 'id': 'current'}, connection=db)
+                    automatic.validate(lease, resources=False, connection=db)
+                # Stop has a short independent gate; it must not wait for this
+                # disk transaction, nor can a late write claim stopped readiness.
+                automatic.validate(lease, resources=False)
+                with self.admission_lock:
+                    automatic.validate_owner(lease)
+                    self.state = state
+                return self.status()
+            except Exception:
+                if promoted:
+                    try: os.replace(promote[1], promote[1].with_suffix('.cancelled'))
+                    except OSError: pass  # Retain owned bytes, never arm them.
+                raise
+
+    def _download(self, release, *, automatic=None):
         directory = self.root / uuid4().hex
-        directory.mkdir()
         partial, complete = directory / 'installer.part', directory / 'installer.exe'
+        failure = None
         try:
+            if automatic:
+                with self.automatic_downloads.admission(): self.automatic_downloads.validate(automatic)
+                threading.Thread(target=self.automatic_downloads.watch, args=(automatic,), daemon=True,
+                    name='Forge-update-download-guard').start()
+            directory.mkdir()
             with partial.open('xb') as target:
                 async def fetch_package():
                     async with self.client_factory() as client:
                         await _get_bytes(client, release['url'], release['size'], self.cancel_event,
-                                         lambda count: self._save(received_bytes=count), target.write)
+                                         lambda count: self._automatic_save(automatic, received_bytes=count) if automatic else self._save(received_bytes=count), target.write)
                 asyncio.run(fetch_package())
                 target.flush(); os.fsync(target.fileno())
             if self.cancel_event.is_set(): raise ValueError('Update download cancelled.')
             if partial.stat().st_size != release['size'] or file_hash(partial) != release['sha256']:
                 raise ValueError('Installer failed SHA256 or size verification. Nothing was installed.')
             if release.get('trust_mode') == 'ed25519':
-                raw, proof = self._proof(release)
+                raw, proof = self._proof(release, automatic.candidate.proof if automatic else None)
                 verify_artifact(partial, proof, release['name'])
                 signature = {'mode': 'ed25519', 'proof_sha256': sha256(raw).hexdigest(), 'version': release['version']}
             else:
                 signature = require_trust(partial, release['version'], self.publishers, self.verifier)
-            with self.lock:
-                if self.cancel_event.is_set(): raise ValueError('Update download cancelled.')
-                os.replace(partial, complete)
-                self._save(state='ready', downloaded=str(complete), verified=True, signature=signature)
+            if automatic:
+                self._automatic_save(automatic, promote=(partial, complete), state='ready',
+                    downloaded=str(complete), verified=True, signature=signature)
+            else:
+                with self.lock:
+                    if self.cancel_event.is_set(): raise ValueError('Update download cancelled.')
+                    os.replace(partial, complete)
+                    self._save(state='ready', downloaded=str(complete), verified=True, signature=signature)
         except Exception as exc:
-            partial.unlink(missing_ok=True)
-            self._save(state='cancelled' if self.cancel_event.is_set() else 'error', error=str(exc)[:400], downloaded=None, verified=False)
+            failure = exc
+            try: partial.unlink(missing_ok=True)
+            except OSError: pass  # An incomplete private cache is never armed.
+            if automatic:
+                from forge_update_downloads import AutomaticRejected
+                if isinstance(exc, AutomaticRejected): automatic.reason = exc.reason; automatic.cancel.set()
+                with self.lock:
+                    if self.automatic_downloads.active is automatic:
+                        self._save(state='cancelled' if automatic.cancel.is_set() else 'error',
+                            error='Automatic download stopped. Check the update status before retrying.', downloaded=None, verified=False)
+            else:
+                self._save(state='cancelled' if self.cancel_event.is_set() else 'error', error=str(exc)[:400], downloaded=None, verified=False)
+        finally:
+            if automatic: self.automatic_downloads.finished(automatic, failure)
 
     def cancel(self):
         with self.lock:
+            self.automatic_downloads.user_cancel()
             self.cancel_event.set()
         return {'ok': True}
 
@@ -887,7 +1028,8 @@ class UpdateManager:
             'counts': {'projects': len(self.store.list_projects()), 'chats': len(self.store.list_chats()),
                        'runs': len(self.store.runs()), 'providers': len(self.store.entities('providers'))},
             'updates': {'state': self.state.get('state') if self.state.get('state') in ('idle', 'checking', 'downloading', 'interrupted', 'error', 'available', 'current', 'ready', 'cancelled', 'prepared', 'applying', 'installed', 'rolled_back') else 'unknown',
-                'publisher_configured': bool(self.publishers or self.proof_keys), 'publisher_proof_configured': bool(self.proof_keys)},
+                'publisher_configured': bool(self.publishers or self.proof_keys), 'publisher_proof_configured': bool(self.proof_keys),
+                'automatic_download': self.automatic_downloads.status()},
             'privacy': 'No chats, prompts, attachments, identifiers, paths, hostnames, URLs, credentials or raw logs are included.'}
         artifact = self.store.artifact(data)
         return {'artifact': artifact, 'diagnostics': data}
@@ -912,6 +1054,7 @@ class UpdateManager:
     def shutdown(self):
         with self.admission_lock:
             self.shutting_down = True
+            self.automatic_downloads.changed('stopped')
             self.cancel_event.set()
         if self.native_handoff:
             self.native_handoff.authority.invalidate('workspace_changed')
@@ -934,6 +1077,7 @@ class UpdateManager:
 
     def cancel_monitor_check(self, stop_event):
         with self.admission_lock:
+            self.automatic_downloads.stop(stop_event)
             if self.thread_stop_event is stop_event and self.thread and self.thread.is_alive():
                 self.cancel_event.set()
 

@@ -14,6 +14,7 @@ export interface Settings {
   model: string; web: boolean; allow_edits: boolean; performance: string; startup: boolean; num_thread?: number;
   timezone: string; [key: string]: unknown;
   ui_appearance?: WorkspaceAppearance;
+  update_auto_download?: boolean;
 }
 export interface GoalReview { status: 'reviewing' | 'complete' | 'needs_changes' | 'insufficient_evidence' | 'error' | 'disabled' | 'unavailable'; verdict?: 'complete' | 'needs_changes' | 'insufficient_evidence'; summary?: string; feedback?: string[]; review_run_id?: string; model?: string; attempt?: number; }
 export interface ProgressSummary { activity?: string; phase?: string; verified?: number; total?: number; verified_task_ids?: string[]; verified_count?: number; requirement_count?: number; waiting_reason?: string; blocker?: string; next_action?: string; available_actions?: string[]; }

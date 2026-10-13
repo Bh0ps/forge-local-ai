@@ -18,7 +18,7 @@ from storage import Store, _context_setting, _now
 DEFAULTS = dict(context=32768, model='', provider_id='ollama', permission_profile='always_ask',
                 permission_overrides={}, theme='system', tokens=4096, temperature=0.3,
                 ui_appearance={'name':'Forge','accent':'copper','motion':'system'},
-                update_checks=True,update_channel='preview',
+                update_checks=True,update_channel='preview',update_auto_download=False,
                 thinking=True, web=True, timezone='UTC', performance='balanced', keep_alive='10m',
                 auto_compact=True, auto_delegate=False, startup=False, dictation_model='base',allow_edits=True,
                 computer_tools=False,browser_tools=True,num_thread=4,
@@ -302,6 +302,8 @@ class ForgeStore(Store):
             settings={**settings,'ui_appearance':workspace_appearance(settings['ui_appearance'],self.get_settings().get('ui_appearance'))}
         if 'update_checks' in settings and type(settings['update_checks']) is not bool:
             raise ValueError('Automatic update checks must be true or false.')
+        if 'update_auto_download' in settings and type(settings['update_auto_download']) is not bool:
+            raise ValueError('Automatic verified downloads must be true or false.')
         if 'update_channel' in settings and settings['update_channel'] not in ('stable','preview'):
             raise ValueError('Choose the stable or preview update channel.')
         if 'context' in settings: _context_setting(settings['context'])
@@ -336,9 +338,31 @@ class ForgeStore(Store):
         # Secrets are referenced through Credential Manager, never stored here.
         if any(key.lower() in ('token','api_key','password','secret') for key in settings): raise ValueError('Use provider credential storage.')
         with self._connection(transaction='write') as db:
+            policy_keys=('update_checks','update_channel','update_auto_download')
+            old_policy=self._update_policy(db) if any(key in settings for key in policy_keys) else None
             for key,value in settings.items():
                 db.execute('INSERT INTO forge_settings VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',(key,encode(value)))
+            if old_policy and any(key in settings and settings[key]!=old_policy[key] for key in policy_keys):
+                db.execute('INSERT INTO entities VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data',
+                    ('update_policy','preferences',encode({'id':'preferences','generation':old_policy['generation']+1})))
         return self.get_settings()
+
+    @staticmethod
+    def _update_policy(db):
+        result={key:DEFAULTS[key] for key in ('update_checks','update_channel','update_auto_download')}
+        for row in db.execute("SELECT key,value FROM forge_settings WHERE key IN ('update_checks','update_channel','update_auto_download')"):
+            result[row['key']]=json.loads(row['value'])
+        row=db.execute("SELECT data FROM entities WHERE kind='update_policy' AND id='preferences'").fetchone()
+        result['generation']=json.loads(row['data']).get('generation') if row else 0
+        if (type(result['generation']) is not int or result['generation']<0 or
+                type(result['update_checks']) is not bool or type(result['update_auto_download']) is not bool or
+                result['update_channel'] not in ('stable','preview')):
+            raise ValueError('Saved update preferences could not be verified. Inspect update recovery before changing them.')
+        return result
+
+    def update_policy(self):
+        """A single durable snapshot; generation is private and never client writable."""
+        with self._connection() as db: return self._update_policy(db)
 
     def entities(self,kind):
         with self._connection() as db:
@@ -350,14 +374,16 @@ class ForgeStore(Store):
             if not row: raise ValueError(kind.rstrip('s').capitalize()+' not found.')
             return json.loads(row[0])
 
-    def save_entity(self,kind,data):
+    def save_entity(self,kind,data,*,connection=None):
         started=time.monotonic()
         data=dict(data); identifier=data.get('id') or uuid4().hex
         if not isinstance(identifier,str) or len(identifier)>64 or not all(c.isalnum() or c in '-_' for c in identifier): raise ValueError('Invalid entity ID.')
         data.update(id=identifier,updated_at=_now())
         if len(encode(data))>2000000: raise ValueError('Entity is too large.')
-        with self._connection(transaction='write') as db:
-            db.execute('INSERT INTO entities VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data',(kind,identifier,encode(data)))
+        def write(db): db.execute('INSERT INTO entities VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data',(kind,identifier,encode(data)))
+        if connection is not None: write(connection)
+        else:
+            with self._connection(transaction='write') as db: write(db)
         self._record_storage('entity_write',time.monotonic()-started)
         return data
 

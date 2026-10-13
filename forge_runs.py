@@ -454,6 +454,8 @@ class RunManager:
         return {'id':run['id'],'chat_id':run['chat_id'],'status':run['status'],'mode':run['mode'],'request':run['request'],'settings':run['settings'],
                 'request_message_id':run['request_message_id'],'goal_id':run.get('goal_id'),'project_id':run.get('project_id'),'parent_id':run.get('parent_id')}
     def _launch(self,run):
+        automatic=getattr(getattr(self.service,'update_manager',None),'automatic_downloads',None)
+        if automatic: automatic.changed('active_work')
         job={'cancel':threading.Event(),'pause':False,'approval':None,'generation_cancel':None,'finishing':False}
         self.jobs[run['id']]=job
         thread=threading.Thread(target=self._run,args=(run['id'],job),daemon=True,name='Forge-run-'+run['id'][:8]); job['thread']=thread; thread.start()

@@ -1,4 +1,4 @@
-"""Native release detection. Background checks never download or execute code."""
+"""Native release detection and opt-in downloads. Background work never installs."""
 from __future__ import annotations
 
 import os
@@ -17,6 +17,7 @@ class UpdateMonitor:
         self.stop_event = threading.Event()
         self.thread = None
         self.active_check = None
+        self.preference_generation = None
 
     def start(self):
         if self.thread and self.thread.is_alive(): return
@@ -26,6 +27,10 @@ class UpdateMonitor:
     def tick(self, now=None):
         if self.stop_event.is_set(): return
         settings = self.manager.store.get_settings()
+        policy = self.manager.store.update_policy() if hasattr(self.manager.store, 'update_policy') else None
+        generation_changed = policy is not None and policy['generation'] != self.preference_generation
+        automatic = getattr(self.manager, 'automatic_downloads', None)
+        if automatic is not None: automatic.tick(self.stop_event, now)
         if settings.get('update_checks', True) is not True:
             self.manager.cancel_monitor_check(self.stop_event)
             return
@@ -39,12 +44,14 @@ class UpdateMonitor:
         current = time.time() if now is None else now
         # Clock changes cannot suppress update checks indefinitely.
         interval = self.retry_interval if status.get('state') == 'error' and status.get('last_check_failed') is True else self.interval
-        if status.get('channel') == channel and 0 <= current - checked < interval:
+        needs_check = automatic is not None and automatic.needs_check
+        if not generation_changed and not needs_check and status.get('channel') == channel and 0 <= current - checked < interval:
             return
         try:
             if self.stop_event.is_set(): return
             self.manager.check_background(channel, stop_event=self.stop_event)
             self.active_check = self.manager.thread
+            if policy is not None: self.preference_generation = policy['generation']
         except ValueError:
             pass  # A user operation may have acquired the updater meanwhile.
 

@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ArrowUpRight, Download, FileDown, History, LoaderCircle, PackageCheck, RefreshCw, ShieldAlert, ShieldCheck, X } from 'lucide-react';
 import { api, errorText } from './api';
-import { Badge, ErrorNotice, Field, Toggle } from './components';
+import { Badge, ErrorNotice, Field } from './components';
 import type { Settings } from './types';
 import { useWorkspaceVisibility } from './workspaceVisibility';
 import './updateSettings.css';
@@ -18,6 +18,7 @@ interface Update {
   signature?: { mode?: 'ed25519'; status?: string; publisher?: string; version?: string; timestamped?: boolean };
   verified?: boolean; error?: string; operation_error?: string; received_bytes?: number;
   operation_id?: string; checked_at?: number; last_check_failed?: boolean;
+  automatic_download?: { phase?: string; reason?: string | null; attempt_count?: number };
 }
 const releasesPage = 'https://github.com/Bh0ps/forge-local-ai/releases';
 const stateLabels: Record<string, string> = { checking: 'Checking…', downloading: 'Downloading…', current: 'Up to date',
@@ -33,6 +34,8 @@ export function UpdateSettings({ notify, settings = {}, onChange }: {
 }) {
   const [status, setStatus] = useState<Update>();
   const [busy, setBusy] = useState(false), [error, setError] = useState(''), [pendingAction, setPendingAction] = useState('');
+  const [statusError, setStatusError] = useState('');
+  const [failureKind, setFailureKind] = useState<'action' | 'preference' | 'export' | null>(null);
   const [savingPreference, setSavingPreference] = useState(false), [exporting, setExporting] = useState(false);
   const [installing,setInstalling]=useState(false),installPending=useRef(false);
   const restartTrigger=useRef<HTMLButtonElement|null>(null),readiness=useUpdateReadiness();
@@ -47,30 +50,32 @@ export function UpdateSettings({ notify, settings = {}, onChange }: {
   const visible = useWorkspaceVisibility();
   const mounted = useRef(true), generation = useRef(0), actionPending = useRef(false), preferencePending = useRef(false), exportPending = useRef(false);
   const channel = settings.update_channel === 'stable' ? 'stable' : 'preview';
+  const automaticMode = settings.update_checks === false ? 'off' : settings.update_auto_download === true ? 'download' : 'check';
+  const backgroundDownloads = automaticMode === 'download';
   const active = status?.state === 'checking' || status?.state === 'downloading';
 
   async function refresh() {
     const request = ++generation.current;
     try {
       const next = await api<Update>('update_status');
-      if (mounted.current && request === generation.current) { setStatus(next); setError(''); }
+      if (mounted.current && request === generation.current) { setStatus(next); setStatusError(''); }
     } catch (exception) {
-      if (mounted.current && request === generation.current) setError(errorText(exception));
+      if (mounted.current && request === generation.current) setStatusError(errorText(exception));
     }
   }
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; generation.current++; }; }, []);
   useEffect(() => { if (visible && !busy) void refresh(); }, [visible]);
   useEffect(() => {
-    if (!visible || !active || busy) return;
-    const timer = setInterval(() => void refresh(), 1500);
+    if (!visible || (!active && !backgroundDownloads) || busy) return;
+    const timer = setInterval(() => void refresh(), active ? 1500 : 5000);
     return () => clearInterval(timer);
-  }, [visible, active, busy]);
+  }, [visible, active, busy, backgroundDownloads]);
 
   async function action(name: string) {
     if (actionPending.current || (active && name !== 'update_cancel')) return;
     actionPending.current = true;
     const request = ++generation.current;
-    setBusy(true); setPendingAction(name); setError('');
+    setBusy(true); setPendingAction(name); setError(''); setStatusError(''); setFailureKind('action');
     try {
       const next = await api<Update>(name,
         name === 'update_check' ? { channel, background: true } : {});
@@ -78,7 +83,7 @@ export function UpdateSettings({ notify, settings = {}, onChange }: {
       if (name === 'update_cancel') await refresh();
       else setStatus(next);
     } catch (exception) {
-      if (mounted.current && request === generation.current) setError(errorText(exception));
+      if (mounted.current && request === generation.current) { setError(errorText(exception)); setFailureKind('action'); }
     } finally {
       actionPending.current = false;
       if (mounted.current) { setBusy(false); setPendingAction(''); }
@@ -86,14 +91,14 @@ export function UpdateSettings({ notify, settings = {}, onChange }: {
   }
   async function preference(patch: Partial<Settings>) {
     if (preferencePending.current || !onChange) return;
-    preferencePending.current = true; setSavingPreference(true); setError('');
+    preferencePending.current = true; setSavingPreference(true); setError(''); setFailureKind('preference');
     try { await onChange(patch); }
-    catch (exception) { if (mounted.current) setError(errorText(exception)); }
+    catch (exception) { if (mounted.current) { setError(errorText(exception)); setFailureKind('preference'); } }
     finally { preferencePending.current = false; if (mounted.current) setSavingPreference(false); }
   }
   async function diagnostics() {
     if (exportPending.current) return;
-    exportPending.current = true; setExporting(true); setError('');
+    exportPending.current = true; setExporting(true); setError(''); setFailureKind('export');
     try {
       const result = await api<{ diagnostics: unknown }>('diagnostics_export');
       if (!mounted.current) return;
@@ -101,16 +106,24 @@ export function UpdateSettings({ notify, settings = {}, onChange }: {
       const url = URL.createObjectURL(blob), anchor = document.createElement('a');
       anchor.href = url; anchor.download = 'forge-diagnostics.json'; anchor.click(); URL.revokeObjectURL(url);
       notify('Diagnostics contain versions, counts and settings, with no conversations or private paths.');
-    } catch (exception) { if (mounted.current) setError(errorText(exception)); }
+    } catch (exception) { if (mounted.current) { setError(errorText(exception)); setFailureKind('export'); } }
     finally { exportPending.current = false; if (mounted.current) setExporting(false); }
   }
   async function restart(kind:'apply'|'rollback',trigger:HTMLButtonElement){if(installPending.current)return;restartTrigger.current=trigger;installPending.current=true;setInstalling(true);try{await requestUpdateRestart(kind);}finally{installPending.current=false;if(mounted.current)setInstalling(false);}}
   const release = status?.release;
   const releaseLink = publicLink(release?.html_url, releasesPage), downloadLink = publicLink(release?.url, releaseLink);
-  const operationError = error || status?.operation_error || status?.error;
+  const operationError = error || statusError || status?.operation_error || status?.error;
+  const retryError = error && failureKind === 'preference' ? undefined :
+    error && failureKind === 'export' ? exporting ? undefined : () => void diagnostics() :
+    busy || active ? undefined : () => void action('update_check');
   const signatureMismatch = release?.trust_mode === 'authenticode' && status?.signature?.mode === 'ed25519' ||
     release?.trust_mode === 'ed25519' && status?.signature?.status === 'Valid';
-  const freshCheckNeeded = Boolean(release && (status?.state === 'error' || status?.last_check_failed));
+  const automatic = status?.automatic_download;
+  const transientDownloadPause = status?.state === 'error' && status.verified !== true && automatic?.phase === 'retry_wait' &&
+    ['offline', 'rate_limited', 'server_unavailable'].includes(automatic.reason || '') &&
+    status?.last_check_failed === false && status?.verified_download_available === true &&
+    release?.trust_mode === 'ed25519' && !release.verification_error && !signatureMismatch;
+  const freshCheckNeeded = Boolean(release && (status?.state === 'error' && !transientDownloadPause || status?.last_check_failed));
   const manual = release?.trust_mode === 'manual' || Boolean(release?.verification_error) || signatureMismatch || freshCheckNeeded;
   const canDownload = Boolean(release && (status?.verified_download_available ?? status?.automatic_install_available) && !manual && !status?.inspection_required);
   const canInstall=Boolean(isNative() && status?.safe_handoff_available===true && status?.automatic_install_available && status?.verified && canDownload && status.state==='ready');
@@ -126,20 +139,31 @@ export function UpdateSettings({ notify, settings = {}, onChange }: {
     status?.verified ? 'The downloaded installer has a valid timestamped certificate from Forge’s approved publisher.' : 'The downloaded installer will be checked against Forge’s approved Windows publisher.');
   const stateLabel = pendingAction === 'update_cancel' ? 'Cancelling…' :
     pendingAction === 'update_check' ? 'Checking…' : pendingAction === 'update_download' ? 'Downloading…' :
-    release && (manual || !trusted) && ['available', 'ready'].includes(status?.state || '') ? 'Manual install' : status ? stateLabels[status.state || ''] || 'Check needed' : error ? 'Unavailable' : 'Loading…';
-  const animating = visible && (active || busy || !status && !error);
+    status?.state === 'error' && transientDownloadPause ? 'Download paused' :
+    release && (manual || !trusted) && ['available', 'ready'].includes(status?.state || '') ? 'Manual install' : status ? stateLabels[status.state || ''] || 'Check needed' : operationError ? 'Unavailable' : 'Loading…';
+  const animating = visible && (active || busy || !status && !operationError);
   const maximum = Math.max(1, release?.size || 1), received = Math.min(maximum, Math.max(0, status?.received_bytes || 0));
   const percent = Math.round(received / maximum * 100);
+  const showAutomaticState = backgroundDownloads && !active && !busy && status?.verified !== true &&
+    !['ready', 'current', 'installed', 'rolled_back'].includes(status?.state || '');
+  const automaticMessage = showAutomaticState && automatic?.phase === 'waiting' ?
+    automatic.reason === 'active_work' ? 'Download will start when current work finishes.' :
+    automatic.reason === 'fresh_check_required' ? 'Waiting for the next update check.' :
+    automatic.reason === 'inspection' || automatic.reason === 'native_handoff' ? 'Resolve the current update check before downloading.' : '' :
+    showAutomaticState && transientDownloadPause ? 'Download paused. Forge will retry automatically.' :
+    showAutomaticState && ['available', 'cancelled'].includes(status?.state || '') && automatic?.phase === 'cancelled' && automatic.reason === 'user_cancelled' ? 'Automatic download cancelled. Choose Download & verify to retry.' : '';
 
   return <>
     <h2>Updates</h2>
     <section className="settings-card update-settings-card" aria-busy={busy}>
       <div className="setting-row update-version"><span className="update-version-icon"><PackageCheck size={19} aria-hidden="true" /></span><div><strong>{status?.current_version ? `Forge ${status.current_version}` : 'Forge'}</strong>
         <small>{channel === 'preview' ? 'Preview channel' : 'Stable channel'}</small></div>
-        <span className="update-status" role="status">{(active || busy || !status && !error) && <LoaderCircle size={12} aria-hidden="true" className={animating ? 'spin' : ''} />}<Badge>{stateLabel}</Badge></span></div>
-      <Toggle label="Check for updates automatically" checked={settings.update_checks !== false} disabled={!onChange || savingPreference}
-        description="Check GitHub in the background while the desktop app is running."
-        onChange={enabled => void preference({ update_checks: enabled })} />
+        <span className="update-status" role="status">{(active || busy || !status && !operationError) && <LoaderCircle size={12} aria-hidden="true" className={animating ? 'spin' : ''} />}<Badge>{stateLabel}</Badge></span></div>
+      <Field label="Automatic updates" hint="Download verified installers in Forge desktop, then restart when you’re ready."><select value={automaticMode} disabled={!onChange || savingPreference}
+        onChange={event => void preference({ update_checks: event.target.value !== 'off', update_auto_download: event.target.value === 'download' })}>
+        <option value="download">Download verified updates</option><option value="check">Check only</option><option value="off">Off</option>
+      </select></Field>
+      {automaticMessage && <p className="muted" role="status">{automaticMessage}</p>}
       <Field label="Update channel"><select value={channel} disabled={!onChange || savingPreference}
         onChange={event => void preference({ update_channel: event.target.value })}>
         <option value="preview">Preview — latest improvements</option><option value="stable">Stable releases</option>
@@ -149,7 +173,7 @@ export function UpdateSettings({ notify, settings = {}, onChange }: {
       </div>}
       {status?.state === 'downloading' && <div className="update-progress"><div><span>Downloading installer</span><span>{percent}%</span></div><progress aria-label="Update download" value={received} max={maximum} /></div>}
       {status?.inspection_required && <p className="muted">{status.message}</p>}
-      {operationError && <ErrorNotice error={operationError} retry={!busy && !active ? () => void action('update_check') : undefined} />}
+      {operationError && <ErrorNotice error={operationError} retry={retryError} />}
       <div className="setup-actions">
         <button type="button" className="secondary" disabled={busy || active} onClick={() => void action('update_check')}>
           <RefreshCw size={14} />Check for updates</button>

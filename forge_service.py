@@ -351,6 +351,13 @@ class ForgeService:
         with self.admission_lock:
             if self.update_manager and self.update_manager.applying and action not in ('quit','emergency_stop'):
                 raise ValueError('Forge is preparing an update. Changes are paused until restart.')
+            automatic=getattr(self.update_manager,'automatic_downloads',None)
+            if automatic and action in ('start_chat','resume','command','plan_build','goal_resume','agent_start',
+                    'builder_start','builder_start_goal','schedule_run','dictation_start','dictation_upload',
+                    'performance_benchmark','performance_calibrate','performance_warm','performance_release',
+                    'setup_scan','setup_install_engine','setup_download_model','setup_verify','setup_browser_verify','setup_retry',
+                    'hf_download','hf_import','hf_retry','runtime_install','runtime_validate','runtime_start','ai_workflow_verify','pull'):
+                automatic.changed('active_work')
             return self._dispatch(action,data)
 
     def _dispatch(self,action,data):
@@ -362,6 +369,9 @@ class ForgeService:
         if action=='bootstrap': return self.bootstrap()
         if action=='settings':
             result=self.store.update_settings(data) if data else self.store.get_settings()
+            automatic=getattr(self.update_manager,'automatic_downloads',None)
+            if automatic and data and any(k in data for k in ('update_checks','update_auto_download','update_channel')):
+                automatic.preferences_changed()
             if data and any(k in data for k in ('memory_semantic','memory_model_path')):
                 with self.manager_lock: self.memory_manager=None
             return result
@@ -1297,6 +1307,8 @@ class ForgeService:
         with self.admission_lock:
             if self.update_manager and self.update_manager.applying:
                 raise ValueError('Forge is preparing an update. Scheduled work is paused until restart.')
+            automatic=getattr(self.update_manager,'automatic_downloads',None)
+            if automatic: automatic.changed('active_work')
             with self.schedule_lock: return self._schedule_run(schedule,source_key)
     def _schedule_run(self,schedule,source_key=None):
         if source_key:

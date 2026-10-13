@@ -60,12 +60,144 @@ describe('update settings', () => {
     render(<UpdateSettings notify={vi.fn()} onChange={change} />);
     await screen.findByText('Up to date');
     expect(change).not.toHaveBeenCalled();
-    expect(screen.getByRole('switch', { name: 'Check for updates automatically' }).getAttribute('aria-checked')).toBe('true');
+    expect((screen.getByRole('combobox', { name: 'Automatic updates' }) as HTMLSelectElement).value).toBe('check');
     expect((screen.getByRole('combobox', { name: 'Update channel' }) as HTMLSelectElement).value).toBe('preview');
-    fireEvent.click(screen.getByRole('switch', { name: 'Check for updates automatically' }));
-    await waitFor(() => expect(change).toHaveBeenCalledWith({ update_checks: false }));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Automatic updates' }), { target: { value: 'off' } });
+    await waitFor(() => expect(change).toHaveBeenCalledWith({ update_checks: false, update_auto_download: false }));
     fireEvent.change(screen.getByRole('combobox', { name: 'Update channel' }), { target: { value: 'stable' } });
     await waitFor(() => expect(change).toHaveBeenCalledWith({ update_channel: 'stable' }));
+  });
+
+  it('changes the automatic mode explicitly without changing channel or model preferences', async () => {
+    bridge(current); const change = vi.fn(async (_patch: Record<string, unknown>) => {});
+    const { rerender } = render(<UpdateSettings notify={vi.fn()} settings={{ update_checks: true, update_channel: 'stable', model: 'fixture' }} onChange={change} />);
+    await screen.findByText('Up to date');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Automatic updates' }), { target: { value: 'download' } });
+    await waitFor(() => expect(change).toHaveBeenCalledWith({ update_checks: true, update_auto_download: true }));
+    rerender(<UpdateSettings notify={vi.fn()} settings={{ update_checks: true, update_auto_download: true, update_channel: 'stable', model: 'fixture' }} onChange={change} />);
+    fireEvent.change(screen.getByRole('combobox', { name: 'Automatic updates' }), { target: { value: 'check' } });
+    await waitFor(() => expect(change).toHaveBeenCalledWith({ update_checks: true, update_auto_download: false }));
+    expect(change.mock.calls.every(([patch]) => Object.keys(patch).sort().join(',') === 'update_auto_download,update_checks')).toBe(true);
+  });
+
+  it('observes an automatic verified download from an idle page without starting a restart', async () => {
+    vi.useFakeTimers(); let status: unknown = current;
+    const call = bridge(() => status);
+    render(<UpdateSettings notify={vi.fn()} settings={{ update_checks: true, update_auto_download: true }} />);
+    await act(async () => { await Promise.resolve(); });
+    expect(statusCalls(call)).toBe(1);
+    status = { ...current, state: 'ready', automatic_install_available: true, safe_handoff_available: true,
+      verified_download_available: true, verified: true, release: { version: '5.1.4', size: 20, trust_mode: 'ed25519' },
+      automatic_download: { phase: 'ready', reason: 'verified', attempt_count: 1 } };
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(screen.getByText('Verified download')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Install & restart' })).toBeTruthy();
+    expect(statusCalls(call)).toBe(2);
+    expect(call.mock.calls.some(([action]) => ['update_handoff_begin', 'update_apply', 'update_rollback', 'update_prepare'].includes(action))).toBe(false);
+  });
+
+  it('stops idle automatic status polling while hidden or switched off', async () => {
+    vi.useFakeTimers(); const call = bridge(current);
+    const { rerender } = render(<UpdateSettings notify={vi.fn()} settings={{ update_checks: true, update_auto_download: true }} />);
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    const beforeHidden = statusCalls(call);
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    fireEvent(document, new Event('visibilitychange'));
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(statusCalls(call)).toBe(beforeHidden);
+    visibility.mockReturnValue('visible'); fireEvent(document, new Event('visibilitychange'));
+    await act(async () => { await Promise.resolve(); });
+    rerender(<UpdateSettings notify={vi.fn()} settings={{ update_checks: false, update_auto_download: false }} />);
+    const beforeOff = statusCalls(call);
+    await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+    expect(statusCalls(call)).toBe(beforeOff);
+    visibility.mockRestore();
+  });
+
+  it('shows honest deferred download text and ignores unknown automatic diagnostics', async () => {
+    vi.useFakeTimers(); let status = { ...current, state: 'available', automatic_download: { phase: 'waiting', reason: 'active_work' } };
+    const call = bridge(() => status);
+    render(<UpdateSettings notify={vi.fn()} settings={{ update_checks: true, update_auto_download: true }} />);
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByText('Download will start when current work finishes.')).toBeTruthy();
+    status = { ...current, state: 'error', automatic_download: { phase: 'retry_wait', reason: 'Synthetic private unknown diagnostic' } };
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(statusCalls(call)).toBe(2);
+    expect(screen.queryByText('Synthetic private unknown diagnostic')).toBeNull();
+    expect(screen.queryByText('Download paused. Forge will retry automatically.')).toBeNull();
+  });
+
+  it('keeps a failed preference visible when an older status poll finishes', async () => {
+    vi.useFakeTimers(); let finish!: (value: unknown) => void; let count = 0;
+    bridge(() => ++count === 1 ? current : new Promise(resolve => { finish = resolve; }));
+    const change = vi.fn(async () => { throw new Error('Synthetic preference save failed'); });
+    render(<UpdateSettings notify={vi.fn()} settings={{ update_checks: true, update_auto_download: true }} onChange={change} />);
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    await act(async () => { fireEvent.change(screen.getByRole('combobox', { name: 'Automatic updates' }), { target: { value: 'check' } }); });
+    expect(screen.getByText('Synthetic preference save failed')).toBeTruthy();
+    await act(async () => { finish(current); });
+    expect(screen.getByText('Synthetic preference save failed')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it('keeps an export error during automatic polling and retries the export action', async () => {
+    vi.useFakeTimers(); const call = bridge(current, undefined, { diagnostics_export: () => Promise.reject(new Error('Synthetic export failed')) });
+    render(<UpdateSettings notify={vi.fn()} settings={{ update_checks: true, update_auto_download: true }} />);
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Export diagnostic report' })); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(screen.getByText('Synthetic export failed')).toBeTruthy();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); });
+    expect(call.mock.calls.filter(([action]) => action === 'diagnostics_export')).toHaveLength(2);
+    expect(call.mock.calls.some(([action]) => action === 'update_check')).toBe(false);
+  });
+
+  it('keeps recovery bound to the failure when preferences and export overlap', async () => {
+    let rejectPreference!: (reason: Error) => void;
+    const change = vi.fn(() => new Promise<void>((_, reject) => { rejectPreference = reject; }));
+    bridge(current, undefined, { diagnostics_export: () => new Promise(() => {}) });
+    render(<UpdateSettings notify={vi.fn()} settings={{ update_checks: true, update_auto_download: true }} onChange={change} />);
+    await screen.findByText('Up to date');
+    fireEvent.change(screen.getByRole('combobox', { name: 'Automatic updates' }), { target: { value: 'check' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Export diagnostic report' }));
+    await act(async () => { rejectPreference(new Error('Synthetic delayed preference failure')); });
+    expect(screen.getByText('Synthetic delayed preference failure')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull();
+  });
+
+  it.each([{ phase: 'retry_wait', reason: 'offline' }, { phase: 'cancelled', reason: 'user_cancelled' },
+    { phase: 'waiting', reason: 'fresh_check_required' }])('keeps completed manual verification ahead of old automatic metadata: %j', async automatic_download => {
+    bridge({ ...current, state: 'ready', verified: true, automatic_install_available: true, safe_handoff_available: true,
+      verified_download_available: true, release: { version: '5.1.4', size: 20, trust_mode: 'ed25519' }, automatic_download });
+    render(<UpdateSettings notify={vi.fn()} settings={{ update_checks: true, update_auto_download: true }} />);
+    await screen.findByRole('button', { name: 'Install & restart' });
+    expect(screen.queryByText(/Download paused\.|Automatic download cancelled\.|Waiting for the next update check\./)).toBeNull();
+  });
+
+  it.each(['offline', 'rate_limited', 'server_unavailable'])('allows manual retry after a verified transient download pause: %s', async reason => {
+    const call = bridge({ ...current, state: 'error', last_check_failed: false, verified_download_available: true,
+      release: { version: '5.1.4', size: 20, trust_mode: 'ed25519' }, automatic_download: { phase: 'retry_wait', reason } },
+      undefined, { update_download: { ...current, state: 'downloading' } });
+    render(<UpdateSettings notify={vi.fn()} settings={{ update_checks: true, update_auto_download: true }} />);
+    await screen.findByText('Download paused');
+    expect(screen.getByText('Download paused. Forge will retry automatically.')).toBeTruthy();
+    expect(screen.queryByText('Manual installation')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Download & verify' }));
+    await waitFor(() => expect(call).toHaveBeenCalledWith('update_download', {}));
+    expect(screen.queryByText('Download paused. Forge will retry automatically.')).toBeNull();
+  });
+
+  it.each([{ last_check_failed: true }, { verified_download_available: false },
+    { automatic_download: { phase: 'retry_wait', reason: 'verification_failed' } },
+    { release: { version: '5.1.4', trust_mode: 'ed25519', verification_error: 'Synthetic rejected proof' } }])('does not turn a failed proof into a retryable download: %j', async failure => {
+    bridge({ ...current, state: 'error', last_check_failed: false, verified_download_available: true,
+      release: { version: '5.1.4', size: 20, trust_mode: 'ed25519' }, automatic_download: { phase: 'retry_wait', reason: 'offline' }, ...failure });
+    render(<UpdateSettings notify={vi.fn()} settings={{ update_checks: true, update_auto_download: true }} />);
+    await screen.findByText('Manual installation');
+    expect(screen.queryByRole('button', { name: 'Download & verify' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Install & restart' })).toBeNull();
   });
 
   it('starts a non-blocking check on the selected channel and prevents duplicate clicks', async () => {
