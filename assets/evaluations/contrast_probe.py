@@ -1,7 +1,8 @@
 """Isolated real-browser body contrast evidence for two static evaluation fixtures.
 
 Protocol: one JSON stdin request {fixture_dir, case_id: theme|landing,
-timeout_seconds: 10}, one JSON stdout result. No browser installation, fixture
+timeout_seconds: 10}, one JSON stdout result. Explicit deadlines may be 0.5–30
+seconds; the default remains 10. No browser installation, fixture
 mutation, user profile, native application bridge or external network is used.
 This measures computed body text contrast; it is not a visual or behavior oracle.
 """
@@ -24,6 +25,7 @@ from urllib.parse import unquote, urlsplit
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 PROBE_VERSION = 'forge-body-contrast-1'
+DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS = 10, 30
 MAX_FILES, MAX_ENTRIES, MAX_FILE_BYTES, MAX_TOTAL_BYTES = 32, 128, 256 * 1024, 1024 * 1024
 MAX_OUTPUT_BYTES, MAX_DIAGNOSTICS = 65536, 16
 
@@ -181,15 +183,18 @@ def _worker(request):
         worker = threading.Thread(target=server.serve_forever, kwargs={'poll_interval': .05}, daemon=True); worker.start()
         print(json.dumps({'event': 'server_ready', 'origin': server.origin}), flush=True)
         engine = sync_playwright().start()
+        # Explicit longer host budgets accommodate cold Windows startup while
+        # the supervising process still enforces the complete worker deadline.
+        phase_scale = max(1, request['timeout_seconds'] / DEFAULT_TIMEOUT_SECONDS)
         context = engine.chromium.launch_persistent_context(request['profile_dir'], executable_path=request['browser_executable'],
-            headless=True, timeout=min(6500, request['timeout_seconds'] * 1000), viewport={'width': 1000, 'height': 700},
+            headless=True, timeout=min(6500 * phase_scale, request['timeout_seconds'] * 1000), viewport={'width': 1000, 'height': 700},
             color_scheme='light', service_workers='block', accept_downloads=False,
             proxy={'server': server.origin, 'bypass': '127.0.0.1'},
             args=['--disable-gpu', '--disable-extensions', '--disable-background-networking', '--disable-component-update',
                   '--disable-sync', '--no-first-run', '--no-default-browser-check', '--mute-audio', '--metrics-recording-only',
                   '--disable-features=OptimizationHints,MediaRouter,AutofillServerCommunication'])
         page = context.pages[0] if context.pages else context.new_page()
-        context.set_default_timeout(2500); context.set_default_navigation_timeout(3000)
+        context.set_default_timeout(2500 * phase_scale); context.set_default_navigation_timeout(3000 * phase_scale)
         def route_request(route):
             parsed = urlsplit(route.request.url)
             if parsed.scheme == 'http' and f'http://{parsed.netloc}' == server.origin and route.request.method == 'GET':
@@ -264,10 +269,10 @@ def _worker(request):
     return result
 
 
-def probe_contrast(fixture_dir, case_id='landing', timeout_seconds=10, browser_executable=None):
+def probe_contrast(fixture_dir, case_id='landing', timeout_seconds=DEFAULT_TIMEOUT_SECONDS, browser_executable=None):
     """Supervise one fresh process tree; unavailable, timeout or dirty cleanup is unverified."""
-    if case_id not in ('theme', 'landing') or type(timeout_seconds) not in (int, float) or not .5 <= timeout_seconds <= 10:
-        return _result(detail='Use theme or landing and a 0.5–10 second deadline.')
+    if case_id not in ('theme', 'landing') or type(timeout_seconds) not in (int, float) or not .5 <= timeout_seconds <= MAX_TIMEOUT_SECONDS:
+        return _result(detail='Use theme or landing and a 0.5–30 second deadline.')
     executable = _browser_executable(browser_executable)
     if not executable or getattr(sys, 'frozen', False):
         return _result(detail='An installed browser and a Python worker runtime are required; no download was attempted.')
@@ -326,6 +331,7 @@ def probe_contrast(fixture_dir, case_id='landing', timeout_seconds=10, browser_e
         elif not result['diagnostics'].get('detail'):
             result['diagnostics']['detail'] = 'Browser worker exited without contrast evidence.'
         result['diagnostics']['timed_out'] = timed_out
+        result['diagnostics']['timeout_seconds'] = timeout_seconds
         result['diagnostics']['browser_started'] = any(item.get('event') == 'browser_ready' for item in events)
         result['diagnostics']['worker_phases'] = [item['event'] for item in events if item.get('event') in (
             'server_ready', 'browser_ready', 'page_loaded', 'colors_sampled', 'closing')]
@@ -368,7 +374,7 @@ def main():
             result = _worker(request)
         else:
             result = probe_contrast(request.get('fixture_dir', ''), request.get('case_id', 'landing'),
-                request.get('timeout_seconds', 10), request.get('browser_executable'))
+                request.get('timeout_seconds', DEFAULT_TIMEOUT_SECONDS), request.get('browser_executable'))
     except Exception as error:
         result = _result(detail=str(error))
     # ASCII JSON escapes keep the protocol portable across Windows console

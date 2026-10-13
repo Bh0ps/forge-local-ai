@@ -276,6 +276,21 @@ def test_oracle_backend_changes_or_unverified_browser_cannot_enter_comparison():
 
 def test_unavailable_contrast_never_confirms_task_success(tmp_path,monkeypatch):
     import forge_evals
+    from types import SimpleNamespace
+    calls=[]
+    def unavailable_worker(*args,**options):
+        calls.append((json.loads(options['input'])['timeout_seconds'],options['timeout']))
+        return SimpleNamespace(returncode=0,stdout=json.dumps({'status':'unverified','backend':{'verified':False}}))
+    with monkeypatch.context() as scoped:
+        scoped.setattr(forge_evals.subprocess,'run',unavailable_worker)
+        assert forge_evals.rendered_contrast(tmp_path,'theme')['status']=='unverified'
+        assert forge_evals.rendered_contrast(tmp_path,'theme',timeout_seconds=30)['status']=='unverified'
+        assert calls==[(10,14),(30,34)]
+        for invalid in (True,False,None,'30',.49,30.01,float('nan'),float('inf'),float('-inf')):
+            result=forge_evals.rendered_contrast(tmp_path,'theme',timeout_seconds=invalid)
+            assert result['status']=='unverified' and not result['backend']['verified']
+            assert '0.5–30 second deadline' in result['diagnostics']['error']
+        assert len(calls)==2
     task=next(row for row in load_suite()['tasks'] if row['oracle']=='theme'); materialize(task,tmp_path,True)
     monkeypatch.setattr(forge_evals,'rendered_contrast',lambda *_:{'status':'unverified','contrast_ratio':None,'backend':{'name':'playwright-edge','probe_version':'1','verified':True},'diagnostics':{'error':'Paint unsupported despite available browser'}})
     result=oracle(task,tmp_path)
@@ -298,7 +313,11 @@ def test_theme_state_failures_explain_expected_and_observed_public_contract(tmp_
 
 @pytest.mark.parametrize('kind',['theme','landing'])
 @pytest.mark.parametrize('low_contrast',[False,True])
-def test_real_contrast_accepts_css_variables_and_rejects_low_values(kind,low_contrast,tmp_path):
+def test_real_contrast_accepts_css_variables_and_rejects_low_values(kind,low_contrast,tmp_path,monkeypatch):
+    import forge_evals
+    pytest.importorskip('playwright.sync_api')
+    original=forge_evals.rendered_contrast
+    monkeypatch.setattr(forge_evals,'rendered_contrast',lambda root,case:original(root,case,timeout_seconds=30))
     task=next(row for row in load_suite()['tasks'] if row['oracle']==kind); materialize(task,tmp_path,True)
     color='#777777' if low_contrast else '#ffffff'; background='#888888' if low_contrast else '#172033'
     existing=(tmp_path/'styles.css').read_text()
@@ -306,9 +325,10 @@ def test_real_contrast_accepts_css_variables_and_rejects_low_values(kind,low_con
     if kind=='theme':
         (tmp_path/'app.js').write_text("const action=document.querySelector('#theme-button');function show(value){document.body.dataset.theme=value;action.textContent=value==='dark'?'Switch to light theme':'Switch to dark theme'}show(localStorage.getItem('theme')==='dark'?'dark':'light');action.onclick=()=>{const value=document.body.dataset.theme==='dark'?'light':'dark';localStorage.setItem('theme',value);show(value)};")
     result=oracle(task,tmp_path); probe=result['contrast_probe']
-    if probe['status']=='unverified':
+    if probe['status']=='unverified' and 'An installed browser and a Python worker runtime are required' in probe.get('diagnostics',{}).get('detail',''):
         assert not result['passed'] and not result['oracle_verified']
         pytest.skip('Real browser unavailable: '+json.dumps(probe.get('diagnostics')))
+    assert probe['status'] in ('verified','failed'),json.dumps(probe)
     check=next(item for item in result['checks'] if item['requirement'] in ('Dark theme text contrast','Text contrast meets 4.5:1'))
     assert check['passed'] is (not low_contrast),result
     assert result['oracle_backend']['contrast']['verified']

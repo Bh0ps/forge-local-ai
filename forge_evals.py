@@ -298,11 +298,13 @@ def _pure_functions(root, name):
     return namespace
 
 
-def rendered_contrast(root,kind):
+def rendered_contrast(root,kind,*,timeout_seconds=10):
     """Trusted bounded rendered-color probe; unavailable never means passed."""
-    request={'fixture_dir':str(Path(root).resolve()),'case_id':kind,'timeout_seconds':10}
     try:
-        result=subprocess.run([sys.executable,'-B',str(ROOT/'assets/evaluations/contrast_probe.py')],input=json.dumps(request),capture_output=True,text=True,encoding='utf-8',timeout=14,
+        if type(timeout_seconds) not in (int,float) or not .5<=timeout_seconds<=30:
+            raise ValueError('Rendered contrast requires a 0.5–30 second deadline.')
+        request={'fixture_dir':str(Path(root).resolve()),'case_id':kind,'timeout_seconds':timeout_seconds}
+        result=subprocess.run([sys.executable,'-B',str(ROOT/'assets/evaluations/contrast_probe.py')],input=json.dumps(request),capture_output=True,text=True,encoding='utf-8',timeout=timeout_seconds+4,
                               creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
         value=json.loads(result.stdout)
         if not isinstance(value,dict) or value.get('status') not in ('verified','failed','unverified'): raise ValueError('Invalid rendered contrast response.')
