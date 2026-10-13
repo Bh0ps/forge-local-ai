@@ -1,6 +1,14 @@
 const asset = /^[A-Za-z0-9_-]+\.css$/;
 const entry = /^forge-settings-[A-Za-z0-9_-]+\.js$/;
-const fixedFailure = () => new Error('Settings could not be opened.');
+export const SETTINGS_RETRY_LIMIT = 3;
+export type SettingsLoadFailureCategory = 'load_failed' | 'retry_exhausted';
+export class SettingsLoadError extends Error {
+  constructor(readonly category: SettingsLoadFailureCategory = 'load_failed') {
+    super('Settings could not be opened.');
+    this.name = 'SettingsLoadError';
+  }
+}
+const fixedFailure = () => new SettingsLoadError();
 
 export function settingsAssetMap(value: unknown, buildId: string, mapUrl: string, base: string) {
   const map = new URL(mapUrl, base), origin = new URL(base);
@@ -31,7 +39,8 @@ async function stylesheet(url: URL, retry: number) {
 }
 
 export async function retrySettingsAsset(mapUrl: string, buildId: string, retry: number) {
-  if (!Number.isSafeInteger(retry) || retry < 1 || retry > 3) throw fixedFailure();
+  if (!Number.isSafeInteger(retry) || retry < 1) throw fixedFailure();
+  if (retry > SETTINGS_RETRY_LIMIT) throw new SettingsLoadError('retry_exhausted');
   // Validate the trusted map URL before issuing any request.
   settingsAssetMap({ format: 1, build_id: buildId, namespace:'settings_exports', entry: 'forge-settings-check.js', styles: [] }, buildId, mapUrl, document.baseURI);
   const abort = new AbortController(), timer = setTimeout(() => abort.abort(), 8000);

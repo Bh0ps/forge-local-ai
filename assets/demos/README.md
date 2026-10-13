@@ -1,5 +1,22 @@
 # Forge demo media
 
+The 5.1.8 captures use disposable synthetic conversations and model reasoning.
+They show an earlier reading position retained after completion, with Jump to
+latest still available. The light image uses a narrow layout and enlarged text.
+No model inference, external requests or personal workspace data are used.
+Both PNG files contain no embedded text metadata and were visually reviewed.
+
+| File | Demonstration |
+| --- | --- |
+| `forge-5.1.8-reasoning-dark.png` | Saved reasoning retains the reader's position in the dark workspace. |
+| `forge-5.1.8-reasoning-light.png` | The same reading controls on a narrow, enlarged light workspace. |
+
+Private production checks cover delayed history loading, owned focus, deliberate
+focus cancellation, drafts, keyboard controls and reduced motion. Browser profiles,
+application state and raw logs remain outside this folder.
+
+## Previous 5.1.6 captures
+
 The 5.1.6 connection-editor captures use disposable synthetic data. The dark and
 light desktop images show the primary setup controls and compact **Advanced**
 disclosure. Connection testing is simulated; no model inference or external

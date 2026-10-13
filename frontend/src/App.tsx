@@ -21,6 +21,7 @@ import { useWorkspaceVisibility } from './workspaceVisibility';
 import { activityRunIds, ChatActivity, transcriptActivity } from './chatActivity';
 import type { ChatChange } from './chatActions';
 import { DEFAULT_SETTINGS } from './types';
+import type { ThinkingReadIntent } from './thinkingDisclosure';
 import type { Approval, Chat, Message, Model, Page, Project, Run, RunEvent, SavedChat, Settings } from './types';
 
 const BuilderPage = lazy(() => import('./BuilderPage').then(m => ({ default: m.BuilderPage })));
@@ -105,8 +106,73 @@ function reconcileRunMessages(live: LiveRun, chat: SavedChat | null): { parts: M
   return { parts: live.parts.slice(consumed), showCurrent: !(live.currentPersisted && consumed === live.parts.length && saved[consumed] && same(current, saved[consumed])) };
 }
 
+type ThinkingReads = Map<string, { chatId: string; intent: ThinkingReadIntent }>;
+function thinkingReadOwners(live: LiveRun, chat: SavedChat | null, reads: ThinkingReads, epoch: number, create: boolean, focusAuthority?: { revision: number }) {
+  const saved = new Map<string, ThinkingReadIntent>();
+  const parts: (ThinkingReadIntent | undefined)[] = [];
+  const empty = { saved, parts, current: undefined as ThinkingReadIntent | undefined };
+  const positiveId = (value: unknown) => {
+    const id = typeof value === 'number' ? value : typeof value === 'string' && /^[1-9]\d*$/.test(value) ? Number(value) : NaN;
+    return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+  };
+  const requestId = positiveId(live.run.request_message_id);
+  if (!chat || chat.id !== live.run.chat_id || !live.run.id || requestId === undefined) return empty;
+  const anchor = chat.messages.findIndex(message => message.role === 'user' && positiveId(message.id) === requestId);
+  if (anchor < 0) return empty;
+  const owner = (turn: number) => {
+    const key = JSON.stringify([epoch, chat.id, live.run.id, requestId, turn]);
+    let record = reads.get(key);
+    if (!record && create) {
+      if (reads.size >= 256) reads.delete(reads.keys().next().value!);
+      record = { chatId: chat.id, intent: { key, focusAuthority } }; reads.set(key, record);
+    }
+    return record?.intent;
+  };
+  for (let turn = 0; turn < live.parts.length; turn++) parts.push(live.parts[turn].thinking ? owner(turn) : undefined);
+  const current = live.thinking ? owner(live.parts.length) : undefined;
+  const turns = [...live.parts, { role: 'assistant', content: live.text, thinking: live.thinking }];
+  let previous = requestId, turn = 0;
+  for (const message of chat.messages.slice(anchor + 1)) {
+    const id = positiveId(message.id);
+    if (id === undefined || id <= previous || message.role === 'user' && message.interaction_run_id !== live.run.id) break;
+    previous = id;
+    if (message.role !== 'assistant' || !message.content && !message.thinking) continue;
+    // Equality is only a sanity check inside an exact owned, ordered exchange.
+    const source = turns[turn];
+    if (message.interaction_run_id !== live.run.id || !source || source.content !== message.content || (source.thinking || '') !== (message.thinking || '')) break;
+    const intent = turn < parts.length ? parts[turn] : current;
+    if (intent) saved.set(String(id), intent);
+    turn++;
+  }
+  return { saved, parts, current };
+}
+
 export default function App() {
   const [page, setPageState] = useState<Page>('chat');
+  const thinkingReads = useRef<ThinkingReads>(new Map());
+  const thinkingFocus = useRef({ revision: 0 });
+  useEffect(() => {
+    const changed = () => { thinkingFocus.current.revision++; };
+    const focused = (event: FocusEvent) => { if (event.target !== document.body) changed(); };
+    document.addEventListener('focusin', focused, true);
+    document.addEventListener('pointerdown', changed, true);
+    document.addEventListener('wheel', changed, {capture:true,passive:true});
+    document.addEventListener('click', changed, true);
+    document.addEventListener('keydown', changed, true);
+    document.addEventListener('visibilitychange', changed);
+    window.addEventListener('blur', changed);
+    window.addEventListener('forge:navigate', changed);
+    return () => {
+      document.removeEventListener('focusin', focused, true);
+      document.removeEventListener('pointerdown', changed, true);
+      document.removeEventListener('wheel', changed, true);
+      document.removeEventListener('click', changed, true);
+      document.removeEventListener('keydown', changed, true);
+      document.removeEventListener('visibilitychange', changed);
+      window.removeEventListener('blur', changed);
+      window.removeEventListener('forge:navigate', changed);
+    };
+  }, []);
   const navigation = useRef(0);
   const setPage = useCallback((next: Page) => { if(!updateReadiness.canEdit())return; const event = new CustomEvent('forge:navigate', {cancelable: true, detail: {page: next}}); if (!window.dispatchEvent(event)) return; navigation.current++; setPageState(next); }, []);
   const [showSetup, setShowSetup] = useState(false); const [showNotifications, setShowNotifications] = useState(false);
@@ -211,6 +277,14 @@ export default function App() {
   const lastRun = recentRuns.find(l => l.run.chat_id === chatId);
   const live = recentRuns.find(l => l.run.chat_id === chatId && !l.finished) || (lastRun && ['paused', 'interrupted', 'failed'].includes(lastRun.run.status || '') ? lastRun : undefined);
   const visibleLive = live ? reconcileRunMessages(live, chat) : undefined;
+  useLayoutEffect(() => { thinkingFocus.current.revision++; }, [page, chatId, projectId, hud]);
+  const liveThinking = live ? thinkingReadOwners(live, chat, thinkingReads.current, bootstrapGeneration.current, true, thinkingFocus.current) : undefined;
+  const savedThinking = new Map(liveThinking?.saved);
+  for (const item of recentRuns) if (item !== live && item.run.chat_id === chatId) {
+    const owners = thinkingReadOwners(item, chat, thinkingReads.current, bootstrapGeneration.current, false, thinkingFocus.current);
+    for (const [id, intent] of owners.saved) savedThinking.set(id, intent);
+  }
+  const visiblePartOffset = live && visibleLive ? live.parts.length - visibleLive.parts.length : 0;
   const speed = live?.speed ?? lastRun?.speed;
   const speedEstimated = live?.speedEstimated ?? lastRun?.speedEstimated;
   const running = Boolean(live && !live.finished);
@@ -272,6 +346,7 @@ export default function App() {
   }
   async function bootstrap() {
     if (booted.current) return; booted.current = true;
+    thinkingReads.current.clear();
     const generation=++bootstrapGeneration.current,transport=isNative()?window.pywebview!.api:null;
     const accepted=()=>generation===bootstrapGeneration.current && transport===(isNative()?window.pywebview!.api:null);
     // Ref-only activation can be cached in a React bailout without running its
@@ -413,6 +488,7 @@ export default function App() {
       // ChatRow calls this only after the coordinator acknowledges deletion.
       // Revoke the scope before refreshes or any late input callback can arrive.
       deletedChats.current.add(id);persistedDraft.forgetChat(id);draftScopes.current.delete(id);composerSnapshots.current.delete(id);
+      for (const [key, record] of thinkingReads.current) if (record.chatId === id) thinkingReads.current.delete(key);
       setLives(prev=>Object.fromEntries(Object.entries(prev).filter(([,item])=>item.run.chat_id!==id)));
       setCommandModes(prev=>({...prev}));setDrafts(prev=>({...prev}));setAttachments(prev=>({...prev}));setDocuments(prev=>({...prev}));setTaskSkills(prev=>({...prev}));setTaskSpaces(prev=>({...prev}));setPendingAttachments(prev=>({...prev}));
       if(dictationTarget.current===id){
@@ -636,7 +712,7 @@ export default function App() {
     <div className="main-column">
       <header className="workspace-header"><div className="header-left">{!sidebar && !hud && <IconButton label="Open sidebar" onClick={() => setSidebar(true)}><PanelLeftOpen size={17} /></IconButton>}{hud ? <img className="hud-logo" src="./forge.svg" alt="Forge" /> : <><button className="header-project" onClick={() => setPage('projects')}>{project?<ProjectIcon project={project} size={14}/>:<Folder size={14}/>}<span>{project?.name || uiAppearance.name}</span><ChevronDown size={12} /></button><ChevronRight size={12} /><button className="header-title" title={page==='chat'&&chatId?'Rename chat':undefined} disabled={page!=='chat'||!chatId} onClick={openChatRename}>{page === 'chat' ? chat?.title || 'New chat' : page === 'scheduled' ? 'Scheduled' : page === 'plugins' ? 'Library' : page.charAt(0).toUpperCase() + page.slice(1)}</button></>}{project?.branch && <span className="branch-badge"><GitBranch size={12} />{project.branch}</span>}</div><div className="header-right">{hud && notice && !peek && <IconButton label="Show notification" onClick={() => void switchMode(true, true)}><Info size={15} /></IconButton>}{!hud && <IconButton label="Notifications" onClick={() => setShowNotifications(true)}><Bell size={17} /></IconButton>}{hud && <button className="hud-reply-toggle text-button" aria-expanded={peek} onClick={() => void switchMode(true, !peek)}>{peek ? 'Hide reply' : 'Show reply'}</button>}{!hud && isNative() && <IconButton label="Open Forge browser" onClick={() => { setRightPanel(true); setPanelTab('browser'); }}><Globe size={17} /></IconButton>}<IconButton label={hud ? 'Full workspace' : 'Minimal HUD'} onClick={() => void switchMode(!hud)}>{hud ? <Expand size={17} /> : <Minimize2 size={17} />}</IconButton>{!hud && <IconButton label={rightPanel ? 'Close workspace panel' : 'Open workspace panel'} active={rightPanel} onClick={() => setRightPanel(!rightPanel)}>{rightPanel ? <PanelRightClose size={17} /> : <PanelRightOpen size={17} />}</IconButton>}</div></header>
       <div className="workspace-body"><main className={`content ${page !== 'chat' ? 'page-content' : 'chat-content'}`}>
-        {page === 'chat' ? <><div className="chat-scroll" ref={chatScroll} onScroll={() => { const el = chatScroll.current; if (el) {shouldScroll.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;setJumpToLatest(!shouldScroll.current);} }}><div className="chat-width">{!chat?.messages?.length && !live?.text && !live?.thinking ? <div className="welcome"><div className="welcome-ambient" aria-hidden="true"/><div className="welcome-mark"><img src="./forge.svg" alt="" /></div><h1>What are we building?</h1><p>{project?`Working in ${project.name}`:uiAppearance.name==='Forge'?'Your models. Your projects. Your workspace.':uiAppearance.name}</p><div className="welcome-suggestions"><button onClick={() => { setDraft('/plan '); promptRef.current?.focus(); }}><Command size={16} /><span>Plan a change<small>Explore before building</small></span></button><button onClick={() => { setDraft('/goal '); promptRef.current?.focus(); }}><Check size={16} /><span>Start a goal<small>Keep progress through long tasks</small></span></button><button onClick={() => void registerProject()}><FolderPlus size={16} /><span>Open a project<small>Connect a local folder</small></span></button></div></div> : <>{(chat?.total_messages || 0) > (chat?.messages?.length || 0) && <button className="load-earlier" disabled={historyLoading} onClick={() => chatId && void loadChat(chatId, messagesLimit + 80,true)}>{historyLoading?'Loading earlier messages…':'Load earlier messages'}</button>}{chat?.summary && <div className="compaction-note"><Layers3 size={13} />Earlier context compacted · Original messages saved</div>}{unanchoredActivities.map(group=><ChatActivity key={group.run_id} group={group} lives={recentRuns}/>)}{chat?.messages?.map((message, index) => message.role==='tool'&&message.invocation_id&&message.run_id&&activityOwners.has(message.run_id)?null:<div key={message.id || `${chat.id}-${index}`} data-message-id={message.id}><MessageView message={message} showThinking={settings.thinking}/>{activitiesFor(message.id).map(group=><ChatActivity key={group.run_id} group={group} lives={recentRuns}/>)}</div>)}{live && !live.finished && <>{visibleLive?.parts.map((message, i) => <MessageView key={`part-${i}`} message={message} showThinking={settings.thinking} />)}{visibleLive?.showCurrent && (live.text || live.thinking) && <MessageView message={{ role: 'assistant', content: live.text, thinking: live.thinking }} streaming showThinking={settings.thinking} />}</>}{readyPlan && !running && <div className="plan-actions"><div><Badge>Plan ready</Badge><span>{readyPlan.tasks.length} steps saved</span><small className="goal-build-hint">Build starts a tracked goal</small><button className="text-button" onClick={() => setPlanPreview(true)}>Review plan</button></div><button className="primary" disabled={busy} onClick={() => void buildPlan()}><Play size={13} />Build</button></div>}</>}</div></div>{jumpToLatest && <button className="jump-to-latest" onClick={()=>{shouldScroll.current=true;if(chatScroll.current)chatScroll.current.scrollTop=chatScroll.current.scrollHeight;setJumpToLatest(false);}}><ArrowUp size={14} className="arrow-down"/>Jump to latest</button>}{composer}</> : <div className="page-scroll">{page === 'builder' && <Suspense fallback={<p className="muted">Loading Builder…</p>}><BuilderPage projects={projects} chats={chats} runs={Object.values(lives).map(item=>item.run)} onRun={run=>trackRun(run,false)} onOpenChat={id=>void loadChat(id)} notify={flash}/></Suspense>}{page === 'projects' && <ProjectsPage projects={projects} selected={projectId} open={chooseProject} refresh={refreshWorkspace} notify={flash} />}{page === 'spaces' && <SpacesPage projects={projects} notify={flash} />}{page === 'scheduled' && <SchedulesPage projects={projects} notify={flash} onRun={trackRun} onCount={setScheduledCount} />}{page === 'agents' && <AgentsPage models={models} projects={projects} projectId={projectId} settings={settings} notify={flash} onRun={trackRun} />}{page === 'plugins' && <Suspense fallback={<p className="muted">Loading library…</p>}><PluginsPage notify={flash} projectId={projectId} /></Suspense>}{page === 'usage' && <UsagePage projects={projects} models={models} timezone={settings.timezone} />}{page === 'memory' && <Suspense fallback={<p className="muted">Loading memory…</p>}><MemoryPage projects={projects} settings={settings} onChange={changeSettings} notify={flash} /></Suspense>}{page === 'settings' && <SettingsPageLoader load={loadSettingsPage} onReturn={returnToChat} pageProps={{settings,onChange:changeSettings,onContextChange:delta=>changeSettings({...delta,adaptive_context_locked:true},true),applyRecommendation,models,refreshModels,tab:settingsTab,setTab:setSettingsTab,capabilities,openSetup:() => setShowSetup(true),notify:flash}} />}</div>}
+        {page === 'chat' ? <><div className="chat-scroll" ref={chatScroll} onScroll={() => { const el = chatScroll.current; if (el) {shouldScroll.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;setJumpToLatest(!shouldScroll.current);} }}><div className="chat-width">{!chat?.messages?.length && !live?.text && !live?.thinking ? <div className="welcome"><div className="welcome-ambient" aria-hidden="true"/><div className="welcome-mark"><img src="./forge.svg" alt="" /></div><h1>What are we building?</h1><p>{project?`Working in ${project.name}`:uiAppearance.name==='Forge'?'Your models. Your projects. Your workspace.':uiAppearance.name}</p><div className="welcome-suggestions"><button onClick={() => { setDraft('/plan '); promptRef.current?.focus(); }}><Command size={16} /><span>Plan a change<small>Explore before building</small></span></button><button onClick={() => { setDraft('/goal '); promptRef.current?.focus(); }}><Check size={16} /><span>Start a goal<small>Keep progress through long tasks</small></span></button><button onClick={() => void registerProject()}><FolderPlus size={16} /><span>Open a project<small>Connect a local folder</small></span></button></div></div> : <>{(chat?.total_messages || 0) > (chat?.messages?.length || 0) && <button className="load-earlier" disabled={historyLoading} onClick={() => chatId && void loadChat(chatId, messagesLimit + 80,true)}>{historyLoading?'Loading earlier messages…':'Load earlier messages'}</button>}{chat?.summary && <div className="compaction-note"><Layers3 size={13} />Earlier context compacted · Original messages saved</div>}{unanchoredActivities.map(group=><ChatActivity key={group.run_id} group={group} lives={recentRuns}/>)}{chat?.messages?.map((message, index) => message.role==='tool'&&message.invocation_id&&message.run_id&&activityOwners.has(message.run_id)?null:<div key={message.id || `${chat.id}-${index}`} data-message-id={message.id}><MessageView message={message} showThinking={settings.thinking} thinkingIntent={savedThinking.get(String(message.id))}/>{activitiesFor(message.id).map(group=><ChatActivity key={group.run_id} group={group} lives={recentRuns}/>)}</div>)}{live && !live.finished && <>{visibleLive?.parts.map((message, i) => <MessageView key={`part-${i}`} message={message} showThinking={settings.thinking} thinkingIntent={liveThinking?.parts[visiblePartOffset + i]} />)}{visibleLive?.showCurrent && (live.text || live.thinking) && <MessageView message={{ role: 'assistant', content: live.text, thinking: live.thinking }} streaming showThinking={settings.thinking} thinkingIntent={liveThinking?.current} />}</>}{readyPlan && !running && <div className="plan-actions"><div><Badge>Plan ready</Badge><span>{readyPlan.tasks.length} steps saved</span><small className="goal-build-hint">Build starts a tracked goal</small><button className="text-button" onClick={() => setPlanPreview(true)}>Review plan</button></div><button className="primary" disabled={busy} onClick={() => void buildPlan()}><Play size={13} />Build</button></div>}</>}</div></div>{jumpToLatest && <button className="jump-to-latest" onClick={()=>{shouldScroll.current=true;if(chatScroll.current)chatScroll.current.scrollTop=chatScroll.current.scrollHeight;setJumpToLatest(false);}}><ArrowUp size={14} className="arrow-down"/>Jump to latest</button>}{composer}</> : <div className="page-scroll">{page === 'builder' && <Suspense fallback={<p className="muted">Loading Builder…</p>}><BuilderPage projects={projects} chats={chats} runs={Object.values(lives).map(item=>item.run)} onRun={run=>trackRun(run,false)} onOpenChat={id=>void loadChat(id)} notify={flash}/></Suspense>}{page === 'projects' && <ProjectsPage projects={projects} selected={projectId} open={chooseProject} refresh={refreshWorkspace} notify={flash} />}{page === 'spaces' && <SpacesPage projects={projects} notify={flash} />}{page === 'scheduled' && <SchedulesPage projects={projects} notify={flash} onRun={trackRun} onCount={setScheduledCount} />}{page === 'agents' && <AgentsPage models={models} projects={projects} projectId={projectId} settings={settings} notify={flash} onRun={trackRun} />}{page === 'plugins' && <Suspense fallback={<p className="muted">Loading library…</p>}><PluginsPage notify={flash} projectId={projectId} /></Suspense>}{page === 'usage' && <UsagePage projects={projects} models={models} timezone={settings.timezone} />}{page === 'memory' && <Suspense fallback={<p className="muted">Loading memory…</p>}><MemoryPage projects={projects} settings={settings} onChange={changeSettings} notify={flash} /></Suspense>}{page === 'settings' && <SettingsPageLoader load={loadSettingsPage} onReturn={returnToChat} pageProps={{settings,onChange:changeSettings,onContextChange:delta=>changeSettings({...delta,adaptive_context_locked:true},true),applyRecommendation,models,refreshModels,tab:settingsTab,setTab:setSettingsTab,capabilities,openSetup:() => setShowSetup(true),notify:flash}} />}</div>}
       </main>{rightPanel && !hud && <WorkspacePanel tab={panelTab} select={setPanelTab} close={()=>setRightPanel(false)} width={workspaceLayout.layout.right_panel_width} resize={value=>workspaceLayout.update({right_panel_width:value})}>
         <Suspense fallback={<p className="muted">Loading browser…</p>}>{panelTab === 'browser' && <BrowserPanel />}</Suspense>
         {panelTab === 'context' && <TaskContextPanel projectId={projectId} skills={taskSkills[draftKey] || []} notes={taskSpaces[draftKey] || []} spaces={spaces} onSkills={value=>setTaskSkills(prev=>({...prev,[draftKey]:value}))} onNotes={value=>setTaskSpaces(prev=>({...prev,[draftKey]:value}))}/>}
@@ -663,4 +739,4 @@ export function FilePanel({ projectId, notify }: { projectId: string | null; not
   return <div className="file-panel">{previewName ? <><button className="text-button" onClick={() => setPreviewName('')}>← Files</button><h3>{previewName}</h3><pre>{preview}</pre></> : <><div className="file-path"><button className="text-button" onClick={() => setPath('')}>Project</button><span>{path}</span></div>{path && <button className="file-row" onClick={() => setPath(path.split('/').slice(0, -1).join('/'))}><Folder size={14} />..</button>}{error && <div className="inline-error">{error}</div>}{files.map(file => <button className="file-row" key={file.name} onClick={() => void open(file)}>{file.is_dir || file.type === 'directory' ? <Folder size={14} /> : <FileCode2 size={14} />}<span>{file.name}</span></button>)}</>}</div>;
 }
 
-export { applyEvents, reconcileRunMessages };
+export { applyEvents, reconcileRunMessages, thinkingReadOwners };

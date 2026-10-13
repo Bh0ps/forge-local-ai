@@ -7,6 +7,7 @@ import * as loading from '../settingsLoader';
 import { DEFAULT_SETTINGS } from '../types';
 import { DEFAULT_LAYOUT } from '../workspaceLayout';
 import { updateReadiness } from '../updateReadiness';
+import { SettingsLoadError } from '../settingsAssets';
 
 const attempt = 'a'.repeat(32);
 afterEach(() => { updateReadiness.aborted(attempt); updateReadiness.dismiss(); });
@@ -153,6 +154,31 @@ describe('Settings page loading in the workspace', () => {
     await userEvent.keyboard('{Escape}');
     const composer = await screen.findByRole('textbox', { name: 'Message Forge' });
     expect((composer as HTMLTextAreaElement).value).toBe('Keep this draft'); expect(document.activeElement).toBe(composer);
+  });
+
+  it('keeps exhausted Settings recovery accessible and retains the edited draft through Return and reopening', async () => {
+    vi.spyOn(loading, 'loadSettingsPage').mockRejectedValue(new SettingsLoadError('retry_exhausted'));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await workspace();
+    fireEvent.change(screen.getByRole('textbox', { name: 'Message Forge' }), { target: { value: 'Keep this edited draft' } });
+    await userEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    const heading = await screen.findByRole('heading', { name: 'Settings could not be opened' });
+    expect(document.activeElement).toBe(heading);
+    expect(screen.queryByRole('button', { name: 'Retry Settings' })).toBeNull();
+    expect(screen.getByRole('alert').textContent).toContain('Your chat is still available. Reopen Forge');
+    await act(async () => updateReadiness.start(attempt, vi.fn()));
+    expect(screen.getByRole('button', { name: 'Return to chat' }).hasAttribute('disabled')).toBe(true);
+    await userEvent.keyboard('{Escape}'); expect(screen.queryByRole('textbox', { name: 'Message Forge' })).toBeNull();
+    await act(async () => updateReadiness.aborted(attempt));
+    const returned = screen.getByRole('button', { name: 'Return to chat' }); returned.focus(); await userEvent.keyboard('{Enter}');
+    const composer = await screen.findByRole('textbox', { name: 'Message Forge' });
+    expect((composer as HTMLTextAreaElement).value).toBe('Keep this edited draft'); expect(document.activeElement).toBe(composer);
+    await userEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await screen.findByRole('heading', { name: 'Settings could not be opened' });
+    expect(screen.queryByRole('button', { name: 'Retry Settings' })).toBeNull();
+    expect(screen.getByRole('alert').textContent).toBe('Your chat is still available. Reopen Forge when you’re ready to try Settings again.');
+    await userEvent.keyboard('{Escape}');
+    expect((await screen.findByRole('textbox', { name: 'Message Forge' }) as HTMLTextAreaElement).value).toBe('Keep this edited draft');
   });
 
   it('does not mount a late Settings page during a saved-work check', async () => {

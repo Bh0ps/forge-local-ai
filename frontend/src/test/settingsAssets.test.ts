@@ -36,6 +36,11 @@ describe('same-build Settings retry assets', () => {
     await expect(retrySettingsAsset(map, build, count)).rejects.toThrow('Settings could not be opened.');
     expect(fetch).not.toHaveBeenCalled();
   });
+  it('reports a fixed typed exhaustion category before issuing a fourth asset request', async () => {
+    const fetch = vi.spyOn(globalThis, 'fetch');
+    await expect(retrySettingsAsset(map, build, 4)).rejects.toMatchObject({ name: 'SettingsLoadError', category: 'retry_exhausted', message: 'Settings could not be opened.' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it.each(['empty','unavailable'])('rechecks a %s sheet retained after a failed preload', async kind => {
     const localMap = new URL('./assets/forge-settings-entry.json',document.baseURI).href;
     const style = new URL(data.styles[0],localMap).href;
