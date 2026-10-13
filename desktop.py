@@ -603,7 +603,7 @@ class Bridge:
                 raise ValueError('Expected an object')
             if action in ('update_apply', 'update_rollback'):
                 # Publisher verification does not prove that window-only work
-                # is durable. This seed cannot acknowledge a safe native handoff.
+                # is durable. Only the native handshake can acknowledge it.
                 raise ValueError('In-app installation and restore are unavailable in this version. Save your work and use the public installer for a manual update.')
             if action.startswith('update_handoff_'):
                 return self._handoff_call(action, data)

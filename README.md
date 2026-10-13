@@ -37,8 +37,8 @@ The Windows executables do not yet have an Authenticode certificate. Forge's
 independent publisher signature binds the installer, portable archive, source
 commit and complete application file set. The first installation from an older
 preview is manual. Forge checks GitHub automatically and verifies downloads.
-Restart preparation confirms saved drafts and blocks on unfinished work; in-app
-installation stays closed until packaged forward and rollback validation passes.
+In-app installation confirms saved drafts and blocks on unfinished work before
+an authenticated helper restarts Forge. Restore uses a verified previous backup.
 Ollama and model downloads are separate. No cloud account is required.
 
 ## Make it your own
