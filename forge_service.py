@@ -502,9 +502,14 @@ class ForgeService:
         if action=='resolve_action': return self.resolve_action(data)
         if action=='goals':
             goals=self.store.active_goals() if data.get('active_only') or data.get('active') else self.store.entities('goals')
+            if 'project_id' in data:
+                project_id=self._goal_project_scope(data['project_id'])
+                goals=[goal for goal in goals if goal.get('project_id')==project_id]
             return {'goals':[self.goal_view(goal) for goal in goals]}
         if action=='goal_get':
-            goal=self.goal_view(self.store.goal(data['id'])); return {'goal':goal,**goal}
+            goal=self.store.goal(data['id'])
+            self._check_goal_project_scope(goal,data)
+            goal=self.goal_view(goal); return {'goal':goal,**goal}
         if action=='goal_create': return self.goal_create(data)
         if action=='goal_update': return self.store.save_goal({**self.store.goal(data['id']),**data})
         if action=='goal_task_update': return self.store.update_goal_task(data['id'],data['task_id'],data['expected_revision'],data['status'],data.get('evidence',[]),data.get('note',''))
@@ -716,6 +721,18 @@ class ForgeService:
             'progress_summary':progress,'verified_task_ids':progress.get('verified_task_ids',[]),'run_id':run['id'],
             'execution_mode':run.get('execution_mode','legacy')}
 
+    @staticmethod
+    def _goal_project_scope(value):
+        if value is not None and (not isinstance(value,str) or not value or len(value)>64 or
+                value!=value.strip() or '\x00' in value):
+            raise ValueError('Select a valid project scope.')
+        return value
+
+    def _check_goal_project_scope(self,goal,data):
+        # Omission means an intentional workspace-wide read; null means Unassigned.
+        if 'project_id' in data and self._goal_project_scope(data['project_id'])!=goal.get('project_id'):
+            raise ValueError('This goal belongs to another project. Open its original project.')
+
     def save_plan(self,run,markdown):
         tasks=[]
         for line in markdown.splitlines():
@@ -773,10 +790,10 @@ class ForgeService:
         with self.jobs.lock: return self._goal_resume(data)
     def _goal_resume(self,data):
         goal=self.store.goal(data['id'])
-        if goal.get('project_missing'): raise ValueError('Reconnect the original project or export this checklist into a new goal before continuing.')
+        if goal.get('project_missing'): raise ValueError('Reconnect the original project before continuing. The saved checklist is preserved.')
         if goal['external_edits']: raise ValueError('Reconcile the edited checklist first.')
         if goal.get('chat_id') and self.store.get_chat(goal['chat_id'],limit=1).get('project_id')!=goal.get('project_id'):
-            raise ValueError('The chat moved to another project. Export this checklist into the intended project and create a new goal.')
+            raise ValueError('The chat moved to another project. Open the original project to export this checklist, or create a new goal in this chat.')
         if goal.get('status')=='completed': raise ValueError('This goal is completed. Create a new goal for additional work.')
         previous=next((r for r in self.store.runs() if r.get('goal_id')==goal['id'] and
             not r.get('parent_id') and r['chat_id']==goal.get('chat_id')),None)
@@ -837,8 +854,14 @@ class ForgeService:
         elif data.get('mode')!='overwrite': raise ValueError('Choose import or overwrite.')
         return self.store.save_goal(goal,reconcile=True)
     def goal_export(self,data):
-        goal=self.store.goal(data['id']); project=self.store.get_project(data.get('project_id') or goal['project_id'])
-        return ProjectTools(project['path'],self.store.home/'backups').execute('write_file',{'path':data.get('path','FORGE_TODO.md'),'content':goal['markdown']})
+        with self.admission_lock,self.store._goal_lock:
+            goal=self.store.goal(data['id'])
+            self._check_goal_project_scope(goal,data)
+            owner=goal.get('project_id')
+            if not owner or goal.get('project_missing'):
+                raise ValueError('Reconnect or assign this goal to its project before exporting. The saved checklist is preserved.')
+            project=self.store.get_project(owner)
+            return ProjectTools(project['path'],self.store.home/'backups').execute('write_file',{'path':data.get('path','FORGE_TODO.md'),'content':goal['markdown']})
 
     def command(self,data):
         text=data.get('text','').strip(); parts=text.split(maxsplit=1)

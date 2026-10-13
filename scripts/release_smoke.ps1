@@ -87,6 +87,18 @@ function Write-ForgeSmokeDiagnostics {
         'Browser layout changed. Refresh its panel bounds.' = 'panel-layout-changed'
         'Browser panel changed. Inspect again after reopening it.' = 'panel-layout-changed'
         'Browser view has been disposed.' = 'browser-disposed'
+        'Native input is paused while Forge confirms a restart.' = 'native-admission'
+        'The built-in browser requires Forge desktop on Windows.' = 'browser-unavailable'
+        'Unknown native browser panel.' = 'panel-identity'
+        'Unknown embedded browser profile.' = 'panel-profile'
+        'Browser panel bounds must be finite numbers.' = 'panel-bounds'
+        'Native browser bounds exceed their owner.' = 'panel-owner'
+        'Integration timed out. Inspect its outcome before retrying a side effect.' = 'integration-timeout'
+        'Optional integration dependency is unavailable; install requirements-integrations.txt' = 'integration-dependency'
+        'Integration failed (RuntimeError). Check the endpoint, authentication and server availability.' = 'integration-runtime'
+        'Integration failed (AttributeError). Check the endpoint, authentication and server availability.' = 'integration-attribute'
+        'Integration failed (TypeError). Check the endpoint, authentication and server availability.' = 'integration-type'
+        'Integration failed (OSError). Check the endpoint, authentication and server availability.' = 'integration-os'
     }
     $phases = @('workspace-ready','workspace-size','library','host-lifecycle','research-start','research-navigate',
         'research-load','research-input-target','research-type','research-button-target','research-click','research-verify',
@@ -122,8 +134,13 @@ function Write-ForgeSmokeDiagnostics {
     $gates=@('process-timeout','report-missing','report-invalid','lifecycle-browser','library','builder-preview','standalone-preview')
     if ($gates -notcontains $Gate) { $Gate='unclassified' }
     if ($ExitCode -isnot [int] -and $ExitCode -isnot [long]) { $ExitCode=$null }
+    $toolFailure='unrecorded'
+    if (@('not-executed','outcome-unknown','refused') -contains $SmokeData.tool_failure) { $toolFailure=$SmokeData.tool_failure }
+    $researchViewCreated=$null
+    if ($SmokeData.research_view_created -is [bool]) { $researchViewCreated=$SmokeData.research_view_created }
     $summary = [ordered]@{ gate=$Gate; phase=$phase; process_exit=$ExitCode; error_present=$hasError;
         error_category=$category; error_type=$errorType; safe_error=$message; report_state=$ReportState;
+        tool_failure=$toolFailure; research_view_created=$researchViewCreated;
         checkpoint_state=$CheckpointState; checkpoint_phase=$checkpointPhase;
         checkpoint_error_type=$checkpointErrorType; checkpoint_error_category=$checkpointErrorCategory; checks=[ordered]@{
             ready=(Check-Status $SmokeData.ready ($SmokeData.ready -eq 'complete'))

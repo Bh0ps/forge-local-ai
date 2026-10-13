@@ -134,6 +134,8 @@ class Bridge:
         self._full_maximized = True
         self._pin = False
         self._closing = False
+        self._quit_complete = None
+        self._owned_teardown = threading.local()
         self._capture_lock = threading.Lock()
         self._pairing = pairing or PairingAuthority()
         self._lifecycle = None
@@ -364,7 +366,10 @@ class Bridge:
         return self._update_controller
 
     def _native_update_status(self, controller, binding):
-        result = controller.manager.native_status(binding)
+        result = dict(controller.manager.native_status(binding))
+        # Match update_status dispatch: an operation failure is renderable
+        # state, rather than a failed bridge request.
+        result['operation_error'] = result.pop('error', None)
         available = False
         if (result.get('safe_handoff_available') is True and not self._closing
                 and result.get('inspection_required') is not True):
@@ -442,7 +447,9 @@ class Bridge:
                 return False
             self._update_authority.pipe_admission(grant, transport)
             self._closing = True
-        self._quit_owned()
+        if self._quit_owned() is not True:
+            from forge_native_handoff import HandoffRejected
+            raise HandoffRejected('helper_failed')
         return True
 
     def _emergency_stop(self):
@@ -565,10 +572,14 @@ class Bridge:
         if form is None:
             raise RuntimeError('Window is unavailable.')
         result, done = {}, threading.Event()
+        # Only the owned quit thread may marshal its synchronous stop/dispose
+        # calls after admission closes. Other workers and already queued input
+        # retain their normal admission checks.
+        _update_safe = _update_safe or (self._closing and getattr(self._owned_teardown, 'active', False) is True)
         release = (lambda: None) if _update_safe else self._admit_native()
         def run():
             try:
-                if not _update_safe and self._update_locked():
+                if not _update_safe and (self._closing or self._update_locked()):
                     raise ValueError('Native input is paused while Forge confirms a restart.')
                 result['value'] = operation(form)
             except Exception as exc:
@@ -833,27 +844,56 @@ class Bridge:
 
     def quit(self):
         if self._closing:
-            return {'ok': True}
+            return ({'ok': True} if self._quit_complete is True else
+                {'ok': False, 'error': 'Forge could not complete owned cleanup.'})
         if self._update_locked():
             if self._update_controller is not None:
                 self._update_controller.invalidate()
             return {'ok': False, 'error': 'Cancel the restart and confirm cancellation before quitting Forge.'}
         self._closing = True
         self._update_authority.update_binding(None)
-        self._quit_owned()
-        return {'ok': True}
+        complete = self._quit_owned()
+        return ({'ok': True} if complete else
+            {'ok': False, 'error': 'Forge could not complete owned cleanup.'})
 
     def _quit_owned(self):
-        if self._service and getattr(self._service, 'host_dictation', None):
-            self._service.host_dictation.cancel()
-        if self._lifecycle:
-            self._lifecycle.quit()
-        if self._hotkey:
-            self._hotkey.stop()
-        if self._tray:
-            self._tray.stop()
-        if self._window:
-            self._window.destroy()
+        previous = getattr(self._owned_teardown, 'active', False)
+        self._owned_teardown.active = True
+        complete = True
+        def cleanup(name, callback):
+            nonlocal complete
+            try:
+                callback()
+            except Exception as exc:
+                complete = False
+                log.warning('Owned cleanup %s failed: %s', name, type(exc).__name__)
+        try:
+            if self._service and getattr(self._service, 'host_dictation', None):
+                cleanup('dictation', self._service.host_dictation.cancel)
+            if self._lifecycle:
+                if type(self._lifecycle) is HostLifecycle:
+                    # Preserve the owned lifecycle order, while a failing stop
+                    # cannot skip service shutdown or closing the HTTP host.
+                    self._lifecycle.shutting_down = True
+                    cleanup('pairing', self._lifecycle.pairing.close)
+                    cleanup('emergency-stop', self._lifecycle.emergency_stop)
+                    shutdown = getattr(self._lifecycle.service, 'shutdown', None)
+                    if shutdown:
+                        cleanup('service', shutdown)
+                    if self._lifecycle.server:
+                        cleanup('server', lambda: setattr(self._lifecycle.server, 'should_exit', True))
+                else:
+                    cleanup('lifecycle', self._lifecycle.quit)
+            if self._hotkey:
+                cleanup('hotkey', self._hotkey.stop)
+            if self._tray:
+                cleanup('tray', self._tray.stop)
+            if self._window:
+                cleanup('window', self._window.destroy)
+            self._quit_complete = complete
+            return complete
+        finally:
+            self._owned_teardown.active = previous
 
 
 def setup_logging():
@@ -1116,6 +1156,9 @@ def main():
                             def tool(name, arguments):
                                 outcome = service.jobs.registry.execute(run, name, arguments, cancel)
                                 if outcome.get('ok') is False:
+                                    result['tool_failure'] = ('not-executed' if outcome.get('not_executed') is True else
+                                        'outcome-unknown' if outcome.get('outcome_unknown') is True else 'refused')
+                                    result['research_view_created'] = getattr(browser.native, 'view', None) is not None
                                     raise ValueError(outcome.get('error', 'Native browser fixture failed'))
                                 return outcome
                             result['smoke_phase'] = 'research-navigate'

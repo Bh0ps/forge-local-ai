@@ -94,11 +94,13 @@ describe('durable goal review visibility', () => {
     const { rerender } = render(<GoalsPanel projectId={null} chats={chats} version={0} notify={notify} onRun={onRun} />);
     await userEvent.click(await screen.findByRole('button', { name: /Build fixture/ }));
     expect(await screen.findByText('Reviewing completion')).toBeTruthy();
-    responses.goals = { goals: [{ ...goal, status: 'paused', markdown: '1. [x] Build fixture\n2. [ ] Save missing test evidence', review: { status: 'insufficient_evidence', summary: 'A test result is missing.', feedback: ['Run the regression test and save its output.'], attempt: 1 } }] };
+    const updatedGoal: Goal = { ...goal, status: 'paused', markdown: '1. [x] Build fixture\n2. [ ] Save missing test evidence', review: { status: 'insufficient_evidence', summary: 'A test result is missing.', feedback: ['Run the regression test and save its output.'], attempt: 1 } };
+    responses.goals = { goals: [updatedGoal] };
+    responses.goal_get = { goal: updatedGoal, markdown: updatedGoal.markdown };
     rerender(<GoalsPanel projectId={null} chats={chats} version={1} notify={notify} onRun={onRun} />);
     expect(await screen.findByText('More evidence needed')).toBeTruthy();
     expect(screen.getByText('Run the regression test and save its output.')).toBeTruthy();
-    expect(screen.getByText('[ ] Save missing test evidence')).toBeTruthy();
+    expect(await screen.findByText('[ ] Save missing test evidence')).toBeTruthy();
     expect(screen.getByText(/Goal paused without verified completion/)).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: 'Resume' }));
     await waitFor(() => expect(call).toHaveBeenCalledWith('goal_resume', { id: goal.id }));
