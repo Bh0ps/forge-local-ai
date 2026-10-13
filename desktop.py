@@ -509,7 +509,7 @@ def main():
             options['icon'] = str(icon)
         if '--smoke-test' in sys.argv:
             def smoke():
-                result = {}
+                result = {'smoke_phase': 'workspace-ready'}
                 try:
                     deadline = time.monotonic() + 25
                     while time.monotonic() < deadline:
@@ -521,6 +521,7 @@ def main():
                         time.sleep(.2)
                     if not result.get('ui', {}).get('composer') or not result['ui']['textarea']:
                         raise ValueError('React workspace did not render its composer.')
+                    result['smoke_phase'] = 'workspace-size'
                     result['launch_maximized'] = api._native(lambda form: str(form.WindowState) == 'Maximized')
                     if not result['launch_maximized']:
                         raise ValueError('Forge did not launch with its workspace maximized.')
@@ -535,6 +536,7 @@ def main():
                     deadline = time.monotonic() + 5
                     while api._window.evaluate_js("!!document.querySelector('dialog[open]')") and time.monotonic() < deadline:
                         time.sleep(.05)
+                    result['smoke_phase'] = 'library'
                     starters = [skill for skill in api.call('skills')['skills'] if skill.get('builtin')]
                     if len(starters) != 24 or not all(skill['enabled'] and skill['automatic'] for skill in starters):
                         raise ValueError('The packaged starter library was not prepared correctly.')
@@ -550,6 +552,7 @@ def main():
                     if cards < 24: raise ValueError('The packaged Discover library did not render.')
                     result['library'] = {'starter_skills': len(starters), 'discover_cards': cards, 'rendered': True}
                     api._window.evaluate_js("document.querySelector('.new-chat').click()")
+                    result['smoke_phase'] = 'host-lifecycle'
                     result.update(hud=api.mode('hud'), peek=api.mode('hud', True), full=api.mode('full'),
                                   pin=api.pin(True), unpin=api.pin(False), host=api.call('host_status'),
                                   projects=api.call('projects'), size=api._native(lambda form: [form.Width, form.Height]))
@@ -588,6 +591,7 @@ def main():
                             'device': current['device'], 'compute_type': current['compute_type'],
                             'model': current['model'], 'audio_memory_only': True}
                     if '--native-browser-smoke' in sys.argv:
+                        result['smoke_phase'] = 'research-start'
                         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
                         class Fixture(BaseHTTPRequestHandler):
                             def do_GET(self):
@@ -613,19 +617,27 @@ def main():
                                 if outcome.get('ok') is False:
                                     raise ValueError(outcome.get('error', 'Native browser fixture failed'))
                                 return outcome
+                            result['smoke_phase'] = 'research-navigate'
                             tool('browser_navigate', {'url': url})
+                            result['smoke_phase'] = 'research-load'
                             deadline = time.monotonic() + 20
                             while browser.native.status()['loading'] and time.monotonic() < deadline:
                                 time.sleep(.1)
                             inspected = tool('browser_inspect', {})
+                            result['smoke_phase'] = 'research-input-target'
                             field = next(t for t in inspected['targets'] if t['tag'] == 'input')
+                            result['smoke_phase'] = 'research-type'
                             tool('browser_type', {'snapshot_id': inspected['snapshot_id'], 'selector': field['selector'], 'text': 'Native WebView2 works'})
                             inspected = tool('browser_inspect', {})
+                            result['smoke_phase'] = 'research-button-target'
                             button = next(t for t in inspected['targets'] if t['tag'] == 'button')
+                            result['smoke_phase'] = 'research-click'
                             tool('browser_click', {'snapshot_id': inspected['snapshot_id'], 'selector': button['selector']})
                             inspected = tool('browser_inspect', {})
+                            result['smoke_phase'] = 'research-verify'
                             if 'Native WebView2 works' not in inspected['text']:
                                 raise ValueError('Native form edit/click did not update the fixture.')
+                            result['smoke_phase'] = 'research-screenshot'
                             capture = tool('browser_screenshot', {})
                             result['native_browser'] = dict(engine='WebView2', bridge_exposed=browser.native.view.evaluate('typeof window.pywebview'),
                                 fixture_updated=True, screenshot_bytes=Path(capture['artifact']).stat().st_size,
@@ -636,6 +648,7 @@ def main():
                             fixture.server_close()
                         # Exercise the separately owned preview controller, not
                         # merely the research browser's shared DOM tools.
+                        result['smoke_phase'] = 'builder-start'
                         manager = service.get_builder()
                         project = service.create_project({'name': 'Disposable preview fixture', 'git': False})
                         brief = manager.save({'project_id': project['id'], 'title': 'Native preview fixture',
@@ -652,6 +665,7 @@ def main():
                             # HUD resizing may have collapsed the sidebar. Restore it
                             # before looking for Builder, then wait for React to render.
                             api._window.evaluate_js("document.querySelector('button[aria-label=\"Close workspace panel\"]')?.click();document.querySelector('button[aria-label=\"Open sidebar\"]')?.click();true")
+                            result['smoke_phase'] = 'builder-navigation'
                             opened = False; deadline = time.monotonic()+10
                             api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='Tools');button?.click();return true;})()")
                             while not opened and time.monotonic()<deadline:
@@ -672,13 +686,16 @@ def main():
                                 time.sleep(.1)
                             preview_run = {'id': 'preview-native-smoke', 'project_id': project['id'], 'settings': service.store.get_settings()}
                             def preview_tool(name, arguments):
+                                result['smoke_phase'] = 'builder:' + name
                                 outcome = manager.execute(preview_run, name, {'id': preview['id'], **arguments}, cancel)
                                 if outcome.get('ok') is False: raise ValueError(outcome.get('error', 'Preview fixture failed.'))
                                 return outcome
                             inspected = preview_tool('preview_inspect', {})
+                            result['smoke_phase'] = 'builder-input-target'
                             target = next(t for t in inspected['targets'] if t['tag']=='input')
                             preview_tool('preview_type', {'snapshot_id': inspected['snapshot_id'], 'selector': target['selector'], 'text': 'Isolated preview works'})
                             inspected = preview_tool('preview_inspect', {})
+                            result['smoke_phase'] = 'builder-button-target'
                             target = next(t for t in inspected['targets'] if t['tag']=='button')
                             arguments = {'id': preview['id'], 'snapshot_id': inspected['snapshot_id'], 'selector': target['selector']}
                             rejected = manager.execute({**preview_run,'id':'other-preview-run'}, 'preview_click', arguments, cancel)
@@ -707,6 +724,7 @@ def main():
                         # Plain plans can start previews without a Builder brief.
                         # The actual workspace must discover that identity while
                         # preview_open waits for its guarded native pane to appear.
+                        result['smoke_phase'] = 'standalone-start'
                         standalone_run = {'id':'standalone-native-smoke','project_id':project['id'],
                             'settings':service.store.get_settings()}
                         standalone = manager.execute(standalone_run,'preview_start',{'cwd':'site','mode':'static'},cancel)
@@ -715,6 +733,7 @@ def main():
                             deadline=time.monotonic()+10
                             while not api._window.evaluate_js("document.body.innerText.includes('Disposable preview fixture')") and time.monotonic()<deadline:
                                 time.sleep(.05)
+                            result['smoke_phase'] = 'standalone-open'
                             manager.execute(standalone_run,'preview_open',{'id':standalone['id']},cancel)
                             deadline=time.monotonic()+10
                             while (not manager.previews.browser.status().get('visible') or manager.previews.browser.status().get('loading')) and time.monotonic()<deadline:
@@ -723,16 +742,19 @@ def main():
                                 raise ValueError('The standalone preview pane did not open.')
                             manager.execute(standalone_run,'preview_viewport',{'id':standalone['id']},cancel)
                             inspected=manager.execute(standalone_run,'preview_inspect',{'id':standalone['id']},cancel)
+                            result['smoke_phase'] = 'standalone-input-target'
                             target=next(t for t in inspected['targets'] if t['tag']=='input')
                             manager.execute(standalone_run,'preview_type',{'id':standalone['id'],'snapshot_id':inspected['snapshot_id'],
                                 'selector':target['selector'],'text':'Standalone preview works'},cancel)
                             inspected=manager.execute(standalone_run,'preview_inspect',{'id':standalone['id']},cancel)
+                            result['smoke_phase'] = 'standalone-button-target'
                             target=next(t for t in inspected['targets'] if t['tag']=='button')
                             manager.execute(standalone_run,'preview_click',{'id':standalone['id'],'snapshot_id':inspected['snapshot_id'],
                                 'selector':target['selector']},cancel)
                             inspected=manager.execute(standalone_run,'preview_inspect',{'id':standalone['id']},cancel)
                             if 'Standalone preview works' not in inspected['text']:
                                 raise ValueError('Standalone preview controls did not update the fixture.')
+                            result['smoke_phase'] = 'standalone-screenshot'
                             capture=manager.execute(standalone_run,'preview_screenshot',{'id':standalone['id']},cancel)
                             result['native_standalone_preview']={'pane_visible':True,'fixture_updated':True,
                                 'without_builder':standalone.get('builder_id') is None,
@@ -741,6 +763,7 @@ def main():
                         finally:
                             manager.previews.stop(standalone['id'])
                 except Exception as exc:
+                    result['error_type'] = type(exc).__name__
                     result['error'] = str(exc)
                 finally:
                     destination = os.getenv('LOCAL_AI_SMOKE_PATH')
