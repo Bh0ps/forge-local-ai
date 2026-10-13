@@ -24,6 +24,8 @@ jobs:
       RELEASE_CHANNEL: ${{ inputs.channel }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.tag }}
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.12.10'
@@ -44,7 +46,10 @@ jobs:
           "FORGE_RELEASE_VERSION=$($env:RELEASE_TAG.Substring(1))" >> $env:GITHUB_ENV
           "FORGE_SOURCE_COMMIT=$headCommit" >> $env:GITHUB_ENV
       - name: Install exact verification dependencies
-        run: python -m pip install --require-hashes -r requirements-build.lock
+        run: |
+          python -m pip install --require-hashes -r requirements-build.lock
+          python -m pip install --require-hashes --no-build-isolation -r requirements-ci.lock
+          python -m pip check
       - name: Download the five public release assets
         run: |
           New-Item -ItemType Directory -Path C:/ForgePublisherVerification | Out-Null
