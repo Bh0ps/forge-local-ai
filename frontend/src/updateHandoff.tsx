@@ -70,10 +70,23 @@ export async function requestUpdateRestart(kind:'apply'|'rollback'='apply') {
   finally {starting=false;}
 }
 
-export function UpdateHandoffSurface() {
+export function UpdateHandoffSurface({layoutRecovery}:{layoutRecovery?:{error:'load'|'save'|null;retrying:boolean;retry:()=>Promise<boolean>}}={}) {
   const snapshot=useUpdateReadiness();
   const surface=useRef<HTMLElement>(null),previousFocus=useRef<HTMLElement|null>(null);
-  useLayoutEffect(()=>{if(updateReadiness.isLocked()){if(!previousFocus.current)previousFocus.current=document.activeElement as HTMLElement;surface.current?.querySelector<HTMLButtonElement>('button')?.focus();}else if(previousFocus.current){if(previousFocus.current.isConnected)previousFocus.current.focus();previousFocus.current=null;}},[snapshot.phase]);
+  const restartFocus=useRef<HTMLElement|null>(null);
+  useLayoutEffect(()=>{if(updateReadiness.isLocked()){if(!previousFocus.current)previousFocus.current=document.activeElement as HTMLElement;surface.current?.querySelector<HTMLButtonElement>('button')?.focus();}else if(previousFocus.current){restartFocus.current=previousFocus.current;if(previousFocus.current.isConnected)previousFocus.current.focus();previousFocus.current=null;}},[snapshot.phase]);
+  async function retryLayout(){
+    if(!layoutRecovery)return;
+    const failedSnapshot=updateReadiness.getSnapshot();
+    try {
+      if(await layoutRecovery.retry() && updateReadiness.getSnapshot()===failedSnapshot && failedSnapshot.phase==='failed' && failedSnapshot.reason==='preferences_pending'){
+        const restore=restartFocus.current,active=document.activeElement;
+        const ownedFocus=active===document.body || active instanceof Element && surface.current?.contains(active);
+        updateReadiness.dismiss();
+        if(ownedFocus && restore?.isConnected && !(restore instanceof HTMLButtonElement && restore.disabled))restore.focus();
+      }
+    } catch { /* The layout owner retains the error until a confirmed retry. */ }
+  }
   if(snapshot.phase==='idle')return null;
   const locked=updateReadiness.isLocked();
   const message=snapshot.reason ? readinessMessages[snapshot.reason] : snapshot.phase==='checking' ? 'Saving your work before restarting…' : snapshot.phase==='prepared' ? 'Preparing the verified restart. Forge will stay open until it is ready.' : 'Confirming your saved work…';
@@ -82,6 +95,7 @@ export function UpdateHandoffSurface() {
     {locked && <button type="button" className="secondary" onClick={()=>{if(snapshot.phase==='aborting')void retryAbort?.();else updateReadiness.requestAbort();}}>{snapshot.phase==='aborting'?'Confirm cancellation':'Keep working'}</button>}
     {!locked && snapshot.reason==='native_input' && isNative() && <button type="button" className="secondary" onClick={()=>void api<{closed?:boolean}>('update_handoff_close_children').then(result=>{if(result.closed)updateReadiness.dismiss();}).catch(()=>{})}>Close browser work…</button>}
     {!locked && snapshot.reason==='paired_editor' && isNative() && <button type="button" className="secondary" onClick={()=>void api<{disconnected?:boolean}>('update_handoff_disconnect_editors').then(result=>{if(result.disconnected)updateReadiness.dismiss();}).catch(()=>{})}>Disconnect paired browsers…</button>}
+    {!locked && snapshot.reason==='preferences_pending' && layoutRecovery && (layoutRecovery.error || layoutRecovery.retrying) && <button type="button" className="secondary" disabled={layoutRecovery.retrying} aria-busy={layoutRecovery.retrying} onClick={()=>void retryLayout()}>{layoutRecovery.retrying?'Retrying workspace layout…':'Retry workspace layout'}</button>}
     {!locked && <button type="button" className="text-button" onClick={()=>updateReadiness.dismiss()}>Keep working</button>}
   </section>;
 }
