@@ -174,16 +174,18 @@ def test_corrupt_private_journal_leaves_workspace_open_but_blocks_affected_auth(
 
 
 @pytest.mark.parametrize('corruption',['extra_column','missing_column','ambiguous_readable'])
-def test_unknown_private_schema_does_not_block_unrelated_fresh_compatible_worker(fixture,monkeypatch,corruption):
+def test_unknown_private_schema_refuses_bound_compatible_but_keeps_default_engine_usable(fixture,monkeypatch,corruption):
     svc,project=fixture
-    corrupt_journal(svc.store,corruption)
     svc.dispatch('provider_save',{'id':'compatible','kind':'openai-compatible','url':'https://compatible.invalid/v1','name':'Synthetic compatible','enabled':True})
+    corrupt_journal(svc.store,corruption)
     def handler(request):
         return httpx.Response(200,content=('data: '+json.dumps({'choices':[{'delta':{'content':'Synthetic compatible result'},'finish_reason':'stop'}]})+'\n\ndata: [DONE]\n\n').encode())
     requests,_=install_http(monkeypatch,handler)
-    run=svc.jobs.start({'text':'Synthetic request.','project_id':project['id'],'provider_id':'compatible'})
-    assert terminal(svc,run['id'])['status']=='completed'
-    assert len(requests)==1 and requests[0].url.host=='compatible.invalid'
+    with pytest.raises(EngineRunBindingFailure):
+        svc.jobs.start({'text':'Synthetic request.','project_id':project['id'],'provider_id':'compatible'})
+    assert requests==[]
+    run=svc.jobs.start({'text':'Synthetic default request.','project_id':project['id'],'provider_id':'ollama'})
+    assert terminal(svc,run['id'])['status']=='completed' and requests==[]
 
 
 def corrupt_journal(store,corruption):

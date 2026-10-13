@@ -6,6 +6,41 @@ const provider={id:'saved',name:'My engine',type:'openai',base_url:'http://127.0
 const preset={id:'lm-studio',name:'LM Studio',kind:'openai-compatible',url:'http://127.0.0.1:1234/v1',setup_url:'https://lmstudio.ai/docs/developer/openai-compat',description:'Start the local server.',hosting:'desktop',metadata_strategy:'lmstudio'};
 function bridge(test:unknown={ok:true,model_count:1}){const call=vi.fn(async(action:string)=>action==='provider_presets'?{presets:[preset]}:typeof test==='function'?test(action):test);window.pywebview={api:{call}};return call;}
 describe('engine presets',()=>{
+  it('keeps preset connection fields primary and the editable protocol in a closed native disclosure',async()=>{
+    const call=bridge();render(<EngineEditor provider={{...provider,preset_id:'lm-studio'}} close={()=>{}} saved={async()=>{}}/>);
+    await screen.findByRole('option',{name:'LM Studio'});
+    const summary=screen.getByText('Advanced'),details=summary.closest('details')!;
+    expect(details.open).toBe(false);
+    expect(screen.getByLabelText('Name')).toBeTruthy();expect(screen.getByLabelText('Base URL')).toBeTruthy();expect(screen.getByLabelText('API key (optional)')).toBeTruthy();
+    expect(screen.getByRole('link',{name:'Official setup guide'})).toBeTruthy();
+    await userEvent.click(summary);await waitFor(()=>expect(details.open).toBe(true));
+    expect((screen.getByLabelText('API protocol') as HTMLSelectElement).value).toBe('openai');
+    expect(call.mock.calls.map(([action])=>action)).toEqual(['provider_presets']);
+  });
+  it('exposes custom protocol choices and keeps focus and key isolation when overriding a preset',async()=>{
+    const call=bridge();render(<EngineEditor provider={provider} close={()=>{}} saved={async()=>{}}/>);
+    const details=screen.getByText('Advanced').closest('details')!;expect(details.open).toBe(true);
+    await screen.findByRole('option',{name:'LM Studio'});await userEvent.selectOptions(screen.getByLabelText('Engine preset'),'lm-studio');
+    await waitFor(()=>expect(details.open).toBe(false));
+    await userEvent.click(screen.getByText('Advanced'));await waitFor(()=>expect(details.open).toBe(true));
+    await userEvent.type(screen.getByLabelText('API key (optional)'),'synthetic-key');
+    const protocol=screen.getByLabelText('API protocol');await userEvent.selectOptions(protocol,'ollama');
+    expect(document.activeElement).toBe(protocol);expect(details.open).toBe(true);
+    expect((screen.getByLabelText('API key (optional)') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('Engine preset') as HTMLSelectElement).value).toBe('');
+    expect((screen.getByLabelText('Base URL') as HTMLInputElement).value).toBe(preset.url);
+    await userEvent.click(screen.getByRole('button',{name:'Test connection'}));
+    expect(call).toHaveBeenCalledWith('provider_test',expect.objectContaining({draft:{kind:'ollama',url:preset.url,preset_id:null},api_key:undefined}));
+    expect(call.mock.calls.some(([action])=>action==='provider_save'||action==='settings')).toBe(false);
+  });
+  it('returns custom protocol controls when leaving a preset and resets disclosure state for a replaced target',async()=>{
+    bridge();const view=render(<EngineEditor provider={{...provider,preset_id:'lm-studio'}} close={()=>{}} saved={async()=>{}}/>);
+    await screen.findByRole('option',{name:'LM Studio'});const details=screen.getByText('Advanced').closest('details')!;
+    await userEvent.selectOptions(screen.getByLabelText('Engine preset'),'');await waitFor(()=>expect(details.open).toBe(true));
+    expect((screen.getByLabelText('Base URL') as HTMLInputElement).value).toBe(provider.base_url);
+    view.rerender(<EngineEditor provider={{...provider,id:'replacement',preset_id:'lm-studio'}} close={()=>{}} saved={async()=>{}}/>);
+    await waitFor(()=>expect(details.open).toBe(false));expect(document.activeElement).toBe(screen.getByLabelText('Name'));
+  });
   it('fills editable defaults, clears only typed credentials and saves no capability guesses',async()=>{
     const call=bridge(),saved=vi.fn(async()=>{});render(<EngineEditor provider={provider} close={()=>{}} saved={saved}/>);
     await userEvent.type(screen.getByLabelText('API key (optional)'),'synthetic-key');await screen.findByRole('option',{name:'LM Studio'});await userEvent.selectOptions(screen.getByLabelText('Engine preset'),'lm-studio');

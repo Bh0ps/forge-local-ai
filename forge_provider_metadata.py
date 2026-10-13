@@ -49,7 +49,7 @@ def _constant(value):
 
 
 def fetch_json(url, *, token=None, cancel=None, current=None, client_factory=None,
-               limit=MAX_JSON_BYTES):
+               limit=MAX_JSON_BYTES,headers_factory=None):
     """Read the exact supplied endpoint; never follow its URLs or redirects."""
     require_current(cancel, current)
     deadline = time.monotonic() + 10
@@ -57,6 +57,9 @@ def fetch_json(url, *, token=None, cancel=None, current=None, client_factory=Non
     factory = client_factory or httpx.Client
     with factory(timeout=httpx.Timeout(10, connect=3, read=2), trust_env=False,
                  follow_redirects=False) as client:
+        require_current(cancel,current)
+        if headers_factory is not None:headers=headers_factory(url)
+        require_current(cancel,current)
         with client.stream('GET', url, headers=headers) as response:
             response.raise_for_status()
             declared = response.headers.get('content-length', '')
@@ -122,7 +125,7 @@ def _model(entry):
         'trained_for_tool_use': _boolean(capabilities.get('trained_for_tool_use')), 'reasoning_options': options}
 
 
-def fetch_provider_metadata(config, *, token=None, model=None, cancel=None, current=None, client_factory=None):
+def fetch_provider_metadata(config, *, token=None, model=None, cancel=None, current=None, client_factory=None,headers_factory=None):
     """LM Studio v1 declarations only; unavailable/missing facts remain unknown.
 
     `model` matches an exact catalog key or loaded instance ID. Loaded context
@@ -130,7 +133,8 @@ def fetch_provider_metadata(config, *, token=None, model=None, cancel=None, curr
     maximum when more than one instance can serve the requested identifier.
     """
     from forge_provider_probe import validate_api_key, validate_endpoint
-    identifier = validate_preset(config.get('preset_id'), config.get('kind'))
+    from forge_engine_auth import protocol_kind
+    identifier = validate_preset(config.get('preset_id'), protocol_kind(config.get('kind')))
     unknown = {'state': 'unknown', 'source': 'unknown', 'models': []}
     require_current(cancel, current)
     if model is not None and not _identifier(model):
@@ -145,7 +149,7 @@ def fetch_provider_metadata(config, *, token=None, model=None, cancel=None, curr
     metadata_url = urlunsplit((parsed.scheme, parsed.netloc, '/api/v1/models', '', ''))
     token = validate_api_key(token)
     try:
-        value = fetch_json(metadata_url, token=token, cancel=cancel, current=current, client_factory=client_factory)
+        value = fetch_json(metadata_url, token=token, cancel=cancel, current=current, client_factory=client_factory,headers_factory=headers_factory)
         entries = value.get('models')
         if not isinstance(entries, list) or len(entries) > MAX_METADATA_MODELS:
             return unknown
@@ -161,6 +165,8 @@ def fetch_provider_metadata(config, *, token=None, model=None, cancel=None, curr
         return {'state': 'available', 'source': 'advertised', 'models': models}
     except ProviderProbeRevoked:
         raise
-    except Exception:
-        require_current(cancel, current)
+    except Exception as exc:
+        from forge_engine_auth import EngineAccessFailure
+        if isinstance(exc,EngineAccessFailure):raise
+        require_current(cancel,current)
         return unknown

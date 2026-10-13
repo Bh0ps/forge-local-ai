@@ -21,7 +21,7 @@ import httpx
 import psutil
 
 from context_window import validate_context, advertised_context_limit, require_model_context
-from forge_inference import memory_telemetry, OllamaProvider, ENGINE_PROFILES
+from forge_inference import memory_telemetry, OllamaProvider,CompatibleProvider,ENGINE_PROFILES
 from tool_calls import ToolCallAccumulator
 from core import Core, thinking_metadata, thinking_values
 from forge_engine_auth import EngineAccessFailure
@@ -405,7 +405,8 @@ class PerformanceManager:
             if automatic:automatic.changed('active_work')
             cancel=threading.Event(); self.jobs[job['id']]={'cancel':cancel,'operation':operation,'generation':self.selection_generation}
             if operation=='tune':data={**data,'tuning_contract':tuning,'initial_facts':facts,'generation':self.selection_generation}
-            if isinstance(provider,OllamaProvider):settings={**settings,'_admitted_provider':provider}
+            if isinstance(provider,(OllamaProvider,CompatibleProvider)):
+                settings={**settings,'_admitted_provider':provider}
             thread=threading.Thread(target=self._worker,args=(job,settings,data,cancel),daemon=True,name='Forge-performance')
             self.jobs[job['id']]['thread']=thread; thread.start(); return job
     def _probe(self,settings,case,cancel):

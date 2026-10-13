@@ -172,7 +172,7 @@ describe('local engine connection editor', () => {
     fireEvent.change(screen.getByLabelText('Base URL'), { target: { value: 'http://127.0.0.1:8080/v1' } });
     expect(password.value).toBe('');
     await userEvent.type(password, 'another-synthetic-key');
-    await userEvent.selectOptions(screen.getByLabelText('Provider'), 'ollama');
+    await userEvent.selectOptions(screen.getByLabelText('API protocol'), 'ollama');
     expect(password.value).toBe('');
     await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
     expect(call).toHaveBeenCalledWith('provider_test', expect.objectContaining({ id: 'saved-engine', api_key: undefined }));

@@ -475,16 +475,16 @@ class RunManager:
     def _bind_engine_run(self,run):
         identifier=run.get('settings',{}).get('provider_id','ollama')
         known=getattr(self.store,'_has_provider_run_binding',lambda identifier:False)(run['id'])
-        if not identifier or identifier in ('ollama','openrouter'):
+        if not identifier or identifier=='ollama':
             if known:raise EngineRunBindingFailure()
             return None
         if known is None and self.store._provider_run_started(run['id']):raise EngineRunBindingFailure()
-        from forge_inference import OllamaProvider
+        from forge_inference import OllamaProvider,CompatibleProvider
         try:provider=self.service.providers.provider(identifier)
         except Exception:
             if known:raise EngineRunBindingFailure() from None
             raise
-        if not isinstance(provider,OllamaProvider):
+        if not isinstance(provider,(OllamaProvider,CompatibleProvider)):
             if known:raise EngineRunBindingFailure()
             return None
         signature=self.service.providers.run_binding_signature(identifier,provider)

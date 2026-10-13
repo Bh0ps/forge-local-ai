@@ -17,6 +17,8 @@ from forge_provider_state import reasoning_details, state_size, INCOMPLETE_PROVI
 from core import AGENT_SYSTEM_PROMPT, Core
 from context_window import estimated_prompt_tokens, prompt_budget, response_budget, require_model_context, history_character_limit
 from inference_stream import InferenceTimeoutError
+from forge_engine_auth import (BoundSavedProviderAuth,EngineAccessFailure,provider_authority,
+    provider_save_snapshot,discard_uncommitted_provider_credential)
 from storage import _now
 
 
@@ -108,23 +110,19 @@ class OpenRouterProvider(CompatibleProvider):
     remote = True
     remote_inference = True
 
-    def __init__(self, config, vault=None, http_client=None):
+    def __init__(self, config, vault=None, http_client=None,*,authority=None):
         if config.get('url', OPENROUTER_URL).rstrip('/') != OPENROUTER_URL:
             raise OpenRouterFailure('Free-only OpenRouter uses its fixed official HTTPS endpoint.')
-        super().__init__({**config, 'url': OPENROUTER_URL}, vault)
+        super().__init__({**config, 'url': OPENROUTER_URL}, vault,authority=authority)
         self.http_client = http_client
         self.catalog = None
         self.catalog_at = 0
         self.catalog_lock = threading.RLock()
 
-    def _headers(self):
-        try:
-            token = self.vault.get(self.config.get('credential_ref')) if self.vault else None
-        except Exception:
-            raise OpenRouterFailure('OpenRouter key is unavailable in the OS credential store.') from None
-        if not token:
-            raise OpenRouterFailure('OpenRouter needs an API key saved in Forge Settings.')
-        return {'Authorization': 'Bearer ' + token, 'X-OpenRouter-Title': 'Forge Local AI'}
+    def _headers(self,url=None,cancel=None):
+        headers=super()._headers(url,cancel)
+        if 'Authorization' not in headers:raise EngineAccessFailure('authentication',provider_id='openrouter')
+        return {**headers,'X-OpenRouter-Title':'Forge Local AI'}
 
     @staticmethod
     def _http_error(status,*,inference=False):
@@ -145,19 +143,21 @@ class OpenRouterProvider(CompatibleProvider):
         return 'authentication' if status in (401,403) else 'rate_limit' if status==429 else 'free_route' if status in (402,404) else 'invalid_request' if status==400 else 'provider_unavailable'
 
     def _get(self, suffix):
-        headers = self._headers()
+        url=OPENROUTER_URL+suffix
         try:
             if self.http_client:
-                response = self.http_client.get(OPENROUTER_URL + suffix, headers=headers)
+                response = self.http_client.get(url, headers=self._headers(url))
             else:
                 with httpx.Client(timeout=10, follow_redirects=False, trust_env=False) as client:
-                    response = client.get(OPENROUTER_URL + suffix, headers=headers)
+                    response = client.get(url, headers=self._headers(url))
             if not 200 <= response.status_code < 300:
                 raise OpenRouterFailure(self._http_error(response.status_code),category=self._http_category(response.status_code),http_status=response.status_code)
+            if self._authority is not None:self._authority._check(url,None)
             value = response.json()
             if not isinstance(value, dict):
                 raise OpenRouterFailure('OpenRouter returned invalid metadata.')
             return value
+        except EngineAccessFailure:raise
         except httpx.HTTPError:
             raise OpenRouterFailure('OpenRouter connection failed. No automatic retry was made.',category='network') from None
         except (ValueError, TypeError, RecursionError) as exc:
@@ -166,6 +166,7 @@ class OpenRouterProvider(CompatibleProvider):
             raise OpenRouterFailure('OpenRouter returned invalid metadata.',category='metadata') from None
 
     def models(self, refresh=False):
+        if self._authority is not None:self._authority._check(OPENROUTER_URL+'/models',None)
         with self.catalog_lock:
             if refresh or self.catalog is None or time.monotonic() - self.catalog_at > 60:
                 self.catalog = free_catalog(self._get('/models').get('data'))
@@ -256,6 +257,8 @@ class OpenRouterProvider(CompatibleProvider):
             yield from super().generate(data, cancel)
         except ValueError as exc:
             message = str(exc)
+            from forge_cloud_policy import CloudPolicyRejected
+            if isinstance(exc,(EngineAccessFailure,CloudPolicyRejected)):raise
             if isinstance(exc, OpenRouterFailure):
                 raise
             match = re.search(r'HTTP (\d{3})', message)
@@ -304,7 +307,7 @@ class OpenRouterConnection:
         return {**config, 'configured': bool(config.get('credential_ref'))}
 
     def save(self, data):
-        config = self._config() or {}
+        config = self._config() or {};previous=dict(config)
         if 'url' in data and str(data['url']).rstrip('/') != OPENROUTER_URL:
             raise OpenRouterFailure('Free-only OpenRouter uses its fixed official HTTPS endpoint.')
         config = {**config, 'id': 'openrouter', 'name': 'OpenRouter free', 'kind': 'openrouter', 'url': OPENROUTER_URL, 'free_only': True}
@@ -322,27 +325,48 @@ class OpenRouterConnection:
         if key is not None:
             if not isinstance(key, str) or not 16 <= len(key) <= 1024 or any(c.isspace() for c in key):
                 raise OpenRouterFailure('Enter a valid OpenRouter API key in the password field.')
-            config['credential_ref'] = self.vault.put(key)
-            config.pop('account', None)
-            config.pop('models', None)
-            config['connected'] = False
-            config['metadata_auth'] = {'state':'unverified','checked_at':None}
-            config['catalog_verified_at'] = None
-        if config['enabled'] and not config.get('credential_ref'):
+        if config['enabled'] and not config.get('credential_ref') and key is None:
             raise OpenRouterFailure('Save an OpenRouter API key before enabling it.')
         model = data.get('model', config.get('model', FREE_ROUTER))
         if not isinstance(model, str) or not (model == FREE_ROUTER or re.fullmatch(r'[A-Za-z0-9_./-]+:free', model)):
             raise OpenRouterFailure('Choose the free router or an advertised :free model.')
         config['model'] = model
         config.setdefault('context_limit', 32768)
-        saved = self.store.save_entity('providers', config)
+        credential=None;before=None
+        if key is not None:
+            before=provider_save_snapshot(self.store,'openrouter',previous,config)
+            try:credential=config['credential_ref']=self.vault.put(key)
+            except Exception:
+                raise OpenRouterFailure('Credentials could not be saved in the operating system store. Try saving the connection again.',category='authentication') from None
+            config.pop('account', None)
+            config.pop('models', None)
+            config['connected'] = False
+            config['metadata_auth'] = {'state':'unverified','checked_at':None}
+            config['catalog_verified_at'] = None
+        try:saved = self.store.save_entity('providers', config)
+        except Exception as exc:
+            if credential is not None:discard_uncommitted_provider_credential(self.store,self.vault,credential,before)
+            if isinstance(exc,(EngineAccessFailure,OpenRouterFailure)):raise
+            raise OpenRouterFailure('The OpenRouter connection could not be saved. Try saving the connection again.') from None
+        pool=getattr(self.service,'providers',None)
+        if pool:
+            if provider_authority(previous)!=provider_authority(saved):pool.authority_changed('openrouter')
+            else:pool.invalidate('openrouter')
         return self._public(saved)
 
     def test(self):
         config = self._config()
         if not config or not config.get('credential_ref'):
             raise OpenRouterFailure('Save an OpenRouter API key before testing the connection.')
-        provider = OpenRouterProvider(config, self.vault, self.http_client)
+        pool=getattr(self.service,'providers',None)
+        authority=None
+        if pool:
+            snapshot=getattr(self.store,'_provider_authority_snapshot',None)
+            revision=snapshot('openrouter')[1] if snapshot else 0
+            with pool.lock:generation=(pool.authority_epoch,pool.authority_revisions.get('openrouter',0))
+            authority=BoundSavedProviderAuth(self.store,self.vault,'openrouter',config,revision=revision,
+                current_generation=lambda:pool._generation_current('openrouter',generation),stopped=pool.stopped)
+        provider = OpenRouterProvider(config, self.vault, self.http_client,authority=authority)
         stamp=_now()
         authenticated=False
         try:

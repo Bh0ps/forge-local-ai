@@ -1,5 +1,21 @@
 # Forge demo media
 
+The 5.1.6 connection-editor captures use disposable synthetic data. The dark and
+light desktop images show the primary setup controls and compact **Advanced**
+disclosure. Connection testing is simulated; no model inference or external
+requests run. Both PNG files contain no embedded text metadata.
+
+| File | Demonstration |
+| --- | --- |
+| `forge-5.1.6-engine-dark.png` | Connection setup using Forge's existing dark palette. |
+| `forge-5.1.6-engine-light.png` | The same editor in the light workspace. |
+
+Production-frontend captures were visually reviewed. Private keyboard, narrow
+layout, enlarged-text, contrast and reduced-motion checks also passed. Their
+logs, browser profile and application state are not included.
+
+## Previous 5.1.4 captures
+
 The 5.1.4 screenshots use the synthetic **Tide Studio** fixture in a disposable
 workspace. They contain no personal conversations, project folders, account
 details or API keys. The connection test is simulated; no model inference runs.

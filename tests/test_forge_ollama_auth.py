@@ -65,7 +65,7 @@ class MemoryStore:
 
 
 class FakeVault:
-    def __init__(self): self.values = {'reference': KEY}; self.reads = []; self.hook = None
+    def __init__(self): self.values = {'reference': KEY}; self.reads = []; self.deletes = []; self.hook = None
     def get(self, reference):
         self.reads.append(reference)
         if self.hook: self.hook()
@@ -76,6 +76,9 @@ class FakeVault:
         reference = 'replacement-' + str(len(self.values))
         self.values[reference] = value
         return reference
+    def delete(self, reference):
+        self.deletes.append(reference)
+        self.values.pop(reference,None)
 
 
 @pytest.fixture
@@ -188,7 +191,7 @@ def test_missing_vault_refuses_but_same_reference_rotation_is_read_fresh(engine,
     assert [request.headers['authorization'] for request in requests] == ['Bearer ' + KEY, 'Bearer rotated-synthetic-key']
     assert len(engine.vault.reads) == 2
     engine.providers.vault = None
-    engine.providers.invalidate('engine')
+    engine.providers.authority_changed('engine')
     with pytest.raises(EngineAccessFailure): engine.providers.models('engine')
     assert len(requests) == 2
 
@@ -237,8 +240,8 @@ def change(engine, edit):
     elif edit == 'key_aba':
         original = deepcopy(engine.store.profile)
         save(engine, api_key='new-synthetic-key')
-        engine.store.profile = original; engine.providers.invalidate('engine')
-    elif edit == 'invalidated': engine.providers.invalidate('engine')
+        engine.store.profile = original; engine.providers.authority_changed('engine')
+    elif edit == 'invalidated': engine.providers.authority_changed('engine')
     elif edit == 'stopped': engine.stop_event.set()
 
 

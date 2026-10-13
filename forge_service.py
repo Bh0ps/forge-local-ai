@@ -79,6 +79,7 @@ class ForgeService:
         except ImportError:
             self.vault=None; self.integrations=None
         self.providers=ProviderPool(self.core,self.store,self.vault,stopped=lambda:bool(getattr(self,'stop_event',None) and self.stop_event.is_set()))
+        self.providers.service=self
         self.jobs=RunManager(self); self.stop_event=threading.Event(); self.background=None; self.runtime=None
         self.performance_manager=None; self.model_manager=None; self.plan_lock=threading.RLock(); self.manager_lock=threading.RLock()
         self.worktree_lock=threading.RLock()
@@ -353,7 +354,7 @@ class ForgeService:
     def bootstrap(self):
         runs=self.store.runs(limit=200)
         from forge_workspace_ui import WorkspaceUI
-        return dict(version='5.1.5',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
+        return dict(version='5.1.6',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
                     chats=self.store.list_chats(),runs=runs,goals=[self.goal_view(goal,runs) for goal in self.store.active_goals()],
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -516,7 +517,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='5.1.5')
+                    self.update_manager=UpdateManager(self,current_version='5.1.6')
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)
@@ -1331,12 +1332,16 @@ class ForgeService:
         supplied.pop('credential_ref',None)
         data={**previous,**supplied,'url':supplied.get('url') or supplied.get('base_url') or previous.get('url',''),
               'kind':supplied.get('kind') or supplied.get('type') or previous.get('kind','openai-compatible')}
+        from forge_engine_auth import (COMPATIBLE_KINDS,protocol_kind,EngineAccessFailure,
+            provider_save_snapshot,discard_uncommitted_provider_credential)
+        if data['kind'] not in (*COMPATIBLE_KINDS,'ollama','openrouter'):
+            raise ValueError('Choose Ollama or an OpenAI-compatible engine protocol.')
         from forge_provider_probe import validate_api_key,validate_endpoint
         from forge_provider_presets import validate_preset
         url=validate_endpoint(data.get('url','')); data['url']=url
         if 'preset_id' not in supplied and previous and previous.get('kind')!=data['kind']:
             data.pop('preset_id',None)
-        if 'preset_id' in data: data['preset_id']=validate_preset(data['preset_id'],data['kind'])
+        if 'preset_id' in data: data['preset_id']=validate_preset(data['preset_id'],protocol_kind(data['kind']))
         for key in ('token','api_key'):
             if key in data: data[key]=validate_api_key(data[key])
         allowed={'id','name','kind','url','base_url','type','credential_ref','capabilities','context_limit','managed','runtime_id','enabled','updated_at','resource_id','independent_resource','preset_id'}
@@ -1346,16 +1351,25 @@ class ForgeService:
         profile={k:v for k,v in data.items() if k in allowed}
         if previous and (previous.get('kind')!=data['kind'] or previous.get('url','').rstrip('/')!=url.rstrip('/')):
             profile.pop('credential_ref',None)
+        credential=None;before=None
         if data.get('token') or data.get('api_key'):
             if not self.vault: raise ValueError('OS credential storage is unavailable.')
-            try: profile['credential_ref']=self.vault.put(data.get('token') or data['api_key'])
+            before=provider_save_snapshot(self.store,profile.get('id'),previous,profile)
+            try: credential=profile['credential_ref']=self.vault.put(data.get('token') or data['api_key'])
             except Exception:
                 raise ValueError('Credentials could not be saved in the operating system store. Try saving the engine again.') from None
         profile.setdefault('kind','openai-compatible'); profile.setdefault('name','Local endpoint')
         profile['base_url']=profile['url']; profile['type']=profile['kind']
-        ForgeService._performance_changed(self,'provider_changed')
-        saved=self.store.save_entity('providers',profile)
-        self.providers.invalidate(saved['id'])
+        try:
+            ForgeService._performance_changed(self,'provider_changed')
+            saved=self.store.save_entity('providers',profile)
+        except Exception as exc:
+            if credential is not None:discard_uncommitted_provider_credential(self.store,self.vault,credential,before)
+            if isinstance(exc,EngineAccessFailure):raise
+            raise ValueError('The engine connection could not be saved. Try saving the engine again.') from None
+        from forge_engine_auth import provider_authority
+        if saved.get('kind')=='ollama' or provider_authority(previous)!=provider_authority(saved):self.providers.authority_changed(saved['id'])
+        else:self.providers.invalidate(saved['id'])
         if self.performance_manager:
             if hasattr(self.performance_manager,'invalidate'):
                 self.performance_manager.invalidate(saved['id'])

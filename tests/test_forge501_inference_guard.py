@@ -39,16 +39,16 @@ def test_queued_cloud_request_rechecks_before_any_transport(tmp_path, revocation
     finally:svc.shutdown()
 
 
-def test_provider_is_reloaded_after_queue_configuration_changes(tmp_path):
-    svc=setup(tmp_path);calls=[];versions=[];cancel=threading.Event();errors=[]
+def test_queued_provider_cannot_adopt_replacement_credentials(tmp_path,monkeypatch):
+    from forge_engine_auth import EngineAccessFailure
+    from test_forge_openrouter import request
+    from test_forge_ollama_auth import install_http
+    svc=setup(tmp_path);cancel=threading.Event();errors=[]
     run=svc.store.run(svc.jobs.start({'text':'Queued fixture.'})['id'])
-    def provider(identifier):
-        reference=svc.store.entity('providers',identifier)['credential_ref'];versions.append(reference)
-        return SimpleNamespace(remote_inference=True,generate=lambda *args:calls.append(reference) or iter([]),estimate_tokens=lambda *args:0)
-    svc.providers.provider=provider
+    requests,_=install_http(monkeypatch)
     def consume():
-        try:list(svc.providers.generate({'provider_id':'openrouter','model':'openrouter/free','messages':[]},cancel,run))
-        except Exception as exc:errors.append(str(exc))
+        try:list(svc.providers.generate(request(provider_id='openrouter'),cancel,run))
+        except Exception as exc:errors.append(exc)
     try:
         with svc.providers.remote_queue.lease(threading.Event()):
             worker=threading.Thread(target=consume);worker.start()
@@ -58,6 +58,6 @@ def test_provider_is_reloaded_after_queue_configuration_changes(tmp_path):
             cfg=svc.store.entity('providers','openrouter')
             svc.store.save_entity('providers',{**cfg,'credential_ref':'new-synthetic-vault-reference'})
         worker.join(3)
-        assert not worker.is_alive() and not errors and versions==['synthetic-vault-reference','new-synthetic-vault-reference']
-        assert calls==['new-synthetic-vault-reference']
+        assert not worker.is_alive() and len(errors)==1 and isinstance(errors[0],EngineAccessFailure)
+        assert errors[0].category=='configuration' and errors[0].not_executed and requests==[]
     finally:svc.shutdown()

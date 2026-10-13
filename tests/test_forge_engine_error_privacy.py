@@ -6,6 +6,7 @@ import pytest
 
 from core import Core, OllamaRequestFailure
 from forge_inference import OllamaProvider
+from forge_engine_auth import authority_signature
 from test_forge_core import Engine, finished, service
 from test_inference_timeouts import TimedBody, transport
 
@@ -53,7 +54,7 @@ def test_saved_run_failure_identifies_the_configured_engine_profile(tmp_path):
     try:
         config=svc.store.save_entity('providers',{'id':'fixture-engine','kind':'ollama',
             'name':'Fixture engine','url':'http://fixture.invalid/api','enabled':True})
-        svc.providers.instances[config['id']]={'signature':json.dumps(config,sort_keys=True),
+        svc.providers.instances[config['id']]={'signature':authority_signature(config).hex(),
                                               'provider':OllamaProvider(engine)}
         run=svc.jobs.start({'text':'Synthetic request','provider_id':config['id']})
         assert finished(svc,run)['status']=='paused'

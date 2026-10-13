@@ -36,6 +36,10 @@ PROVIDER_BINDING_SCHEMA = ('CREATE TABLE IF NOT EXISTS provider_run_bindings('
     'provider_id TEXT NOT NULL CHECK(length(provider_id) BETWEEN 1 AND 255),'
     'format_version INTEGER NOT NULL CHECK(format_version=1),'
     "signature TEXT NOT NULL CHECK(length(signature)=64 AND signature NOT GLOB '*[^0-9a-f]*'))")
+PROVIDER_AUTHORITY_SCHEMA = ('CREATE TABLE IF NOT EXISTS provider_authority_revisions('
+    'provider_id TEXT PRIMARY KEY CHECK(length(provider_id) BETWEEN 1 AND 255),'
+    'format_version INTEGER NOT NULL CHECK(format_version=1),'
+    "revision INTEGER NOT NULL CHECK(typeof(revision)='integer' AND revision BETWEEN 1 AND 9223372036854775807))")
 
 def encode(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
@@ -170,6 +174,7 @@ class ForgeStore(Store):
                 db.execute('CREATE INDEX IF NOT EXISTS provider_turn_run ON provider_turn_state(run_id,message_id)')
                 db.execute('INSERT INTO forge_migrations VALUES(7,?)',(_now(),))
         self._ensure_provider_bindings(backup=previous==7)
+        self._ensure_provider_authorities(backup=previous==7)
         if not self.entities('agents'):
             for role, instruction in (
                 ('Researcher','Research using primary sources. Cite sources and explain uncertainty. Do not edit the project.'),
@@ -194,6 +199,55 @@ class ForgeStore(Store):
             except (OSError,sqlite3.Error,ValueError):
                 raise ValueError('The workspace backup could not be verified. Private engine binding was not added.') from None
         with self._connection(transaction='write') as db:db.execute(PROVIDER_BINDING_SCHEMA)
+
+    def _ensure_provider_authorities(self, *, backup):
+        with self._connection() as db:
+            present=db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_authority_revisions'").fetchone()
+        if present:return
+        if backup:
+            try:
+                destination=self.home/'backups'/('pre-provider-authority-1-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f'))
+                destination.mkdir()
+                with closing(sqlite3.connect(self.db_path)) as source,closing(sqlite3.connect(destination/'forge.sqlite3')) as target:
+                    source.backup(target)
+                    if target.execute('PRAGMA integrity_check').fetchone()[0]!='ok':raise ValueError()
+            except (OSError,sqlite3.Error,ValueError):
+                raise ValueError('The workspace backup could not be verified. Private provider authority was not added.') from None
+        with self._connection(transaction='write') as db:db.execute(PROVIDER_AUTHORITY_SCHEMA)
+
+    @staticmethod
+    def _provider_authority_revision(db,identifier):
+        from forge_engine_auth import EngineAccessFailure
+        row=db.execute("SELECT sql FROM sqlite_master WHERE name='provider_authority_revisions' AND type='table'").fetchone()
+        normalized=lambda text:' '.join(text.split()).replace(' IF NOT EXISTS','')
+        if not row or normalized(row[0])!=normalized(PROVIDER_AUTHORITY_SCHEMA) or db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='provider_authority_revisions'").fetchone():
+            raise EngineAccessFailure('configuration',provider_id='openai-compatible')
+        row=db.execute('SELECT format_version,revision FROM provider_authority_revisions WHERE provider_id=?',(identifier,)).fetchone()
+        if row and (row['format_version']!=1 or type(row['revision']) is not int or not 1<=row['revision']<=9223372036854775807):
+            raise EngineAccessFailure('configuration',provider_id='openai-compatible')
+        return row['revision'] if row else 0
+
+    def _provider_authority_snapshot(self,identifier):
+        from forge_engine_auth import EngineAccessFailure
+        try:
+            with self._connection(transaction='read') as db:
+                revision=self._provider_authority_revision(db,identifier)
+                row=db.execute("SELECT data FROM entities WHERE kind='providers' AND id=?",(identifier,)).fetchone()
+                if not row:raise ValueError()
+                return json.loads(row[0]),revision
+        except EngineAccessFailure:raise
+        except (sqlite3.Error,ValueError,TypeError):raise EngineAccessFailure('configuration',provider_id='openai-compatible') from None
+
+    @classmethod
+    def _advance_provider_authority(cls,db,identifier,previous,current):
+        from forge_engine_auth import COMPATIBLE_KINDS,EngineAccessFailure,provider_authority
+        if not any(profile and profile.get('kind') in (*COMPATIBLE_KINDS,'openrouter') for profile in (previous,current)):return
+        revision=cls._provider_authority_revision(db,identifier)
+        if previous is not None and current is not None and provider_authority(previous)==provider_authority(current):return
+        if revision==9223372036854775807:raise EngineAccessFailure('configuration',provider_id='openai-compatible')
+        db.execute('INSERT INTO provider_authority_revisions VALUES(?,1,?) ON CONFLICT(provider_id) DO UPDATE SET revision=excluded.revision',
+            (identifier,revision+1))
 
     @staticmethod
     def _provider_binding_table(db):
@@ -476,7 +530,11 @@ class ForgeStore(Store):
         if not isinstance(identifier,str) or len(identifier)>64 or not all(c.isalnum() or c in '-_' for c in identifier): raise ValueError('Invalid entity ID.')
         data.update(id=identifier,updated_at=_now())
         if len(encode(data))>2000000: raise ValueError('Entity is too large.')
-        def write(db): db.execute('INSERT INTO entities VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data',(kind,identifier,encode(data)))
+        def write(db):
+            if kind=='providers':
+                old=db.execute("SELECT data FROM entities WHERE kind='providers' AND id=?",(identifier,)).fetchone()
+                self._advance_provider_authority(db,identifier,json.loads(old[0]) if old else None,data)
+            db.execute('INSERT INTO entities VALUES(?,?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data',(kind,identifier,encode(data)))
         if connection is not None: write(connection)
         else:
             with self._connection(transaction='write') as db: write(db)
@@ -493,7 +551,11 @@ class ForgeStore(Store):
             return {'measured':True,'since_process_start':True,'operations':deepcopy(self._storage_metrics)}
 
     def delete_entity(self,kind,identifier):
-        with self._connection(transaction='write') as db: db.execute('DELETE FROM entities WHERE kind=? AND id=?',(kind,identifier))
+        with self._connection(transaction='write') as db:
+            if kind=='providers':
+                old=db.execute("SELECT data FROM entities WHERE kind='providers' AND id=?",(identifier,)).fetchone()
+                if old:self._advance_provider_authority(db,identifier,json.loads(old[0]),None)
+            db.execute('DELETE FROM entities WHERE kind=? AND id=?',(kind,identifier))
 
     def create_run(self,data):
         stamp=_now(); data={**data,'id':data.get('id') or uuid4().hex,'status':'queued','created_at':stamp,'updated_at':stamp}

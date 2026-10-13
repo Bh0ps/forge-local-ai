@@ -17,13 +17,18 @@ from core import Core, AGENT_SYSTEM_PROMPT, MAX_STREAM_CHARACTERS, _tool_calls, 
 from context_window import estimated_prompt_tokens, prompt_budget
 from inference_stream import cancellable_inference, bounded_lines
 from forge_provider_state import reasoning_details
-from forge_engine_auth import BoundOllamaAuth, EngineAccessFailure, EngineRunBindingFailure, _signature
+from forge_engine_auth import (BoundOllamaAuth,BoundSavedProviderAuth,EngineAccessFailure,
+                               EngineRunBindingFailure,authority_signature)
+from forge_engine_auth import COMPATIBLE_KINDS
 
 
 class ProviderStreamFailure(ValueError):
     def __init__(self,message,*,category='protocol',http_status=None):
         super().__init__(message)
         self.category=category;self.http_status=http_status
+    def diagnostics(self):
+        return {'provider_id':'openai-compatible','category':self.category,
+            **({'http_status':self.http_status} if self.http_status is not None else {})}
 
 
 def validated_response_format(value):
@@ -143,15 +148,32 @@ class OllamaProvider:
         else: yield from self.core.stream_agent(compiled,cancel)
 
 class CompatibleProvider:
-    def __init__(self,config,vault=None):
-        self.config=config; self.base=config['url'].rstrip('/'); self.vault=vault
-    def _headers(self):
-        token=self.vault.get(self.config['credential_ref']) if self.vault and self.config.get('credential_ref') else None
-        return {'Authorization':'Bearer '+token} if token else {}
+    def __init__(self,config,vault=None,*,authority=None):
+        self.config=json.loads(json.dumps(config)); self.base=config['url'].rstrip('/'); self.vault=vault
+        self._authority=authority
+    def _headers(self,url=None,cancel=None):
+        if self._authority is not None:return self._authority.resolve(url,cancel)
+        if cancel is not None and cancel.is_set():raise EngineAccessFailure('cancelled',provider_id=self.config.get('kind'))
+        reference=self.config.get('credential_ref')
+        if not reference:return {}
+        try:
+            token=self.vault.get(reference) if self.vault else None
+            if not isinstance(token,str) or not token or len(token)>8192 or any(ord(char)<32 or ord(char)>126 for char in token):raise ValueError()
+        except Exception:raise EngineAccessFailure('authentication',provider_id=self.config.get('kind')) from None
+        if cancel is not None and cancel.is_set():raise EngineAccessFailure('cancelled',provider_id=self.config.get('kind'))
+        return {'Authorization':'Bearer '+token}
     def models(self):
-        with httpx.Client(timeout=10,trust_env=False,follow_redirects=False) as client:
-            result=client.get(self.base+'/models',headers=self._headers()); result.raise_for_status()
-            return [{'name':m['id'],'model':m['id'],'capabilities':self.config.get('capabilities',[])} for m in result.json().get('data',[])]
+        from forge_provider_metadata import fetch_json
+        try:
+            result=fetch_json(self.base+'/models',headers_factory=self._headers)
+            return [{'name':m['id'],'model':m['id'],'capabilities':self.config.get('capabilities',[])} for m in result.get('data',[])]
+        except EngineAccessFailure:raise
+        except httpx.HTTPError as exc:
+            status=exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
+            raise ProviderStreamFailure('The engine model catalog is unavailable. Check the connection and saved credentials.',
+                category='authentication' if status in (401,403) else 'metadata',http_status=status) from None
+        except (ValueError,TypeError,KeyError):
+            raise ProviderStreamFailure('The engine returned invalid model metadata.',category='metadata') from None
     def capabilities(self,model):
         limit=self.config.get('context_limit')
         configured=type(limit) is int and limit>0
@@ -160,8 +182,7 @@ class CompatibleProvider:
                 'context_limit_source':'configured' if configured else 'unknown'}
         if self.config.get('preset_id')=='lm-studio':
             from forge_provider_metadata import fetch_provider_metadata
-            token=self.vault.get(self.config['credential_ref']) if self.vault and self.config.get('credential_ref') else None
-            facts=fetch_provider_metadata(self.config,token=token,model=model)
+            facts=fetch_provider_metadata(self.config,model=model,headers_factory=self._headers)
             result['metadata_state']=facts['state']
             if facts['state']=='available' and len(facts['models'])==1:
                 fact=facts['models'][0]
@@ -185,6 +206,19 @@ class CompatibleProvider:
     def prepare_body(self,data,body): return body
     def generate(self,data,cancel):
         # Validate the same context and tool contract before adapting protocols.
+        cancel = cancel if cancel is not None else threading.Event()
+        url=self.base+'/chat/completions'
+        guard=data.get('_request_guard')
+        def headers():
+            from forge_cloud_policy import CloudPolicyRejected
+            from forge_openrouter import OpenRouterFailure
+            try:
+                if guard is not None:guard()
+                result=self._headers(url,cancel)
+                if guard is not None:guard()
+                return result
+            except (EngineAccessFailure,CloudPolicyRejected,OpenRouterFailure):raise
+            except Exception:raise EngineAccessFailure('configuration',provider_id=self.config.get('kind')) from None
         payload=Core._agent_payload(data)
         messages=payload['messages']
         pending=[]
@@ -212,7 +246,6 @@ class CompatibleProvider:
             if estimated_prompt_tokens(data['messages'],data.get('tools',[]),AGENT_SYSTEM_PROMPT)+schema_tokens > prompt_budget(data.get('context',8192),payload['options']['num_predict']):
                 raise ValueError('The structured response schema exceeds the selected context budget. Increase Context or reduce the review evidence.')
         body=self.prepare_body(data,body)
-        cancel = cancel if cancel is not None else threading.Event()
         started=time.monotonic()
 
         async def consume(response,publish):
@@ -320,16 +353,19 @@ class CompatibleProvider:
             await publish({**final,'done':True,'message':{},'total_duration':int((time.monotonic()-started)*1e9)})
 
         try:
-            yield from cancellable_inference(self.base+'/chat/completions',body,cancel,consume,
-                                             headers=self._headers(),timeouts=Core._inference_timeouts(connect=10),
-                                             provider='Local provider')
+            yield from cancellable_inference(url,body,cancel,consume,
+                                             headers_factory=headers,timeouts=Core._inference_timeouts(connect=10),
+                                             provider='Local provider',require_success=True)
         except httpx.ConnectError:
             raise ValueError('The local provider is offline. Start its engine, then resume the run.') from None
         except httpx.TimeoutException:
             raise ValueError('The local provider took too long to connect or receive the request. Check engine status, then resume the run.') from None
         except httpx.HTTPError as exc:
             detail=f'HTTP {exc.response.status_code}' if isinstance(exc,httpx.HTTPStatusError) else 'connection interrupted'
-            raise ValueError(f'Local provider {detail}. Partial output is retained; check engine status and resume the run.') from None
+            status=exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
+            raise ProviderStreamFailure(f'Local provider {detail}. Partial output is retained; check engine status and resume the run.',
+                category='authentication' if status in (401,403) else 'rate_limit' if status==429 else 'provider_unavailable',
+                http_status=status) from None
 
 class ProviderPool:
     def __init__(self,core,store,vault=None,*,stopped=None):
@@ -338,6 +374,7 @@ class ProviderPool:
         self.capability_cache={}
         self.model_cache={}
         self.metadata_epoch=0; self.metadata_revisions={}; self.metadata_pending={}
+        self.authority_epoch=0;self.authority_revisions={}
         self.metadata_wait_seconds=15
         self.stopped=stopped or (lambda: False)
 
@@ -427,33 +464,50 @@ class ProviderPool:
             if resource and config.get('independent_resource') is True:
                 with self.lock: return self.resource_queues.setdefault(resource,InferenceQueue())
         return self.queue
+    def authority_changed(self,identifier=None):
+        with self.lock:
+            if identifier:self.authority_revisions[identifier]=self.authority_revisions.get(identifier,0)+1
+            else:self.authority_epoch+=1;self.authority_revisions.clear()
+        self.invalidate(identifier)
+
+    def _saved_config(self,identifier):
+        config=self.store.entity('providers',identifier);revision=0
+        snapshot=getattr(self.store,'_provider_authority_snapshot',None)
+        if config.get('kind') in (*COMPATIBLE_KINDS,'openrouter') and snapshot:config,revision=snapshot(identifier)
+        return config,revision
     def provider(self,identifier):
         if not identifier or identifier=='ollama': return self.ollama
-        config=self.store.entity('providers',identifier)
-        signature=json.dumps(config,sort_keys=True)
+        config,revision=self._saved_config(identifier)
+        signature=authority_signature(config,revision).hex()
         with self.lock:
-            generation=(self.metadata_epoch,self.metadata_revisions.get(identifier,0))
+            generation=(self.authority_epoch,self.authority_revisions.get(identifier,0))
             previous=self.instances.get(identifier,{})
-            if previous.get('signature')!=signature or config.get('kind')=='ollama' and previous.get('binding_generation',generation)!=generation:
+            if previous.get('signature')!=signature or previous.get('binding_generation',generation)!=generation:
                 base=config['url'].rstrip('/')
                 if config.get('kind')=='openrouter':
                     from forge_openrouter import OpenRouterProvider
-                    provider=OpenRouterProvider(config,self.vault)
+                    auth=BoundSavedProviderAuth(self.store,self.vault,identifier,config,revision=revision,
+                        current_generation=lambda:self._generation_current(identifier,generation),stopped=self.stopped)
+                    provider=OpenRouterProvider(config,self.vault,authority=auth)
                 elif config.get('kind')=='ollama':
                     auth=BoundOllamaAuth(self.store,self.vault,identifier,config,
                         current_generation=lambda:self._generation_current(identifier,generation),stopped=self.stopped)
                     provider=OllamaProvider(Core(base=base if base.endswith('/api') else base+'/api',request_headers=auth.resolve))
-                else: provider=CompatibleProvider(config,self.vault)
+                else:
+                    auth=BoundSavedProviderAuth(self.store,self.vault,identifier,config,revision=revision,
+                        current_generation=lambda:self._generation_current(identifier,generation),stopped=self.stopped)
+                    provider=CompatibleProvider(config,self.vault,authority=auth)
                 self.instances[identifier]={'signature':signature,'provider':provider,'binding_generation':generation}
             return self.instances[identifier]['provider']
     def _generation_current(self,identifier,generation):
-        with self.lock:return generation==(self.metadata_epoch,self.metadata_revisions.get(identifier,0))
+        with self.lock:return generation==(self.authority_epoch,self.authority_revisions.get(identifier,0))
     def run_binding_signature(self,identifier,provider):
         try:
             if self.provider(identifier) is not provider:raise EngineRunBindingFailure()
-            with self.lock:generation=(self.metadata_epoch,self.metadata_revisions.get(identifier,0))
-            owner=getattr(getattr(provider.core,'_headers_callback',None),'__self__',None)
-            signature=owner.binding_signature() if isinstance(owner,BoundOllamaAuth) else _signature(self.store.entity('providers',identifier)).hex()
+            with self.lock:generation=(self.authority_epoch,self.authority_revisions.get(identifier,0))
+            owner=getattr(provider,'_authority',None) or getattr(getattr(getattr(provider,'core',None),'_headers_callback',None),'__self__',None)
+            config,revision=self._saved_config(identifier)
+            signature=owner.binding_signature() if isinstance(owner,BoundOllamaAuth) else authority_signature(config,revision).hex()
             if not self._generation_current(identifier,generation) or self.provider(identifier) is not provider:
                 raise EngineRunBindingFailure()
             return signature
@@ -462,6 +516,7 @@ class ProviderPool:
     def configurations(self):
         return [dict(id='ollama',name='Ollama',kind='ollama',url=self.core.base,managed=False)]+self.store.entities('providers')
     def generate(self,data,cancel,run,purpose='main',background=False):
+        from forge_cloud_policy import CloudPolicyRejected
         identifier=uuid4().hex; provider_id=data.get('provider_id','ollama'); admitted=data.get('_admitted_provider')
         try:provider=self.provider(provider_id)
         except Exception:
@@ -475,17 +530,26 @@ class ProviderPool:
                 raise EngineAccessFailure('configuration')
             queue=self.queue_for(provider_id,provider)
             with queue.lease(cancel,background):
-                if provider_id=='openrouter':
-                    # A queued request cannot retain revoked consent or an old
-                    # credential/configuration snapshot while waiting for a lane.
-                    config=self.store.entity('providers',provider_id)
-                    if not (config.get('enabled') is True and config.get('remote_consent') is True and config.get('credential_ref')):
-                        raise ValueError('OpenRouter consent was revoked while queued. No request was sent.')
-                    if self.store.get_settings().get('permission_profile')=='deny_access':
-                        raise ValueError('Current permissions deny cloud inference. No request was sent.')
-                    if run.get('agent_id') and not self.store.entity('agents',run['agent_id']).get('enabled',True):
-                        raise ValueError('This specialist was disabled while queued. No request was sent.')
-                    provider=self.provider(provider_id)
+                if getattr(provider,'remote_inference',False):
+                    def cloud_guard():
+                        from forge_cloud_policy import CloudPolicyRejected,cloud_policy
+                        if cancel.is_set() or self.stopped():raise EngineAccessFailure('cancelled',provider_id='openrouter')
+                        try:config=self.store.entity('providers',provider_id)
+                        except Exception:raise EngineAccessFailure('configuration',provider_id='openrouter') from None
+                        if not (config.get('enabled') is True and config.get('remote_consent') is True and config.get('credential_ref')):
+                            raise EngineAccessFailure('consent',provider_id='openrouter')
+                        if self.store.get_settings().get('permission_profile')=='deny_access':
+                            raise CloudPolicyRejected('Current permissions deny cloud inference. No request was sent.')
+                        if run.get('agent_id') and not self.store.entity('agents',run['agent_id']).get('enabled',True):
+                            raise CloudPolicyRejected('This specialist was disabled before cloud admission. No request was sent.')
+                        if run.get('cloud_scope') and run.get('id') and hasattr(self.store,'run'):
+                            current=self.store.run(run['id'])
+                            if current.get('cloud_scope')!=run['cloud_scope']:
+                                raise CloudPolicyRejected('The cloud assignment scope changed. Start a fresh scoped request; no request was sent.')
+                            service=getattr(self,'service',None)
+                            if service is not None:cloud_policy(service).prepare_round(current,data.get('messages',[]),data.get('tools',[]),cancel)
+                    cloud_guard()
+                    data={**data,'_request_guard':cloud_guard}
                 if cancel.is_set(): raise ValueError('Inference cancelled before sending the request.')
                 start=time.monotonic()
                 for packet in provider.generate(data,cancel):
@@ -515,7 +579,7 @@ class ProviderPool:
                         if packet.get(key):final[key]=packet[key]
                     if packet.get('done'): final={**final,**packet}
                     yield packet
-        except EngineAccessFailure:
+        except (EngineAccessFailure,CloudPolicyRejected):
             final={'prompt_eval_count':0,'eval_count':0}
             raise
         finally:
