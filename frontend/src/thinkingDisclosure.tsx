@@ -8,6 +8,7 @@ export interface ThinkingReadIntent {
   current?: { open: boolean; following: boolean; scrollTop: number; latestAvailable: boolean };
   focusAuthority?: { revision: number };
   restoreFocusRevision?: number;
+  restoreFocusTarget?: 'summary' | 'region';
 }
 
 /** Follow a live thought until the reader chooses an earlier part of it. */
@@ -23,6 +24,7 @@ export function ThinkingDisclosure({ text, streaming, active = streaming, intent
   const userToggle = useRef(false);
   const previous = useRef({ text, streaming });
   const details = useRef<HTMLDetailsElement>(null);
+  const summary = useRef<HTMLElement>(null);
   const scroll = useRef<HTMLDivElement>(null);
   const regionId = useId();
 
@@ -57,10 +59,16 @@ export function ThinkingDisclosure({ text, streaming, active = streaming, intent
 
   useLayoutEffect(() => {
     const revision = intent?.restoreFocusRevision;
-    if (intent) delete intent.restoreFocusRevision;
-    if (revision !== undefined && intent?.focusAuthority?.revision === revision && !document.hidden && document.hasFocus() && document.activeElement === document.body && open) scroll.current?.focus({ preventScroll: true });
+    const target = intent?.restoreFocusTarget;
+    if (intent) { delete intent.restoreFocusRevision; delete intent.restoreFocusTarget; }
+    const element = target === 'summary' ? summary.current : target === 'region' && open ? scroll.current : null;
+    if (revision !== undefined && intent?.focusAuthority?.revision === revision && !document.hidden && document.hasFocus() && document.activeElement === document.body) element?.focus({ preventScroll: true });
     return () => {
-      if (intent?.focusAuthority && scroll.current && !document.hidden && document.hasFocus() && document.activeElement === scroll.current) intent.restoreFocusRevision = intent.focusAuthority.revision;
+      const focused = document.activeElement;
+      const target = summary.current && focused === summary.current ? 'summary' : scroll.current && focused === scroll.current ? 'region' : undefined;
+      if (intent?.focusAuthority && target && !document.hidden && document.hasFocus()) {
+        intent.restoreFocusRevision = intent.focusAuthority.revision; intent.restoreFocusTarget = target;
+      }
     };
   }, []);
 
@@ -107,7 +115,7 @@ export function ThinkingDisclosure({ text, streaming, active = streaming, intent
     }
     remember(expanded, explicit);
   }}>
-    <summary aria-controls={regionId} onClick={activateSummary} onKeyDown={event => {
+    <summary ref={summary} aria-controls={regionId} onClick={activateSummary} onKeyDown={event => {
       if (event.key === 'Enter' || event.key === ' ') activateSummary();
     }}>
       <span className="thinking-indicator" aria-hidden="true">{active ? <Brain size={14} /> : <Check size={14} />}</span>

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "version": "2.2.0",
+  "bundle": "build",
+  "phases": [
+    "discover",
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "dotnet",
+    "build",
+    "test"
+  ],
+  "triggers": [
+    "c#",
+    "csharp",
+    "dotnet",
+    ".net app",
+    ".net application",
+    ".net project",
+    ".net desktop",
+    ".net solution",
+    ".net framework",
+    ".net sdk",
+    "csproj",
+    "slnx",
+    "wpf",
+    "winforms",
+    "windows forms",
+    "visual studio c#"
+  ],
+  "recommended_tools": [
+    "list_files",
+    "read_files",
+    "read_file",
+    "apply_patch",
+    "tools_search",
+    "tools_load",
+    "run_command",
+    "command_start",
+    "command_wait",
+    "command_read",
+    "artifact_read"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

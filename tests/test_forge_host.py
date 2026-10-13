@@ -240,6 +240,31 @@ def test_computer_pre_effect_validation_and_cancellation():
         broker.close()
 
 
+@pytest.mark.parametrize('change', ['title', 'runtime', 'bounds', 'hidden', 'cancel'])
+def test_computer_inspection_refuses_target_changes_during_capture(change):
+    window = FakeElement()
+    cancel = threading.Event()
+    capture = window.capture_as_image
+    def changing_capture():
+        picture = capture()
+        if change == 'title': window.name = 'Another disposable task'
+        elif change == 'runtime': window.element_info.runtime_id = [9, 9]
+        elif change == 'bounds': window.box.left += 25
+        elif change == 'hidden': window.is_visible = lambda: False
+        else: cancel.set()
+        return picture
+    window.capture_as_image = changing_capture
+    broker = broker_for(window)
+    try:
+        result = broker.execute('computer_inspect', {'window_id': 101}, {'run_id': 'capture-run', 'cancel': cancel})
+        assert_not_executed(result, 'cancelled' if change == 'cancel' else 'changed during inspection')
+        assert 'snapshot_id' not in result and 'image' not in result
+        assert not broker._snapshots
+        assert window.clicked == window.focused == 0
+    finally:
+        broker.close()
+
+
 def test_computer_post_effect_failure_is_never_labeled_not_executed():
     class AmbiguousWindow(FakeElement):
         def click_input(self):

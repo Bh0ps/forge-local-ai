@@ -1,5 +1,20 @@
 # Forge demo media
 
+The 5.1.9 captures show Performance settings with consistent supporting text,
+spacing and panel insets. They use a disposable workspace with synthetic data,
+without model inference, external requests or personal content. Both PNG files
+contain no embedded metadata and were visually reviewed.
+
+| File | Demonstration |
+| --- | --- |
+| `forge-5.1.9-performance-dark.png` | Performance supporting text in the dark workspace. |
+| `forge-5.1.9-performance-light.png` | The same controls in a narrow light workspace. |
+
+Private production checks also cover enlarged text, reduced motion, connection
+scope and delayed keyboard focus. Browser profiles and raw logs remain private.
+
+## Previous 5.1.8 captures
+
 The 5.1.8 captures use disposable synthetic conversations and model reasoning.
 They show an earlier reading position retained after completion, with Jump to
 latest still available. The light image uses a narrow layout and enlarged text.

@@ -135,8 +135,23 @@ it('retains the owned keyboard reader across a real asynchronous saved-history g
   expect(document.activeElement).toBe(region(disclosure(2)));
 });
 
-it.each(['current-control','control-then-body','body-key','body-click','body-wheel','navigation-event'] as const)('intervening %s cancels pending reader focus during saved-history loading', async action => {
-  const task = await workspace({holdCompletedHistory:true}); const reading = region(); earlier(reading); reading.focus();
+it.each(['open','closed','unactivated'] as const)('retains the exact %s summary focus through delayed saved history without focusing hidden reasoning', async state => {
+  const task = await workspace({holdCompletedHistory:true}); const live = disclosure();
+  if (state !== 'unactivated') await explicitOpen(live);
+  if (state === 'closed') await userEvent.click(live.querySelector('summary')!);
+  const summary = live.querySelector<HTMLElement>('summary')!; summary.focus();
+  expect(document.activeElement).toBe(summary);
+  const completion = task.complete(); await waitFor(() => expect(document.querySelector('.thinking-disclosure')).toBeNull());
+  expect(document.activeElement).toBe(document.body);
+  await act(async () => task.releaseHistory()); await completion;
+  expect(disclosure(2).open).toBe(state === 'open');
+  expect(document.activeElement).toBe(disclosure(2).querySelector('summary')); expect(document.activeElement).not.toBe(region(disclosure(2)));
+});
+
+const focusControls = ['current-control','control-then-body','body-key','body-click','body-wheel','navigation-event'] as const;
+it.each((['region','summary'] as const).flatMap(target=>focusControls.map(action=>({target,action}))))('intervening $action cancels pending $target focus during saved-history loading', async ({target,action}) => {
+  const task = await workspace({holdCompletedHistory:true}); const reading = region(); earlier(reading);
+  if (target === 'summary') disclosure().querySelector<HTMLElement>('summary')!.focus(); else reading.focus();
   const completion = task.complete(); await waitFor(() => expect(document.querySelector('.thinking-disclosure')).toBeNull());
   const composer = screen.getByRole('textbox',{name:'Message Forge'});
   if (action.includes('control')) { composer.focus(); expect(document.activeElement).toBe(composer); if (action === 'control-then-body') composer.blur(); }
@@ -149,8 +164,9 @@ it.each(['current-control','control-then-body','body-key','body-click','body-whe
   expect(document.activeElement).toBe(action === 'current-control' ? composer : document.body);
 });
 
-it.each(['hidden','inactive'] as const)('does not restore a keyboard reader into an %s app', async state => {
-  const task = await workspace({holdCompletedHistory:true}); const reading = region(); earlier(reading); reading.focus();
+it.each((['region','summary'] as const).flatMap(target=>(['hidden','inactive'] as const).map(state=>({target,state}))))('does not restore the $target into an $state app', async ({target,state}) => {
+  const task = await workspace({holdCompletedHistory:true}); const reading = region(); earlier(reading);
+  if (target === 'summary') disclosure().querySelector<HTMLElement>('summary')!.focus(); else reading.focus();
   const completion = task.complete(); await waitFor(() => expect(document.querySelector('.thinking-disclosure')).toBeNull());
   if (state === 'hidden') vi.spyOn(document,'hidden','get').mockReturnValue(true);
   else vi.spyOn(document,'hasFocus').mockReturnValue(false);
@@ -169,15 +185,17 @@ it('real navigation cancels pending focus and the late saved reply cannot change
   await waitFor(() => expect(disclosure(2)).toBeTruthy()); expect(document.activeElement).not.toBe(region(disclosure(2)));
 });
 
-it.each(['foreign-run','missing-run','missing-anchor','foreign-chat','out-of-order'] as const)('does not transfer an explicit intent through %s saved identity', async kind => {
+const uncertainIdentities = ['foreign-run','missing-run','missing-anchor','foreign-chat','out-of-order'] as const;
+it.each((['region','summary'] as const).flatMap(target=>uncertainIdentities.map(kind=>({target,kind}))))('does not transfer $target intent through $kind saved identity', async ({target,kind}) => {
   const task = await workspace({requestId:kind === 'missing-anchor'?99:1});
   await explicitOpen(); earlier(region());
+  if (target === 'summary') disclosure().querySelector<HTMLElement>('summary')!.focus(); else region().focus();
   const message: Message = {id:2,role:'assistant',content:answer,thinking:thoughts,interaction_run_id:task.run.id};
   if (kind === 'foreign-run') message.interaction_run_id = 'unrelated-run';
   if (kind === 'missing-run') delete message.interaction_run_id;
   if (kind === 'foreign-chat') task.initial.id = 'unrelated-chat';
   const messages: Message[] = kind === 'out-of-order' ? [{id:3,role:'tool',content:'Synthetic tool.'},message] : [message];
-  await task.complete(messages); expect(disclosure(2).open).toBe(false); expect(region(disclosure(2)).scrollTop).toBe(0);
+  await task.complete(messages); expect(disclosure(2).open).toBe(false); expect(region(disclosure(2)).scrollTop).toBe(0); expect(document.activeElement).toBe(document.body);
 });
 
 it('identical assistant turns retain separate intent through live parts and ordered saved promotion', async () => {
@@ -191,6 +209,7 @@ it('identical assistant turns retain separate intent through live parts and orde
   earlier(region(second),620);
   await task.complete([{id:2,role:'assistant',content:answer,thinking:thoughts,interaction_run_id:task.run.id},{id:3,role:'assistant',content:answer,thinking:thoughts,interaction_run_id:task.run.id}]);
   expect(disclosure(2).open).toBe(false); expect(disclosure(3).open).toBe(true); expect(region(disclosure(3)).scrollTop).toBe(620);
+  expect(document.activeElement).toBe(disclosure(2).querySelector('summary'));
 });
 
 it('same-text older history never inherits the current run reader', async () => {

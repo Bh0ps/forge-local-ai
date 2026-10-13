@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "version": "2.2.0",
+  "bundle": "build",
+  "phases": [
+    "discover",
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "cpp",
+    "build",
+    "test"
+  ],
+  "triggers": [
+    "c++",
+    "cplusplus",
+    "cpp",
+    "cmake",
+    "cmake project",
+    "cmake presets",
+    "vcxproj",
+    "msvc",
+    "native windows",
+    "native desktop",
+    "visual studio c++"
+  ],
+  "recommended_tools": [
+    "list_files",
+    "read_files",
+    "read_file",
+    "apply_patch",
+    "tools_search",
+    "tools_load",
+    "run_command",
+    "command_start",
+    "command_wait",
+    "command_read",
+    "artifact_read"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

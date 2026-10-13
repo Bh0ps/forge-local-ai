@@ -121,6 +121,48 @@ def test_research_smoke_retains_native_refusal_and_unknown_outcome_evidence(tmp_
         browser.shutdown()
 
 
+@pytest.mark.parametrize('outcome,category', [
+    ({'ok': False, 'not_executed': True}, 'not-executed'),
+    ({'ok': False, 'outcome_unknown': True}, 'outcome-unknown'),
+    ({'ok': False, 'not_executed': True, 'performed': 'focused_browser'}, 'outcome-unknown'),
+    ({'ok': False, 'error': 'Synthetic private content'}, 'refused'),
+    ({'ok': True, 'outcome_unknown': True}, 'outcome-unknown'),
+    ({'ok': True, 'error': 'Synthetic private content'}, 'outcome-unknown'),
+    ({'ok': 1}, 'outcome-unknown'),
+    ({'snapshot_id': 'synthetic'}, 'outcome-unknown'),
+    (None, 'outcome-unknown'),
+])
+def test_standalone_smoke_checks_one_outcome_without_replaying(outcome, category):
+    calls = []
+    run, cancel, args, result = {'id': 'synthetic'}, threading.Event(), {'id': 'fixture'}, {}
+    manager = SimpleNamespace(execute=lambda *values: calls.append(values) or outcome)
+    with pytest.raises(ValueError, match='Standalone preview tool did not complete successfully') as error:
+        desktop._smoke_preview_tool(manager, run, cancel, result, 'preview_click', args)
+    assert calls == [(run, 'preview_click', args, cancel)]
+    assert result == {'tool_failure': category}
+    assert 'Synthetic private content' not in str(error.value)
+
+
+@pytest.mark.parametrize('failure', [TimeoutError, RuntimeError])
+def test_standalone_smoke_preserves_unknown_dispatch_without_retry(failure):
+    calls = []
+    def execute(*values):
+        calls.append(values)
+        raise failure('Synthetic private failure')
+    result = {}
+    with pytest.raises(failure):
+        desktop._smoke_preview_tool(SimpleNamespace(execute=execute), {}, threading.Event(), result, 'preview_type', {})
+    assert len(calls) == 1 and result == {'tool_failure': 'outcome-unknown'}
+
+
+def test_standalone_smoke_retains_exact_successful_evidence():
+    outcome = {'ok': True, 'snapshot_id': 'synthetic'}
+    calls, result = [], {}
+    manager = SimpleNamespace(execute=lambda *values: calls.append(values) or outcome)
+    assert desktop._smoke_preview_tool(manager, {}, threading.Event(), result, 'preview_inspect', {}) is outcome
+    assert len(calls) == 1 and not result
+
+
 def test_powershell_reads_bounded_reports_and_redacts_before_persistence(tmp_path):
     shell = shutil.which('pwsh') or shutil.which('powershell')
     if os.name != 'nt' or not shell:
@@ -157,6 +199,7 @@ foreach ($case in @(
     @('Integration timed out. Inspect its outcome before retrying a side effect.','integration-timeout','outcome-unknown'),
     @('Native input is paused while Forge confirms a restart.','native-admission','refused'),
     @('Browser panel bounds must be finite numbers.','panel-bounds','not-executed'),
+    @('Standalone preview tool did not complete successfully.','standalone-tool','not-executed'),
     @('Integration failed (AttributeError). Check the endpoint, authentication and server availability.','integration-attribute','outcome-unknown'))) {
     $data=[pscustomobject]@{smoke_phase='research-navigate';error_type='ValueError';error=$case[0];tool_failure=$case[2];research_view_created=$true;private=$secret}
     Write-ForgeSmokeDiagnostics $data 'process-timeout' $null 'ready'

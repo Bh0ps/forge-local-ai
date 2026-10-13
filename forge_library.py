@@ -207,6 +207,9 @@ def starter_metadata(path, root, index=None, digest=None):
 
 def _words(query):
     text = str(query or "").casefold()[:24000]
+    # Keep language tokens distinct without rewriting identifiers or file paths.
+    text = re.sub(r"(?<![\w./\\-])c(\+\+|#)(?![\w/\\+#-]|\.[\w])",
+                  lambda match: "cplusplus" if match[1] == "++" else "csharp", text)
     aliases = {"verifying":"verify", "verified":"verify", "verification":"verify", "validation":"verify",
                "testing":"test", "tests":"test", "implementation":"implement", "implementing":"implement",
                "building":"build", "features":"feature", "improvements":"improve", "optimization":"optimize",
@@ -225,6 +228,8 @@ def task_context(query, context=None):
     groups = {
         "plan": "plan requirements specification planner",
         "build": "add build implement create develop make improve overhaul feature",
+        "dotnet": "csharp dotnet wpf winforms csproj slnx",
+        "cpp": "cplusplus cpp cmake vcxproj msvc",
         "architecture": "architecture framework stack scaffold",
         "debug": "fix debug bug error crash broken failure regression",
         "ui": "frontend react component button website webpage dashboard form layout page mobile responsive dark mode interface",

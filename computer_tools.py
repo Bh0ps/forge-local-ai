@@ -280,7 +280,11 @@ class ComputerBroker:
                 return {'windows': windows}
             if name == 'computer_inspect':
                 window = self._find(args.get('window_id'))
+                identity = self._identity(window)
                 rect = window.rectangle()
+                bounds = (rect.left, rect.top, rect.right, rect.bottom)
+                if not window.is_visible():
+                    self._guard('Target window is unavailable. Inspect Windows apps again.')
                 entries, elements = [], []
                 for element in [window] + window.descendants()[:300]:
                     try:
@@ -301,12 +305,20 @@ class ComputerBroker:
                 picture.thumbnail((1600, 1600))
                 image = io.BytesIO()
                 picture.convert('RGB').save(image, 'JPEG', quality=80)
+                # UIA traversal and image capture are separate OS reads. Bind
+                # them to the same target rather than blessing its new identity
+                # after capture, especially for coordinate-only actions.
+                self._check(context)
+                current_rect = window.rectangle()
+                if (self._identity(window) != identity or not window.is_visible()
+                        or (current_rect.left, current_rect.top, current_rect.right, current_rect.bottom) != bounds):
+                    self._guard('Target window changed during inspection. Inspect it again.')
                 key = secrets.token_urlsafe(18)
                 self._snapshots = {k: v for k, v in self._snapshots.items() if self.clock() - v['time'] < 30}
                 if len(self._snapshots) >= 32:
                     self._snapshots.pop(next(iter(self._snapshots)))
-                self._snapshots[key] = {'run': self._run(context), 'time': self.clock(), 'identity': self._identity(window),
-                                        'rect': (rect.left, rect.top, rect.right, rect.bottom), 'elements': elements,
+                self._snapshots[key] = {'run': self._run(context), 'time': self.clock(), 'identity': identity,
+                                        'rect': bounds, 'elements': elements,
                                         'image_size': picture.size, 'original_size': original_size}
                 return {'snapshot_id': key, 'window_id': window.handle, 'focused': self._active_handle() == window.handle,
                         'elements': entries, 'image': base64.b64encode(image.getvalue()).decode(),

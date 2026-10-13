@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "version": "2.2.0",
+  "bundle": "delivery",
+  "phases": [
+    "discover",
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "delivery",
+    "build",
+    "test"
+  ],
+  "triggers": [
+    "exe",
+    "executable",
+    "pyinstaller",
+    "publish desktop",
+    "desktop installer",
+    "desktop package",
+    "package app",
+    "portable app",
+    "standalone app",
+    "self-contained",
+    "single file app"
+  ],
+  "recommended_tools": [
+    "list_files",
+    "read_files",
+    "read_file",
+    "tools_search",
+    "tools_load",
+    "run_command",
+    "command_start",
+    "command_wait",
+    "command_read",
+    "artifact_read"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

@@ -75,6 +75,7 @@ function Write-ForgeSmokeDiagnostics {
         'Preview profile, bridge isolation or diagnostics failed.' = 'preview-isolation'
         'The standalone preview pane did not open.' = 'standalone-attachment'
         'Standalone preview controls did not update the fixture.' = 'standalone-interaction'
+        'Standalone preview tool did not complete successfully.' = 'standalone-tool'
         'Windows desktop session is unavailable. Unlock Windows before continuing browser work.' = 'desktop-session'
         'Windows WebView2 could not initialize.' = 'webview2-initialization'
         'Windows WebView2 initialization timed out.' = 'webview2-timeout'
@@ -172,8 +173,8 @@ function Write-ForgeSmokeDiagnostics {
             textarea=(Check-Status $SmokeData.ui.textarea ($SmokeData.ui.textarea -eq $true))
             maximized=(Check-Status $SmokeData.launch_maximized ($SmokeData.launch_maximized -eq $true))
             library=(Check-Status $SmokeData.library.rendered ($SmokeData.library.rendered -eq $true))
-            starter_skills=(Check-Status $SmokeData.library.starter_skills ($SmokeData.library.starter_skills -eq 24))
-            discover_cards=(Check-Status $SmokeData.library.discover_cards ($SmokeData.library.discover_cards -ge 24))
+            starter_skills=(Check-Status $SmokeData.library.starter_skills ($SmokeData.library.starter_skills -eq 27))
+            discover_cards=(Check-Status $SmokeData.library.discover_cards ($SmokeData.library.discover_cards -ge 27))
             restored=(Check-Status $SmokeData.full_restores_maximized ($SmokeData.full_restores_maximized -eq $true))
             close_hides=(Check-Status $SmokeData.close_hides ($SmokeData.close_hides -eq $true))
             handoff_floor=(Check-Status $floor (Test-ForgeHandoffFloor $floor))
@@ -245,7 +246,7 @@ if ($partial.state -ne 'ready') { Write-ForgeSmokeDiagnostics $null 'report-inva
 $result = $partial.data
 if ($result.error -or $result.title -ne 'Forge' -or -not $result.close_hides -or -not $result.native_browser.fixture_updated -or $result.native_browser.bridge_exposed -ne 'undefined') { Write-ForgeSmokeDiagnostics $result 'lifecycle-browser' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native lifecycle/browser smoke failed. See the disposable report.' }
 if (-not (Test-ForgeHandoffFloor $result.handoff_seed)) { Write-ForgeSmokeDiagnostics $result 'handoff-floor' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native handoff trust-floor smoke failed. See the disposable report.' }
-if (-not $result.library.rendered -or $result.library.starter_skills -ne 24 -or $result.library.discover_cards -lt 24) { Write-ForgeSmokeDiagnostics $result 'library' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Packaged library smoke failed. See the disposable report.' }
+if (-not $result.library.rendered -or $result.library.starter_skills -ne 27 -or $result.library.discover_cards -lt 27) { Write-ForgeSmokeDiagnostics $result 'library' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Packaged library smoke failed. See the disposable report.' }
 if (-not $result.native_preview.fixture_updated -or -not $result.native_preview.separate_controller -or -not $result.native_preview.separate_profile -or $result.native_preview.bridge_exposed -ne 'undefined' -or -not $result.native_preview.snapshot_guarded -or -not $result.native_preview.viewport_verified -or -not $result.native_preview.diagnostics_captured -or $result.native_preview.screenshot_bytes -le 1000 -or -not $result.native_preview.stopped) { Write-ForgeSmokeDiagnostics $result 'builder-preview' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Isolated native Builder preview smoke failed. See the disposable report.' }
 if (-not $result.native_standalone_preview.pane_visible -or -not $result.native_standalone_preview.fixture_updated -or -not $result.native_standalone_preview.without_builder -or $result.native_standalone_preview.bridge_exposed -ne 'undefined' -or $result.native_standalone_preview.screenshot_bytes -le 1000) { Write-ForgeSmokeDiagnostics $result 'standalone-preview' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native standalone plan preview smoke failed. See the disposable report.' }
 Write-Host 'Native workspace, handoff trust floor, library, HUD, background close, research browser and isolated Builder preview fixtures passed.'

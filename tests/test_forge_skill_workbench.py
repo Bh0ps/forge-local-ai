@@ -20,10 +20,10 @@ def starter(hub, identity):
     return next(item for item in hub.discover_skills() if item.get("library_id") == identity)
 
 
-def test_24_workflows_have_compact_guidance_and_real_resources(skills):
+def test_27_workflows_have_compact_guidance_and_real_resources(skills):
     rows = skills.discover_skills()
-    assert len(rows) == 24 and len({item["bundle"] for item in rows}) == 6
-    assert len({item["description"] for item in rows}) == 24
+    assert len(rows) == 27 and len({item["bundle"] for item in rows}) == 6
+    assert len({item["description"] for item in rows}) == 27
     for row in rows:
         document = skills.read_skill(row["id"])
         assert not document["truncated"] and len(document["text"]) < 6000

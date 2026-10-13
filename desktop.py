@@ -35,6 +35,29 @@ SMOKE_ERROR_TYPES = frozenset({'ValueError', 'RuntimeError', 'TimeoutError', 'St
     'JavascriptException', 'WebViewException', 'ImportError', 'ModuleNotFoundError'})
 
 
+def _smoke_preview_tool(manager, run, cancel, result, name, args):
+    """Check one owned smoke call without repeating a dispatched action."""
+    try:
+        outcome = manager.execute(run, name, args, cancel)
+    except Exception:
+        result['tool_failure'] = 'outcome-unknown'
+        raise
+    if (not isinstance(outcome, dict) or outcome.get('ok') is not True
+            or outcome.get('error') or outcome.get('outcome_unknown') is True
+            or outcome.get('not_executed') is True):
+        category = 'outcome-unknown'
+        if isinstance(outcome, dict):
+            if outcome.get('performed') or outcome.get('outcome_unknown') is True:
+                category = 'outcome-unknown'
+            elif outcome.get('not_executed') is True:
+                category = 'not-executed'
+            elif outcome.get('ok') is False:
+                category = 'refused'
+        result['tool_failure'] = category
+        raise ValueError('Standalone preview tool did not complete successfully.')
+    return outcome
+
+
 class _SmokeCheckpoint:
     """Fixed smoke-only labels; this writer never receives exception text or state."""
     def __init__(self, home, report):
@@ -1177,7 +1200,7 @@ def main():
                     result['smoke_phase'] = 'library'
                     _smoke_checkpoint(result['smoke_phase'])
                     starters = [skill for skill in api.call('skills')['skills'] if skill.get('builtin')]
-                    if len(starters) != 24 or not all(skill['enabled'] and skill['automatic'] for skill in starters):
+                    if len(starters) != 27 or not all(skill['enabled'] and skill['automatic'] for skill in starters):
                         raise ValueError('The packaged starter library was not prepared correctly.')
                     api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='Tools');button?.click();return true;})()")
                     time.sleep(.1)
@@ -1422,24 +1445,24 @@ def main():
                             if not manager.previews.browser.status().get('visible'):
                                 raise ValueError('The standalone preview pane did not open.')
                             manager.execute(standalone_run,'preview_viewport',{'id':standalone['id']},cancel)
-                            inspected=manager.execute(standalone_run,'preview_inspect',{'id':standalone['id']},cancel)
+                            inspected=_smoke_preview_tool(manager,standalone_run,cancel,result,'preview_inspect',{'id':standalone['id']})
                             result['smoke_phase'] = 'standalone-input-target'
                             _smoke_checkpoint(result['smoke_phase'])
                             target=next(t for t in inspected['targets'] if t['tag']=='input')
-                            manager.execute(standalone_run,'preview_type',{'id':standalone['id'],'snapshot_id':inspected['snapshot_id'],
-                                'selector':target['selector'],'text':'Standalone preview works'},cancel)
-                            inspected=manager.execute(standalone_run,'preview_inspect',{'id':standalone['id']},cancel)
+                            _smoke_preview_tool(manager,standalone_run,cancel,result,'preview_type',{'id':standalone['id'],'snapshot_id':inspected['snapshot_id'],
+                                'selector':target['selector'],'text':'Standalone preview works'})
+                            inspected=_smoke_preview_tool(manager,standalone_run,cancel,result,'preview_inspect',{'id':standalone['id']})
                             result['smoke_phase'] = 'standalone-button-target'
                             _smoke_checkpoint(result['smoke_phase'])
                             target=next(t for t in inspected['targets'] if t['tag']=='button')
-                            manager.execute(standalone_run,'preview_click',{'id':standalone['id'],'snapshot_id':inspected['snapshot_id'],
-                                'selector':target['selector']},cancel)
-                            inspected=manager.execute(standalone_run,'preview_inspect',{'id':standalone['id']},cancel)
+                            _smoke_preview_tool(manager,standalone_run,cancel,result,'preview_click',{'id':standalone['id'],'snapshot_id':inspected['snapshot_id'],
+                                'selector':target['selector']})
+                            inspected=_smoke_preview_tool(manager,standalone_run,cancel,result,'preview_inspect',{'id':standalone['id']})
                             if 'Standalone preview works' not in inspected['text']:
                                 raise ValueError('Standalone preview controls did not update the fixture.')
                             result['smoke_phase'] = 'standalone-screenshot'
                             _smoke_checkpoint(result['smoke_phase'])
-                            capture=manager.execute(standalone_run,'preview_screenshot',{'id':standalone['id']},cancel)
+                            capture=_smoke_preview_tool(manager,standalone_run,cancel,result,'preview_screenshot',{'id':standalone['id']})
                             result['native_standalone_preview']={'pane_visible':True,'fixture_updated':True,
                                 'without_builder':standalone.get('builder_id') is None,
                                 'bridge_exposed':manager.previews.browser.view.evaluate('typeof window.pywebview'),

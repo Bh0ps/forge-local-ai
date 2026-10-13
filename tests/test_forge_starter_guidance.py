@@ -37,9 +37,11 @@ def test_every_shipped_recipe_manifest_and_lazy_example_matches_canonical_source
         folder = forge_library.ASSET_ROOT / "skills" / item["id"]
         for relative, expected in generate_starter_skills.rendered_assets(item).items():
             assert (folder / relative).read_bytes() == expected.encode("utf-8"), (item["id"], relative)
-    assert len(WORKFLOWS) == 24
-    assert {item["id"] for item in WORKFLOWS if item.get("examples")} == UPGRADED
-    assert {item["version"] for item in WORKFLOWS if item["id"] in UPGRADED} == {LIBRARY_VERSION}
+    assert len(WORKFLOWS) == 27
+    assert {item["id"] for item in WORKFLOWS if item.get("examples")} == UPGRADED | {
+        "windows-dotnet", "windows-native-cpp", "desktop-executable",
+    }
+    assert {item["version"] for item in WORKFLOWS if item["id"] in UPGRADED} == {"2.1.0"}
     # The previously shipped guided-task recipe is not downgraded by generation.
     assert BY_ID["long-task-checkpoints"]["version"] == "2.0.1"
 
@@ -142,7 +144,7 @@ def test_upgrade_preserves_modified_deleted_resources_preferences_and_identity(t
     assert not deleted_core.exists() and not deleted_resource.exists()
     assert config["skills"][identities["cloud-collaboration"]] == {"enabled": False, "automatic": False}
     assert config["skills"][identities["frontend-implementation"]] == {"enabled": True, "automatic": False}
-    assert json.loads((folders["efficient-tools"] / "forge-skill.json").read_text(encoding="utf-8"))["version"] == LIBRARY_VERSION
+    assert json.loads((folders["efficient-tools"] / "forge-skill.json").read_text(encoding="utf-8"))["version"] == BY_ID["efficient-tools"]["version"]
     assert (folders["frontend-implementation"] / "references" / "examples.md").read_bytes() == (current_assets / "skills" / "frontend-implementation" / "references" / "examples.md").read_bytes()
     assert forge_library.reconcile_starters(root, config) == (False, [])
 
