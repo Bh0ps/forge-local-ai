@@ -40,7 +40,7 @@ export function usePersistentDraft(scope: DraftScope, content: DraftContent, res
   const restoreRef = useRef(restore); restoreRef.current = restore;
   function enqueue(operation: () => Promise<void>) { pending.current++; queue.current = queue.current.catch(() => {}).then(operation).finally(() => { pending.current--; readiness.settled(); }); return queue.current; }
   const reason = () => [...records.current.values()].map(record => record.failure || (!record.ready ? 'draft_restoring' : record.blocked ? 'draft_conflict' : record.unavailable ? 'draft_scope_unavailable' : record.stale ? 'draft_references' : undefined)).find(Boolean) as ReadinessReason | undefined;
-  const readiness = useReadinessParticipant({
+  const readiness = useReadinessParticipant({kind:'draft',
     inspect: () => ({ reasons: reason() ? [reason()!] : [] }),
     retain: () => pending.current > 0 || Boolean(reason()) || [...records.current.entries()].some(([scopeKey,record])=>record.deliveries?.size || latest.current.get(scopeKey)?.fingerprint!==record.saved),
     flushAndConfirm: async ({attemptId, signal}): Promise<SaveConfirmation> => {

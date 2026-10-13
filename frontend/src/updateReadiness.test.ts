@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ReadinessRegistry, type ReadinessParticipant } from './updateReadiness';
+import { ReadinessRegistry, installReadinessFence, updateReadiness, type ReadinessParticipant } from './updateReadiness';
 const deferred=<T>()=>{let resolve!:(value:T)=>void;const promise=new Promise<T>(done=>{resolve=done;});return {promise,resolve};};
 const ready=():ReadinessParticipant=>({inspect:()=>({reasons:[]}),flushAndConfirm:async()=>({ok:true,receipts:[]})});
 describe('content-free restart readiness',()=>{
@@ -38,5 +38,58 @@ describe('content-free restart readiness',()=>{
   });
   it('rejects malformed receipts and owner errors without echoing exceptions',async()=>{
     const registry=new ReadinessRegistry();registry.register({...ready(),flushAndConfirm:async()=>{throw new Error('synthetic-private-secret');}});registry.start('attempt',vi.fn());expect(await registry.confirm('attempt')).toEqual({ok:false,reason:'draft_save_failed'});
+  });
+});
+describe('bounded readiness diagnostics',()=>{
+  it('returns only allowlisted metadata, without private payloads or save callbacks',()=>{
+    const registry=new ReadinessRegistry(),flush=vi.fn(),retain=vi.fn();
+    registry.register({kind:'layout',inspect:()=>({reasons:['preferences_pending','preferences_pending','synthetic-private-reason'],state:'load_failed',pending:3,load_started:true,scope:'synthetic-private-scope',receipt:'synthetic-private-receipt',content:'synthetic-private-content'}) as never,flushAndConfirm:flush,retain});
+    registry.register({kind:'synthetic-private-kind',inspect:()=>({reasons:['synthetic-private-reason'],state:'synthetic-private-state',pending:'synthetic-private-count',load_started:true})} as unknown as ReadinessParticipant);
+    registry.register({kind:'draft',inspect:()=>({reasons:[],state:'ready',load_started:true}),flushAndConfirm:flush});
+    const diagnostic=registry.diagnose();
+    expect(diagnostic).toEqual({participant_count:3,inspected_count:3,truncated:false,participants:[{kind:'layout',reasons:['preferences_pending'],state:'load_failed',pending:3,load_started:true},{kind:'other',reasons:[]},{kind:'draft',reasons:[],state:'ready'}]});
+    expect(JSON.stringify(diagnostic)).not.toContain('synthetic-private');expect(flush).not.toHaveBeenCalled();expect(retain).not.toHaveBeenCalled();
+  });
+  it.each([NaN,Infinity,-1,0.5,Number.MAX_SAFE_INTEGER+1])('omits invalid pending counts %s',pending=>{
+    const registry=new ReadinessRegistry();registry.register({...ready(),inspect:()=>({reasons:[],pending})});expect(registry.diagnose().participants[0]).toEqual({kind:'other',reasons:[]});
+  });
+  it('caps inspected owners, reason input, and counts without calling omitted owners',()=>{
+    const registry=new ReadinessRegistry(),inspect=vi.fn(()=>({reasons:[],pending:Number.MAX_SAFE_INTEGER})),omitted=vi.fn(()=>({reasons:[]}));
+    for(let index=0;index<512;index++)registry.register({...ready(),kind:'requests',inspect});registry.register({...ready(),inspect:omitted});
+    const diagnostic=registry.diagnose();expect(diagnostic.participant_count).toBe(512);expect(diagnostic.inspected_count).toBe(512);expect(diagnostic.truncated).toBe(true);expect(diagnostic.participants).toHaveLength(512);expect(inspect).toHaveBeenCalledTimes(512);expect(omitted).not.toHaveBeenCalled();expect(diagnostic.participants.every(row=>row.pending===512)).toBe(true);
+    const bounded=new ReadinessRegistry();bounded.register({...ready(),inspect:()=>({reasons:[...Array(512).fill('private-invalid'), 'preferences_pending']})});expect(bounded.diagnose().participants[0].reasons).toEqual([]);
+  });
+  it('does not echo inspection or metadata getter exceptions',()=>{
+    const registry=new ReadinessRegistry(),flush=vi.fn();registry.register({kind:'workspace',inspect:()=>{throw Error('synthetic-private-exception');},flushAndConfirm:flush});registry.register({get kind():never{throw Error('synthetic-private-getter');},...ready()});
+    expect(registry.diagnose().participants).toEqual([{kind:'workspace',reasons:[],state:'waiting'},{kind:'other',reasons:[],state:'waiting'}]);expect(flush).not.toHaveBeenCalled();expect(JSON.stringify(registry.diagnose())).not.toContain('synthetic-private');
+  });
+  it('captures changing metadata and reason getters once before validation',()=>{
+    const reads={state:0,pending:0,load:0,reasons:0,reason:0};
+    const reasons=[] as string[];Object.defineProperty(reasons,0,{get:()=>++reads.reason===1?'preferences_pending':'synthetic-private-reason'});
+    const observation={
+      get reasons(){return ++reads.reasons===1?reasons:['synthetic-private-array'];},
+      get state(){return ++reads.state<=2?'ready':'synthetic-private-state';},
+      get pending(){return ++reads.pending===1?3:'synthetic-private-count';},
+      get load_started(){return ++reads.load===1?true:{private:'synthetic-private-load'};},
+    };
+    const registry=new ReadinessRegistry();registry.register({...ready(),kind:'layout',inspect:()=>observation as never});const diagnostic=registry.diagnose();
+    expect(diagnostic.participants).toEqual([{kind:'layout',reasons:['preferences_pending'],state:'ready',pending:3,load_started:true}]);expect(reads).toEqual({state:1,pending:1,load:1,reasons:1,reason:1});expect(JSON.stringify(diagnostic)).not.toContain('synthetic-private');
+  });
+  it('does not call overridden reason array methods or iterators',()=>{
+    const reasons=['preferences_pending','synthetic-private-reason','preferences_pending'];
+    const overridden=vi.fn(()=>['synthetic-private-method']);Object.defineProperties(reasons,{slice:{value:overridden},filter:{value:overridden},[Symbol.iterator]:{value:overridden}});
+    const registry=new ReadinessRegistry();registry.register({...ready(),inspect:()=>({reasons}) as never});const diagnostic=registry.diagnose();expect(diagnostic.participants).toEqual([{kind:'other',reasons:['preferences_pending']}]);expect(overridden).not.toHaveBeenCalled();expect(JSON.stringify(diagnostic)).not.toContain('synthetic-private');
+  });
+  it('cannot change a checking or prepared authority, membership, or revision',async()=>{
+    const registry=new ReadinessRegistry(),inspect=vi.fn(()=>({reasons:[] as const,state:'ready' as const})),flush=vi.fn(async()=>({ok:true as const,receipts:[]}));registry.register({kind:'draft',inspect,flushAndConfirm:flush});
+    const invalidated=vi.fn(),changed=vi.fn();registry.subscribe(changed);registry.start('synthetic-private-attempt',invalidated);const checking=registry.getSnapshot();changed.mockClear();
+    const diagnostic=registry.diagnose();expect(registry.getSnapshot()).toBe(checking);expect(changed).not.toHaveBeenCalled();expect(invalidated).not.toHaveBeenCalled();expect(flush).not.toHaveBeenCalled();expect(registry.participantCount()).toBe(1);expect(registry.canEdit()).toBe(false);expect(JSON.stringify(diagnostic)).not.toContain('synthetic-private-attempt');
+    const confirmed=await registry.confirm('synthetic-private-attempt');registry.prepared('synthetic-private-attempt',confirmed.revision!);const prepared=registry.getSnapshot();changed.mockClear();registry.diagnose();expect(registry.getSnapshot()).toBe(prepared);expect(changed).not.toHaveBeenCalled();expect(registry.fence('synthetic-private-attempt',confirmed.revision!,1)).toBe(true);expect(flush).toHaveBeenCalledOnce();
+  });
+  it('exposes diagnosis separately while preserving the exact native fence key set',()=>{
+    const stop=installReadinessFence();try{
+      const before=updateReadiness.getSnapshot(),check=window.__forgeUpdateReadiness!.check({attempt_id:'synthetic-private-attempt',workspace_revision:0,participant_count:0});
+      expect(Object.keys(check).sort()).toEqual(['ok','participant_count','phase','workspace_revision']);const diagnostic=window.__forgeUpdateReadiness!.diagnose();expect(Object.keys(diagnostic).sort()).toEqual(['inspected_count','participant_count','participants','truncated']);expect(updateReadiness.getSnapshot()).toBe(before);expect(window.__forgeUpdateReadiness!.check({attempt_id:'synthetic-private-attempt',workspace_revision:0,participant_count:0})).toEqual(check);
+    }finally{stop();}expect(window.__forgeUpdateReadiness).toBeUndefined();
   });
 });

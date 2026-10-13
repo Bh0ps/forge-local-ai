@@ -2,14 +2,23 @@ import { useEffect, useLayoutEffect, useRef, useSyncExternalStore } from 'react'
 
 export type ReadinessReason = 'workspace_loading' | 'draft_restoring' | 'draft_conflict' | 'draft_save_failed' | 'draft_references' | 'draft_scope_unavailable' | 'unsent_images' | 'attachment_pending' | 'dictation_pending' | 'submission_pending' | 'submission_unknown' | 'active_work' | 'approval_pending' | 'question_pending' | 'recovery_pending' | 'dialog_open' | 'connection_pending' | 'unsaved_setup' | 'builder_scratch' | 'preferences_pending' | 'native_input' | 'workspace_changed' | 'confirmation_expired' | 'helper_failed' | 'preparation_failed' | 'protocol_error' | 'handoff_unavailable' | 'paired_editor';
 export type ReadinessPhase = 'idle' | 'checking' | 'locked' | 'prepared' | 'aborting' | 'failed';
-export interface ReadinessObservation { reasons: readonly ReadinessReason[]; pending?: number; }
+export type ReadinessKind = 'requests' | 'workspace' | 'layout' | 'draft' | 'other';
+export type ReadinessState = 'disabled' | 'uninitialized' | 'loading' | 'load_failed' | 'save_failed' | 'retrying' | 'ready' | 'waiting';
+export interface ReadinessObservation { reasons: readonly ReadinessReason[]; pending?: number; state?:ReadinessState; load_started?:boolean; }
 export type SaveConfirmation = { ok: true; receipts: string[] } | { ok: false; reason: ReadinessReason };
 export interface ReadinessParticipant {
+  kind?:ReadinessKind;
   inspect(): ReadinessObservation;
   flushAndConfirm(context: { attemptId: string; signal: AbortSignal }): Promise<SaveConfirmation>;
   retain?(): boolean;
 }
 export interface ReadinessSnapshot { phase: ReadinessPhase; revision: number; reason?: ReadinessReason; }
+export interface ReadinessDiagnostic {
+  participant_count:number;
+  inspected_count:number;
+  truncated:boolean;
+  participants:({kind:ReadinessKind;reasons:ReadinessReason[];state?:ReadinessState;pending?:number;load_started?:boolean})[];
+}
 export const readinessMessages: Record<ReadinessReason, string> = {
   workspace_loading: 'Wait for your workspace and saved drafts to load.', draft_restoring: 'Wait for your saved drafts to load.',
   draft_conflict: 'A draft changed in another window. Reconcile it before restarting.',
@@ -30,6 +39,11 @@ export const readinessMessages: Record<ReadinessReason, string> = {
   handoff_unavailable:'In-app restart is unavailable. Save your work before installing manually.',
   paired_editor:'Save your work in paired browsers, then disconnect them before restarting.',
 };
+const diagnosticLimit=512;
+const diagnosticKinds=new Set<string>(['requests','workspace','layout','draft','other']);
+const diagnosticStates=new Set<string>(['disabled','uninitialized','loading','load_failed','save_failed','retrying','ready','waiting']);
+const diagnosticReasons=new Set<string>(Object.keys(readinessMessages));
+const diagnosticReason=(value:unknown):value is ReadinessReason=>typeof value==='string' && diagnosticReasons.has(value);
 
 /** This registry holds callbacks and counters only. Owners retain all private work. */
 export class ReadinessRegistry {
@@ -42,6 +56,37 @@ export class ReadinessRegistry {
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   getSnapshot = () => this.snapshot;
   participantCount() { return this.owners.size; }
+  /** Observation only: no save, confirmation, authority or private callback data. */
+  diagnose():ReadinessDiagnostic {
+    const participants:ReadinessDiagnostic['participants']=[];
+    for(const {participant} of this.owners.values()){
+      if(participants.length===diagnosticLimit)break;
+      const row:ReadinessDiagnostic['participants'][number]={kind:'other',reasons:[]};
+      try {
+        const kind=participant.kind;
+        if(typeof kind==='string' && diagnosticKinds.has(kind))row.kind=kind;
+        const observation=participant.inspect();
+        if(!observation || typeof observation!=='object')throw new Error('Invalid readiness observation');
+        const reasons=observation.reasons,state=observation.state,pending=observation.pending;
+        const loadStarted=row.kind==='layout'?observation.load_started:undefined;
+        if(Array.isArray(reasons)){
+          const length=reasons.length,seen=new Set<ReadinessReason>();
+          const count=typeof length==='number' && Number.isSafeInteger(length) && length>=0?Math.min(length,diagnosticLimit):0;
+          for(let index=0;index<count;index++){
+            const reason=reasons[index];
+            if(diagnosticReason(reason) && !seen.has(reason)){
+              seen.add(reason);row.reasons.push(reason);
+            }
+          }
+        }
+        if(typeof state==='string' && diagnosticStates.has(state))row.state=state;
+        if(typeof pending==='number' && Number.isSafeInteger(pending) && pending>=0)row.pending=Math.min(pending,diagnosticLimit);
+        if(typeof loadStarted==='boolean')row.load_started=loadStarted;
+      } catch { row.state='waiting'; }
+      participants.push(row);
+    }
+    return {participant_count:Math.min(this.owners.size,diagnosticLimit),inspected_count:participants.length,truncated:this.owners.size>diagnosticLimit,participants};
+  }
   fence(attemptId:string,revision:number,count:number) { return this.unchanged(attemptId,revision) && this.owners.size===count && ![...this.owners.values()].some(owner=>owner.participant.inspect().reasons.length); }
   private publish(patch: Partial<ReadinessSnapshot>) { this.snapshot = { ...this.snapshot, ...patch }; this.listeners.forEach(listener => listener()); }
   register(participant: ReadinessParticipant) {
@@ -118,9 +163,9 @@ export class ReadinessRegistry {
   }
 }
 export const updateReadiness = new ReadinessRegistry();
-declare global { interface Window { __forgeUpdateReadiness?: { check(input:{attempt_id:string;workspace_revision:number;participant_count:number}):{ok:boolean;workspace_revision:number;participant_count:number;phase:ReadinessPhase} }; } }
+declare global { interface Window { __forgeUpdateReadiness?: { check(input:{attempt_id:string;workspace_revision:number;participant_count:number}):{ok:boolean;workspace_revision:number;participant_count:number;phase:ReadinessPhase};diagnose():ReadinessDiagnostic }; } }
 export function installReadinessFence() {
-  const fence={check:(input:{attempt_id:string;workspace_revision:number;participant_count:number})=>({ok:Boolean(input && updateReadiness.fence(input.attempt_id,input.workspace_revision,input.participant_count)),workspace_revision:updateReadiness.getSnapshot().revision,participant_count:updateReadiness.participantCount(),phase:updateReadiness.getSnapshot().phase})};
+  const fence={check:(input:{attempt_id:string;workspace_revision:number;participant_count:number})=>({ok:Boolean(input && updateReadiness.fence(input.attempt_id,input.workspace_revision,input.participant_count)),workspace_revision:updateReadiness.getSnapshot().revision,participant_count:updateReadiness.participantCount(),phase:updateReadiness.getSnapshot().phase}),diagnose:()=>updateReadiness.diagnose()};
   window.__forgeUpdateReadiness=fence;return ()=>{if(window.__forgeUpdateReadiness===fence)delete window.__forgeUpdateReadiness;};
 }
 export const useUpdateReadiness = () => useSyncExternalStore(updateReadiness.subscribe, updateReadiness.getSnapshot);
@@ -128,7 +173,7 @@ export interface RetainedRegistration { latest:{current:ReadinessParticipant};ha
 export function useReadinessParticipant(participant: ReadinessParticipant, retained?:RetainedRegistration) {
   const localLatest = useRef(participant),localHandle = useRef<ReturnType<ReadinessRegistry['register']> | null>(null);
   const latest=retained?.latest || localLatest,handle=retained?.handle || localHandle;latest.current=participant;
-  useLayoutEffect(() => {if(!handle.current?.attach())handle.current = updateReadiness.register({ inspect: () => latest.current.inspect(), flushAndConfirm: context => latest.current.flushAndConfirm(context), retain: () => latest.current.retain?.() || false });const captured=handle.current;return () => { captured.detach(); }; }, []);
+  useLayoutEffect(() => {if(!handle.current?.attach())handle.current = updateReadiness.register({ get kind(){return latest.current.kind;}, inspect: () => latest.current.inspect(), flushAndConfirm: context => latest.current.flushAndConfirm(context), retain: () => latest.current.retain?.() || false });const captured=handle.current;return () => { captured.detach(); }; }, []);
   return { changed: () => handle.current?.changed(), settled: () => handle.current?.settled() };
 }
 export function useDialogReadiness() {

@@ -32,7 +32,7 @@ export function useWorkspaceLayout(enabled:boolean,notify:(message:string)=>void
   const [layout,setLayout]=useState<WorkspaceLayout>(DEFAULT_LAYOUT), [ready,setReady]=useState(false), [transportRevision,setTransportRevision]=useState(0);
   const [error,setError]=useState<'load'|'save'|null>(null), [retrying,setRetrying]=useState(false);
   const touched=useRef(false), latest=useRef(layout), lastSaved=useRef(''), client=useRef(''), queue=useRef(Promise.resolve()), mounted=useRef(true);
-  const scopeGeneration=useRef(0), loadRequest=useRef(0), enabledRef=useRef(enabled), readyRef=useRef(false);
+  const scopeGeneration=useRef(0), loadRequest=useRef(0), enabledRef=useRef(enabled), readyRef=useRef(false), loadStarted=useRef(false);
   const errorRef=useRef<'load'|'save'|null>(null), retryingRef=useRef(false);
   enabledRef.current=enabled;
   latest.current=layout;
@@ -79,6 +79,7 @@ export function useWorkspaceLayout(enabled:boolean,notify:(message:string)=>void
     const request=++loadRequest.current;
     const owns=()=>mounted.current && current(identity,generation) && request===loadRequest.current;
     try {
+      loadStarted.current=true;
       const response=await api<unknown>('ui_layout_get',{client_id:identity});
       if(!owns())return false;
       const next=acknowledgedLayout(response);
@@ -117,7 +118,11 @@ export function useWorkspaceLayout(enabled:boolean,notify:(message:string)=>void
     }
   };
   useReadinessParticipant({
-    inspect:()=>({reasons:enabled && (!readyRef.current || errorRef.current || retryingRef.current)?['preferences_pending']:[]}),
+    kind:'layout',
+    inspect:()=>({reasons:enabled && (!readyRef.current || errorRef.current || retryingRef.current)?['preferences_pending']:[],
+      state:!enabled?'disabled':retryingRef.current?'retrying':errorRef.current==='load'?'load_failed':errorRef.current==='save'?'save_failed':!client.current?'uninitialized':!readyRef.current?'loading':'ready',
+      load_started:loadStarted.current,
+    }),
     flushAndConfirm:async()=>{
       const identity=client.current,generation=scopeGeneration.current;
       if(!readyRef.current || errorRef.current || retryingRef.current)return {ok:false,reason:'preferences_pending'};
@@ -141,7 +146,7 @@ export function useWorkspaceLayout(enabled:boolean,notify:(message:string)=>void
       // They must not hold writes to the new client's separate coordinator row.
       queue.current=Promise.resolve();
     }
-    client.current=identity;loaded(false);lastSaved.current='';failure(null);retryingRef.current=false;setRetrying(false);
+    client.current=identity;loaded(false);loadStarted.current=false;lastSaved.current='';failure(null);retryingRef.current=false;setRetrying(false);
     void load(identity,generation);
     return()=>{loadRequest.current++;};
   },[enabled,transportRevision]);
