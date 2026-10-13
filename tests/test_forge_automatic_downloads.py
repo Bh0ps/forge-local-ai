@@ -3,7 +3,7 @@ from copy import deepcopy
 import json
 import threading
 import time
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import httpx
 import pytest
@@ -23,6 +23,10 @@ def auto(fixture):
     value = fixture
     value.manager.service.admission_lock = threading.RLock()
     value.manager.service.update_manager = value.manager
+    # These launch fixtures use the anonymous built-in engine. Exercise its
+    # actual admission path while keeping the download-only worker isolated.
+    value.manager.service.jobs.store = value.manager.store
+    value.manager.service.jobs._bind_engine_run = MethodType(RunManager._bind_engine_run, value.manager.service.jobs)
     value.manager.store.update_settings({'update_auto_download': True})
     value.monitor = UpdateMonitor(value.manager)
     return value
