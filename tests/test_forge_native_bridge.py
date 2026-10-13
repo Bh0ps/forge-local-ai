@@ -196,11 +196,40 @@ def test_native_rollback_offer_uses_completed_operation_not_update_feed_state(br
     instance, _, _ = bridge
     status = {'safe_handoff_available': True, 'inspection_required': False,
         'state': 'available', 'operation_id': 'a' * 32}
-    manager = SimpleNamespace(home='synthetic-private-home', current_version='5.1.4', native_status=lambda value: dict(status))
+    home = Path(__file__).resolve().parent / 'synthetic-private-home'
+    app = home.parent / 'synthetic-private-app'
+    manager = SimpleNamespace(home=home, install_dir=app, proof_keys={},
+        current_version='5.1.4', native_status=lambda value: dict(status))
     monkeypatch.setattr('forge_updates.load_operation', lambda *args:
-        {'state': state, 'trust_mode': mode, 'version': version})
+        {'id': 'a' * 32, 'state': state, 'trust_mode': mode, 'version': version,
+         'previous_version': '5.1.3', 'install_dir': str(app), 'backup': str(home / 'backups' / ('update-' + 'a' * 32))})
+    monkeypatch.setattr('forge_update_proof.read_record', lambda path: b'synthetic signed record')
+    validated = []
+    monkeypatch.setattr('forge_update_proof.validated_build_manifest', lambda *args,**kwargs: validated.append(kwargs))
     result = instance._native_update_status(SimpleNamespace(manager=manager), object())
     assert result['safe_rollback_available'] is wanted
+    assert len(validated) == (2 if wanted else 0)
     assert 'synthetic-private-home' not in str(result)
     status['inspection_required'] = True
+    assert instance._native_update_status(SimpleNamespace(manager=manager), object())['safe_rollback_available'] is False
+
+
+@pytest.mark.parametrize('failure', ['wrong-installation', 'foreign-backup', 'current-proof', 'previous-proof'])
+def test_rollback_offer_refuses_mismatched_installation_or_unverified_build_headers(bridge, monkeypatch, failure):
+    instance, _, _ = bridge
+    home = Path(__file__).resolve().parent / 'synthetic-private-home'
+    app = home.parent / 'synthetic-private-app'
+    data = {'id': 'a' * 32, 'state': 'installed', 'trust_mode': 'ed25519', 'version': '5.1.4', 'previous_version': '5.1.3',
+        'install_dir': str(app), 'backup': str(home / 'backups' / ('update-' + 'a' * 32)),
+        'source_commit': 'b' * 40, 'previous_source_commit': 'c' * 40}
+    if failure == 'wrong-installation': data['install_dir'] = str(app.parent / 'other-app')
+    if failure == 'foreign-backup': data['backup'] = str(app.parent / 'other-backup')
+    manager = SimpleNamespace(home=home, install_dir=app, proof_keys={}, current_version='5.1.4',
+        native_status=lambda value: {'safe_handoff_available': True, 'operation_id': 'a' * 32})
+    monkeypatch.setattr('forge_updates.load_operation', lambda *args: data)
+    monkeypatch.setattr('forge_update_proof.read_record', lambda path: b'synthetic record')
+    def validate(raw, pins, **kwargs):
+        if failure == 'current-proof' and kwargs['expected_version'] == '5.1.4': raise ValueError('Synthetic refusal')
+        if failure == 'previous-proof' and kwargs['expected_version'] == '5.1.3': raise ValueError('Synthetic refusal')
+    monkeypatch.setattr('forge_update_proof.validated_build_manifest', validate)
     assert instance._native_update_status(SimpleNamespace(manager=manager), object())['safe_rollback_available'] is False

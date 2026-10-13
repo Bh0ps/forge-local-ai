@@ -266,12 +266,26 @@ class Bridge:
         if (result.get('safe_handoff_available') is True and not self._closing
                 and result.get('inspection_required') is not True):
             try:
-                from forge_updates import load_operation
+                from forge_updates import load_operation, plain_path
+                from forge_update_proof import BUILD_NAME, read_record, validated_build_manifest
                 data = load_operation(controller.manager.home, result.get('operation_id'))
                 available = (data['state'] == 'installed' and data.get('trust_mode', 'authenticode') in ('ed25519', 'authenticode')
                     and data['version'] == controller.manager.current_version)
+                if available:
+                    current = plain_path(controller.manager.install_dir)
+                    previous = plain_path(data['backup']) / 'installation'
+                    if (plain_path(data['install_dir']) != current or plain_path(data['backup']) !=
+                            plain_path(controller.manager.home / 'backups' / ('update-' + data['id']))):
+                        available = False
+                    else:
+                        # Authenticate the bounded records for this offer;
+                        # actual tree bytes are checked again before execution.
+                        validated_build_manifest(read_record(current / BUILD_NAME), controller.manager.proof_keys,
+                            expected_version=data['version'], expected_source=data.get('source_commit'))
+                        validated_build_manifest(read_record(previous / BUILD_NAME), controller.manager.proof_keys,
+                            expected_version=data['previous_version'], expected_source=data.get('previous_source_commit'))
             except Exception:
-                pass
+                available = False
         # An offer is not authority. Native reservation/prepare verifies the
         # retained/current publisher proofs and exact operation before action.
         return {**result, 'safe_rollback_available': available}
