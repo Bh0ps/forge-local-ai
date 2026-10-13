@@ -77,6 +77,11 @@ services. Each cleanup step is attempted independently, and a failed step is
 reported without skipping the remaining window cleanup. Native update failures
 remain visible as update status instead of becoming failed status requests.
 
+Research browser and Builder preview controls allow the native UI to respond
+while operations wait. Work that continues after a timeout keeps restart
+preparation blocked until the worker finishes. Removing a project first revokes
+its registration, then closes its native previews; its folder stays intact.
+
 ## Downloads, trust and recovery
 
 GitHub detection, channel selection and publisher-authenticated downloads retain

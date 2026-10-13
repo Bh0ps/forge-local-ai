@@ -30,11 +30,33 @@ class NativeBrowser:
         self.view = None
         self.lock = threading.RLock()
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix='forge-native-browser')
+        self._pending_io = 0
         self.cancelled = threading.Event()
         self.snapshot = None
         self.generation = 0
         self.closed = False
         self.state = dict(running=False, loading=False, url='about:blank', title='', error=None)
+
+    def pending_io(self):
+        with self.lock:
+            return self._pending_io
+
+    def _submit(self, operation, *args):
+        # A caller timeout does not finish its queued/running Future. Keep the
+        # owned work visible to restart admission until actual completion.
+        with self.lock:
+            self._pending_io += 1
+        try:
+            future = self.pool.submit(operation, *args)
+        except BaseException:
+            with self.lock:
+                self._pending_io -= 1
+            raise
+        def completed(_):
+            with self.lock:
+                self._pending_io -= 1
+        future.add_done_callback(completed)
+        return future
 
     @staticmethod
     def _run(context):
@@ -105,7 +127,7 @@ class NativeBrowser:
             return self.status()
         if action not in ('open', 'show', 'resize', 'hide', 'navigate', 'back', 'forward', 'reload', 'close'):
             raise ValueError('Unknown native browser control.')
-        return self.pool.submit(self._manual, action, data).result(timeout=45)
+        return self._submit(self._manual, action, data).result(timeout=45)
 
     def _manual(self, action, data):
         if action in ('close', 'hide'):
@@ -144,7 +166,7 @@ class NativeBrowser:
 
     def execute(self, name, args, context=None):
         try:
-            return self.pool.submit(self._perform, name, dict(args), context).result(timeout=45)
+            return self._submit(self._perform, name, dict(args), context).result(timeout=45)
         except BrowserGuard as exc:
             return {'ok': False, 'error': str(exc), 'not_executed': True}
 
@@ -316,7 +338,7 @@ class NativeBrowser:
                 self.generation += 1
                 self.snapshot = None
             return {'ok': True, **result}
-        return self.pool.submit(update).result(timeout=20)
+        return self._submit(update).result(timeout=20)
 
     def diagnostics(self):
         def inspect():
@@ -327,7 +349,7 @@ class NativeBrowser:
             if self.navigation_guard and not self.navigation_guard(result.get('url', '')):
                 raise BrowserGuard('Preview diagnostics changed origin.')
             return {'ok': True, **result}
-        return self.pool.submit(inspect).result(timeout=20)
+        return self._submit(inspect).result(timeout=20)
 
     def stop(self):
         self.cancelled.set()

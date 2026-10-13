@@ -826,6 +826,7 @@ class BuilderManager:
             if item['record']['project_id'] == project_id:
                 self.previews.stop(identifier)
         for builder in self.store.entities('builders'):
-            if builder['project_id'] == project_id:
+            if builder.get('project_id') == project_id or (builder.get('project_id') is None and
+                    builder.get('detached_project_id') == project_id):
                 self.store.save_entity('builders', {**builder, 'status': 'project_missing', 'project_missing': True})
         return {'ok': True}
