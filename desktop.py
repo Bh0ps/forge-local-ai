@@ -347,6 +347,33 @@ class Bridge:
             self._update_controller.invalidate()
         return self._lifecycle.emergency_stop()
 
+    def _checking_persistence(self, service, binding):
+        """Only the current native checking lease may flush retained UI work.
+
+        Call under the service admission gate. The native document lookup is
+        completed beforehand; these private identity checks do not wait on UI.
+        Service dispatch still owns the draft CAS and the preparation fence.
+        """
+        import forge_native_handoff
+        from forge_native_controller import NativeController
+        controller = self._update_controller
+        if (not forge_native_handoff.HANDOFF_ENABLED or binding is None
+                or type(controller) is not NativeController
+                or controller.authority is not self._update_authority
+                or controller.manager is not getattr(service, 'update_manager', None)
+                or not self._update_authority.binding_valid(binding)):
+            return False
+        reservation = controller.reservation
+        if (reservation is None or reservation.binding != binding
+                or not self._update_authority.receipt_attempt(controller.attempt, reservation)):
+            return False
+        coordinator = controller.manager.native_handoff
+        try:
+            with coordinator.lock:
+                return coordinator._current(reservation).phase == 'checking'
+        except Exception:
+            return False
+
     def call(self, action, data=None):
         try:
             if self._closing:
@@ -370,6 +397,17 @@ class Bridge:
                     'draft_get', 'draft_confirm', 'emergency_stop'):
                 from forge_service import READ_ACTIONS
                 if action not in READ_ACTIONS:
+                    if action in ('draft_save', 'ui_layout_save'):
+                        binding = self._native_binding()
+                        controller = self._update_controller
+                        from forge_native_controller import NativeController
+                        if type(controller) is NativeController and controller.operation_lock.acquire(blocking=False):
+                            try:
+                                with service.admission_lock:
+                                    if self._update_controller is controller and self._checking_persistence(service, binding):
+                                        return service.dispatch(action, data)
+                            finally:
+                                controller.operation_lock.release()
                     raise ValueError('Forge is confirming a restart. Cancel the restart before changing work.')
             if action == 'artifact_save_as':
                 # Only an explicit user download opens this dialog. Agent tools
