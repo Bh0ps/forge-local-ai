@@ -21,7 +21,7 @@ it.each(['rejected','mismatched'])('propagates a %s context save through App and
     await act(async()=>window.dispatchEvent(new Event('pywebviewready')));
     await screen.findByText('What are we building?');
     await userEvent.click(screen.getByRole('button',{name:'Settings'}));
-    await userEvent.click(screen.getByRole('button',{name:'Low 2K'}));
+    await userEvent.click(await screen.findByRole('button',{name:'Low 2K'}));
     expect(await screen.findByText('Context could not be saved.')).toBeTruthy();
     expect(call.mock.calls.filter(([action])=>action==='settings')).toHaveLength(1);
     expect(call).toHaveBeenCalledWith('settings',{context:2048,adaptive_context_locked:true});

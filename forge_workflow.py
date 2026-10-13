@@ -417,6 +417,10 @@ class WorkflowCoordinator:
 
     def progress(self,run,goal=None):
         goal=goal or (self.store.goal(run['goal_id']) if run.get('goal_id') else {})
+        return self.progress_from_snapshot(run,goal)
+
+    def progress_from_snapshot(self,run,goal,unknown_actions=None):
+        """Poll inputs come from one short read; execution retains goal reconciliation."""
         tasks=goal.get('tasks',[]); state=run.get('verification_feedback') or {}
         receipts=list((state.get('receipts') or {}).values())
         verified_task_ids=[]
@@ -429,7 +433,7 @@ class WorkflowCoordinator:
         phase=(run.get('workflow') or {}).get('phase') or run.get('phase','ready')
         waiting={'waiting_question':'Waiting for your answer.','waiting_approval':'Waiting for approval.','compacting':'Saving task continuity.'}.get(run.get('phase'))
         if run.get('status') in ('paused','interrupted','failed'): waiting=run.get('recovery') or run.get('checkpoint')
-        unknown=bool(self.store.unknown_actions(run['id'])) if run.get('status') in ('paused','interrupted') else False
+        unknown=(bool(self.store.unknown_actions(run['id'])) if unknown_actions is None else bool(unknown_actions)) if run.get('status') in ('paused','interrupted') else False
         actions=['inspect_interruption'] if unknown or run.get('status')=='interrupted' else ['resume'] if run.get('status')=='paused' else []
         return {'schema_version':1,'activity':phase.replace('_',' ').capitalize(),'phase':phase,'verified':verified,
             'completed':sum(t.get('status')=='completed' for t in tasks),'verified_task_ids':verified_task_ids,'total':len(tasks),'waiting_reason':waiting,

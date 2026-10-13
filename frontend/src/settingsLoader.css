@@ -1,0 +1,3 @@
+.settings-page-load {min-height:240px;padding:24px 16px;}
+.settings-page-load h2 {max-width:100%;overflow-wrap:anywhere;}
+.settings-page-load-actions {display:flex;flex-wrap:wrap;justify-content:center;gap:8px;}

@@ -10,7 +10,6 @@ import { GoalReviewCard } from './goalReviewCard';
 import { GuidanceCard } from './taskStatus';
 import { GoalTaskEvidence } from './goalTaskEvidence';
 import { GoalGuidanceActions } from './goalGuidanceActions';
-export { SettingsPage } from './settings';
 import { ProjectActions } from './projectActions';
 import { ProjectIcon } from './appearance';
 

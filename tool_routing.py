@@ -26,6 +26,7 @@ def relevance(schema, query, loaded=()):
 
 def select_schemas(schemas, query, budget_characters, loaded=(), limit=64, phase=None):
     selected = []
+    selected_bytes = 2 # Compact JSON list brackets; each later item adds one comma.
     coordination=['tools_search','tools_load','request_user_input','goal_read','goal_update','artifact_read']
     loaded=list(loaded)
     terms=set(re.findall(r'[a-z][a-z0-9_]{2,}',str(query).casefold()))
@@ -48,8 +49,11 @@ def select_schemas(schemas, query, budget_characters, loaded=(), limit=64, phase
     for schema in sorted(schemas, key=rank):
         if len(selected) >= limit:
             break
-        if len(json.dumps(wire_schemas(selected + [schema]), ensure_ascii=False, separators=(',', ':')).encode('utf-8')) <= budget_characters:
+        item_bytes=len(json.dumps(wire_schemas([schema])[0],ensure_ascii=False,separators=(',',':')).encode('utf-8'))
+        added_bytes=item_bytes+int(bool(selected))
+        if selected_bytes+added_bytes <= budget_characters:
             selected.append(schema)
+            selected_bytes+=added_bytes
     return selected
 
 

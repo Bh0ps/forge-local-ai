@@ -685,7 +685,7 @@ class ForgeStore(Store):
             rows=db.execute('SELECT * FROM run_events WHERE run_id=? AND seq>? ORDER BY seq LIMIT ?',(identifier,after,min(1000,limit))).fetchall()
             return [dict(json.loads(r['payload']),seq=r['seq'],type=r['type'],run_id=identifier) for r in rows]
 
-    def poll_snapshot(self,identifier,after=0):
+    def poll_snapshot(self,identifier,after=0,*,include_progress=False):
         """One WAL read snapshot keeps status, delivered events and cursor coherent."""
         if type(after) is not int or after<0: raise ValueError('Invalid event cursor.')
         with self._connection(transaction='read') as db:
@@ -695,6 +695,16 @@ class ForgeStore(Store):
             rows=db.execute('SELECT * FROM run_events WHERE run_id=? AND seq>? ORDER BY seq LIMIT 500',(identifier,after)).fetchall()
             events=[dict(json.loads(row['payload']),seq=row['seq'],type=row['type'],run_id=identifier) for row in rows]
             latest=db.execute('SELECT COALESCE(MAX(seq),0) FROM run_events WHERE run_id=?',(identifier,)).fetchone()[0]
+            if include_progress:
+                goal={};unknown=False
+                if isinstance(run,dict) and run.get('goal_id'):
+                    row=db.execute("SELECT data FROM entities WHERE kind='goals' AND id=?",(run['goal_id'],)).fetchone()
+                    if not row:raise ValueError('Goal not found.')
+                    goal=json.loads(row[0])
+                if isinstance(run,dict) and run.get('status') in ('paused','interrupted'):
+                    unknown=db.execute("SELECT 1 FROM invocations WHERE run_id=? AND status='outcome_unknown' LIMIT 1",(run['id'],)).fetchone() is not None
+                progress_inputs={'goal':goal,'unknown_actions':unknown}
+        if include_progress:return run,events,latest,progress_inputs
         return run,events,latest
 
     def invocation(self,identifier,run_id,name,arguments):

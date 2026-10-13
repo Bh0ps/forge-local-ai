@@ -52,9 +52,10 @@ WORKFLOW=[
         'scope':{'type':'string','enum':['global','project','agent']}},['title','content','kind','scope']),
     tool_schema('goal_read','Read the saved goal, accepted plan and evidence. Use task_id or start/limit to inspect relevant tasks in a long goal.',{
         'task_id':{'type':'string'},'start':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':100}}),
-    tool_schema('goal_update','Journal goal progress. Preserve ordered tasks, evidence and next action.',{
+    tool_schema('goal_update','Existing IDs or exact text.',{
         'tasks':{'type':'array','items':{'type':'object','properties':{'id':{'type':'string'},'text':{'type':'string'},
-           'status':{'type':'string','enum':['pending','in_progress','completed']},'evidence':{'type':'array','items':{'type':'string'}}},'required':['text','status']}},
+           'status':{'type':'string','enum':['pending','in_progress','completed']},'evidence':{'type':'array','items':{'type':'string'}}},
+           'required':['status'],'anyOf':[{'required':['id']},{'required':['text']}]}},
         'checkpoint':{'type':'string'},'next_action':{'type':'string'},'blockers':{'type':'string'}},['checkpoint','next_action']),
     tool_schema('goal_task_update','Update progress for one existing task ID at the current goal revision. Cannot change requirements.',{
         'task_id':{'type':'string'},'expected_revision':{'type':'integer','minimum':0},
@@ -493,12 +494,12 @@ class RunManager:
             raise EngineRunBindingFailure()
         return provider
     def poll(self,identifier,after=0):
-        run,events,latest=self.store.poll_snapshot(identifier,after)
+        run,events,latest,progress_inputs=self.store.poll_snapshot(identifier,after,include_progress=True)
         cursor=events[-1]['seq'] if events else after
         has_more=cursor<latest
         return dict(id=identifier,chat_id=run['chat_id'],events=events,next_cursor=cursor,has_more=has_more,
                     finished=run['status'] in TERMINAL and not has_more,status=run['status'],recovery=run.get('recovery'),
-                    progress_summary=self.workflow.progress(run),workflow=run.get('workflow'))
+                    progress_summary=self.workflow.progress_from_snapshot(run,**progress_inputs),workflow=run.get('workflow'))
     def cancel(self,identifier,pause=False):
         with self.lock:
             run=self.store.run(identifier)
@@ -729,7 +730,9 @@ class RunManager:
             execution_guidance=('\nThe user has started this goal and authorized implementation. Continue from the first unfinished task now; do not ask whether the Build action or /goal meant to begin.'+
                 '\nHistorical messages and a legacy "execution has not started" checkpoint do not revoke this action. Tool permissions and required approvals still apply.') if run.get('mode')=='goal' and not run.get('parent_id') else ''
             if self.workflow.enabled(run) and (run.get('workflow') or {}).get('phase')=='report':execution_guidance=''
-            continuation=('\nThe shared goal is background context. Finish only your assigned request and return evidence; the main agent maintains overall tasks.') if run.get('parent_id') else '\nMaintain ordered tasks and evidence using goal_update. Reload relevant tasks between steps. Work until tasks are complete; never claim success without evidence.'
+            continuation=('\nThe shared goal is background context. Finish only your assigned request and return evidence; the main agent maintains overall tasks.') if run.get('parent_id') else ('\nMaintain existing ordered tasks and evidence. Prefer goal_task_update with a task_id and the current goal_read revision as expected_revision when available for one task. '
+                'Use goal_update with existing task IDs from goal_read, or exact saved task text; accepted requirements cannot be added or replaced. '
+                'Reload relevant tasks between steps. Work until tasks are complete; never claim success without evidence.')
             packet=self.workflow.context(run)
             messages.append({'role':'system','content':(packet if packet else 'Goal checkpoint (saved task data):\n'+compact_goal_context(goal,run['settings']['context'])+continuation)+execution_guidance})
         before=[]; after=[]; mutations={}

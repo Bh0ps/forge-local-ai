@@ -38,7 +38,7 @@ describe('Forge workspace', () => {
   });
   it('persists the exact 256K slider selection and retains its 2K minimum', async () => {
     const { call } = bridge({ settings: (data: Record<string, unknown>) => ({ ...DEFAULT_SETTINGS, ...data }) }); render(<App />); await ready();
-    await userEvent.click(screen.getByRole('button', { name: 'Settings' })); const range = screen.getByRole('slider', { name: /Context window/ }) as HTMLInputElement;
+    await userEvent.click(screen.getByRole('button', { name: 'Settings' })); const range = await screen.findByRole('slider', { name: /Context window/ }) as HTMLInputElement;
     expect(range.min).toBe('2048'); expect(range.max).toBe('262144'); expect(range.step).toBe('2048');
     fireEvent.change(range, { target: { value: '262144' } }); fireEvent.pointerUp(range);
     await waitFor(() => expect(call).toHaveBeenCalledWith('settings', { context: 262144, adaptive_context_locked: true }));
@@ -46,7 +46,7 @@ describe('Forge workspace', () => {
   it('keeps newer context selections while older queued saves return', async () => {
     const pending: { context: number; resolve: (value: unknown) => void }[] = [];
     const { call } = bridge({ settings: (data: Record<string, unknown>) => new Promise(resolve => pending.push({ context: Number(data.context), resolve })) }); render(<App />); await ready();
-    await userEvent.click(screen.getByRole('button', { name: 'Settings' })); const range = screen.getByRole('slider', { name: /Context window/ }) as HTMLInputElement;
+    await userEvent.click(screen.getByRole('button', { name: 'Settings' })); const range = await screen.findByRole('slider', { name: /Context window/ }) as HTMLInputElement;
     fireEvent.change(range, { target: { value: '4096' } }); fireEvent.pointerUp(range);
     await waitFor(() => expect(pending.length).toBe(1)); expect(pending[0].context).toBe(4096);
     fireEvent.change(range, { target: { value: '8192' } }); fireEvent.pointerUp(range); expect(pending).toHaveLength(1);
