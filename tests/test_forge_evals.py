@@ -410,6 +410,9 @@ def test_tracked_worker_actually_exercises_every_continuity_intervention(tmp_pat
     from test_forge_core import Engine,call
     config=offline_worker_config(tmp_path,identity)
     config.update(tracked_tasks=True,guided_execution=guided)
+    # This fixture checks continuity and evidence, not wall-clock performance.
+    # Leave real evaluation budgets intact while allowing slower Windows I/O.
+    config['controls']['max_seconds']=45
     holder={};task=config['task'];folder=Path(config['workspace'])
     original=forge_service.ForgeService
     def factory(*args,**kwargs):

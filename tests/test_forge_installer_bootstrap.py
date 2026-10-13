@@ -29,7 +29,44 @@ def test_public_installer_never_uses_wildcard_deletion_or_process_closure():
 
 
 @pytest.fixture
-def installer(tmp_path):
+def _native_installer_slot():
+    if os.name != "nt" or not ISCC.is_file():
+        pytest.skip("The native Windows Inno compiler is not available.")
+    # Readiness enumerates all known Forge images. Another disposable test can
+    # move/retire its image while a WMI snapshot still names it, correctly making
+    # readiness unknown even for an unrelated target. Isolate the entire native
+    # scenario across pytest processes rather than weakening the installer guard.
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.ReleaseMutex.argtypes = [wintypes.HANDLE]
+    kernel.ReleaseMutex.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.CreateMutexW(None, False, "Local\\Forge.DisposableInstaller.Tests")
+    assert handle, "Could not create the native installer fixture mutex."
+    acquired = False
+    try:
+        until = time.monotonic() + 600
+        while time.monotonic() < until:
+            result = kernel.WaitForSingleObject(handle, 1000)
+            if result in (0, 0x80):
+                acquired = True
+                assert result == 0, "A previous native fixture exited without releasing its scenario."
+                break
+            assert result == 0x102, "Could not wait for native installer fixture isolation."
+        assert acquired, "Timed out waiting for another native installer fixture."
+        yield
+    finally:
+        if acquired:
+            kernel.ReleaseMutex(handle)
+        kernel.CloseHandle(handle)
+
+
+@pytest.fixture
+def installer(tmp_path, _native_installer_slot):
     if os.name != "nt" or not ISCC.is_file():
         pytest.skip("The native Windows Inno compiler is not available.")
     base, stage = tmp_path / "profile", tmp_path / "stage"

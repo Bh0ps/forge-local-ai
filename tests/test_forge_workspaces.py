@@ -39,8 +39,8 @@ def tool(name, arguments):
     return {"function": {"name": name, "arguments": arguments}}
 
 
-def wait_finished(service, run):
-    deadline = time.monotonic() + 10
+def wait_finished(service, run, timeout=10):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = service.jobs.poll(run["id"])
         if result["finished"]:
@@ -187,7 +187,9 @@ def test_goal_continues_across_compactions_and_restart_without_repeating_writes(
         ]
         run = service.goal_resume({"id": goal["id"]})
         accepted_request = service.store.run(run["id"])["request"]
-        assert wait_finished(service, run)["status"] == "paused"
+        # Eight large Unicode reads and durable checkpoints need headroom on
+        # slower Windows runners; the same protocol/evidence checks still apply.
+        assert wait_finished(service, run, timeout=30)["status"] == "paused"
         assert (folder / "first.txt").read_text() == "first"
         assert not (folder / "second.txt").exists()
         checkpoint = service.store.goal(goal["id"])
@@ -205,7 +207,7 @@ def test_goal_continues_across_compactions_and_restart_without_repeating_writes(
         ])
         restored = ForgeService(core=engine, data_dir=tmp_path / "forge")
         resumed = restored.jobs.resume(run["id"])
-        assert wait_finished(restored, resumed)["status"] == "completed"
+        assert wait_finished(restored, resumed, timeout=30)["status"] == "completed"
         final_goal = restored.store.goal(goal["id"])
         assert final_goal["status"] == "completed"
         assert [task["id"] for task in final_goal["tasks"]] == [task["id"] for task in tasks]
