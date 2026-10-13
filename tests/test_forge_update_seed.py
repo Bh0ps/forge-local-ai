@@ -1,12 +1,53 @@
 """The publisher seed verifies downloads while installation stays fail-closed."""
 import pytest
 from pathlib import Path
+from hashlib import sha256
+import json
+import forge_update_proof as proof
 from forge_service import ForgeService
 from forge_updates import UpdateManager
 
-from test_forge_publisher_updates import fixture, ready
+from test_forge_publisher_updates import fixture, ready, sign, OLD_SOURCE, NEW_SOURCE
 from test_forge_updates import PUBLISHER, setup as ca_fixture, signature
 from test_forge_core import Engine
+
+CURRENT_VERSION = json.loads((Path(__file__).resolve().parents[1] / 'frontend/package.json').read_text(encoding='utf-8'))['version']
+major, minor, patch = map(int, CURRENT_VERSION.split('.'))
+NEXT_VERSION = f'{major}.{minor}.{patch + 1}'
+
+
+@pytest.fixture
+def current_release(fixture):
+    """The declared current host sees the next patch using inert signed bytes.
+
+    The shared publisher fixture deliberately retains its historical 5.1.2 to
+    5.1.3 foundation scenario; default-host tests need a genuinely newer offer.
+    """
+    value = fixture
+    value.manager.shutdown()
+    original_future = value.payload['version']
+    for root, number, source in ((value.app, CURRENT_VERSION, OLD_SOURCE), (value.new_app, NEXT_VERSION, NEW_SOURCE)):
+        payload = dict(schema=1, kind='forge-build', repository=proof.REPOSITORY, platform=proof.PLATFORM,
+            version=number, source_commit=source, created_at=value.now,
+            files=[entry for entry in proof.tree_files(root) if entry['path'] != proof.BUILD_NAME])
+        (root / proof.BUILD_NAME).write_bytes(sign(payload, value.private))
+    value.payload.update(version=NEXT_VERSION, tag='v' + NEXT_VERSION,
+        build_proof_sha256=sha256((value.new_app / proof.BUILD_NAME).read_bytes()).hexdigest())
+    for artifact in value.payload['artifacts']:
+        artifact['name'] = artifact['name'].replace(f'Forge-{original_future}-', f'Forge-{NEXT_VERSION}-')
+    value.raw = sign(value.payload, value.private)
+    value.metadata.update(tag_name='v' + NEXT_VERSION,
+        html_url=value.metadata['html_url'].replace('/tag/v' + original_future, '/tag/v' + NEXT_VERSION))
+    for asset in value.metadata['assets']:
+        asset['name'] = asset['name'].replace(f'Forge-{original_future}-', f'Forge-{NEXT_VERSION}-')
+        asset['browser_download_url'] = asset['browser_download_url'].replace(
+            '/download/v' + original_future + '/', '/download/v' + NEXT_VERSION + '/').replace(
+            f'Forge-{original_future}-', f'Forge-{NEXT_VERSION}-')
+    value.metadata['assets'][1].update(size=len(value.raw), digest='sha256:' + sha256(value.raw).hexdigest())
+    value.manager = UpdateManager(value.manager.service, install_dir=value.app, trust_policy=(),
+        client_factory=value.factory, proof_policy=value.pins)
+    assert value.manager.current_version == CURRENT_VERSION
+    return value
 
 
 def test_changed_trust_mode_cannot_relabel_a_previously_verified_installer(fixture):
@@ -44,11 +85,11 @@ def test_same_artifact_needs_compatible_signature_metadata_before_preserving_rea
     assert result['state'] == 'available' and not result['verified'] and result['signature'] is None
 
 
-def test_default_seed_can_verify_a_publisher_download_but_never_prepare_install(fixture):
-    value = fixture
+def test_default_seed_can_verify_a_publisher_download_but_never_prepare_install(current_release):
+    value = current_release
     manager = UpdateManager(value.manager.service, install_dir=value.app, trust_policy=(),
                             client_factory=value.factory, proof_policy=value.pins)
-    assert manager.current_version == '5.1.2'
+    assert manager.current_version == CURRENT_VERSION
     assert manager.check('preview')['verified_download_available']
     manager.download(); manager.thread.join(5)
     status = manager.status()
@@ -89,7 +130,7 @@ def test_real_service_dispatch_cannot_enable_installation_from_browser_or_settin
     service = ForgeService(core=Engine(), data_dir=tmp_path / 'synthetic-data')
     service.store.save_entity('providers', {'id': 'untrusted', '_allow_installation': True})
     status = service.dispatch('update_status')
-    assert status['current_version'] == '5.1.2' and not status['automatic_install_available']
+    assert status['current_version'] == CURRENT_VERSION and not status['automatic_install_available']
     with pytest.raises(ValueError, match='unavailable in this version'):
         service.dispatch(action, {'_allow_installation': True, 'native_ready': True, 'source': 'native'})
     assert not service.update_manager.applying
@@ -105,8 +146,8 @@ def test_internal_fixture_capability_requires_a_real_boolean(fixture, flag):
 
 
 @pytest.mark.parametrize('failure', ['tamper', 'expiry', 'revoked-pin'])
-def test_invalid_cached_proof_restart_disarms_public_evidence_but_retains_private_files(fixture, monkeypatch, failure):
-    value = fixture; ready(value)
+def test_invalid_cached_proof_restart_disarms_public_evidence_but_retains_private_files(current_release, monkeypatch, failure):
+    value = current_release; ready(value)
     descriptor = value.manager.state['release_proof']
     proof_path = value.manager.root / 'proofs' / (descriptor['sha256'] + '.json')
     package_path = Path(value.manager.state['downloaded'])
@@ -127,8 +168,8 @@ def test_invalid_cached_proof_restart_disarms_public_evidence_but_retains_privat
     with pytest.raises(ValueError, match='publisher'): manager.download()
 
 
-def test_fresh_authenticated_check_recovers_from_invalid_cached_proof(fixture):
-    value = fixture; ready(value)
+def test_fresh_authenticated_check_recovers_from_invalid_cached_proof(current_release):
+    value = current_release; ready(value)
     digest = value.manager.state['release_proof']['sha256']
     (value.manager.root / 'proofs' / (digest + '.json')).write_bytes(b'Synthetic proof tampering')
     manager = UpdateManager(value.manager.service, install_dir=value.app, trust_policy=(),
