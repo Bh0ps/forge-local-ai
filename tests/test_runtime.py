@@ -233,11 +233,13 @@ def bridge_class():
     # logging setup, WebView2 import, or native startup occurs in these tests.
     source = Path(__file__).resolve().parents[1] / 'desktop.py'
     tree = ast.parse(source.read_text(encoding='utf-8'), filename=str(source))
-    definition = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Bridge')
+    definitions = [node for node in tree.body
+                   if (isinstance(node, ast.ClassDef) and node.name in ('_WindowUnavailable', 'Bridge'))
+                   or (isinstance(node, ast.FunctionDef) and node.name == '_smoke_cleanup_marker')]
     namespace = {'Core': FakeCore, 'Jobs': Jobs, 'threading': threading,
                  'PairingAuthority': PairingAuthority, 'HostLifecycle': HostLifecycle, 'Path': Path,
-                 'log': logging.getLogger('forge-test')}
-    exec(compile(ast.Module(body=[definition], type_ignores=[]), str(source), 'exec'), namespace)
+                 'log': logging.getLogger('forge-test'), '_ACTIVE_SMOKE_CHECKPOINT': None}
+    exec(compile(ast.Module(body=definitions, type_ignores=[]), str(source), 'exec'), namespace)
     return namespace['Bridge']
 
 
@@ -246,6 +248,7 @@ def native_bridge(monkeypatch, bridge_class):
     class Form:
         Left, Top, Width, Height = 500, 300, 1000, 760
         WindowState, TopMost, DeviceDpi = 'normal', False, 96
+        Visible = True
 
         def SetBounds(self, x, y, width, height):
             self.Left, self.Top, self.Width, self.Height = x, y, width, height
@@ -311,7 +314,8 @@ def test_hud_restores_maximized_workspace_after_compact_and_expanded_modes(nativ
 def test_show_preserves_maximized_workspace_and_restores_minimized_hud(native_bridge):
     bridge, form, _ = native_bridge
     shown, activated = [], []
-    bridge._window = SimpleNamespace(show=lambda: shown.append(True))
+    bridge._window = SimpleNamespace()
+    form.Show = lambda: shown.append(True)
     form.Activate = lambda: activated.append(True)
     form.WindowState = 'maximized'
     bridge.show()
@@ -364,5 +368,5 @@ def test_bridge_close_hides_and_quit_cancels_work_and_rejects_requests(bridge_cl
     assert bridge._close() is False
     assert calls == ['hide'] and bridge._closing is False
     assert bridge.quit() == {'ok': True}
-    assert calls == ['hide', 'cancel_and_shutdown', 'tray_stop', 'destroy']
+    assert calls == ['hide', 'tray_stop', 'cancel_and_shutdown', 'destroy']
     assert bridge.call('start_chat', request()) == {'error': 'Forge is shutting down.'}

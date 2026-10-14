@@ -21,6 +21,148 @@ class BrowserGuard(ValueError):
         self.reason = reason
 
 
+class BrowserCompletionError(RuntimeError):
+    """A submitted callback has no usable completion; never imply safe replay."""
+    _messages = {
+        'cancelled': 'Browser callback was cancelled; inspect the action outcome before retrying.',
+        'faulted': 'Browser callback failed; inspect the action outcome before retrying.',
+        'protocol_error': 'Browser callback completion is unavailable; the submitted action outcome is unknown.',
+        'pending': 'A browser capture is still pending; its submitted outcome is unknown.',
+    }
+
+    def __init__(self, reason):
+        self.reason = reason if reason in self._messages else 'protocol_error'
+        super().__init__(self._messages[self.reason])
+
+
+def _managed_task_failure(task):
+    try:
+        if task.IsCanceled:
+            return 'cancelled'
+        if task.IsFaulted:
+            try:
+                task.Exception  # Observe the fault without exposing its details.
+            except Exception:
+                pass
+            return 'faulted'
+    except Exception:
+        return 'protocol_error'
+    return None
+
+
+def _wait_managed_callback(done, continuation, timeout_message):
+    # Called after UI registration, on its worker and outside native locks.
+    # Event.set precedes the managed delegate's return. Retain and wait for
+    # that continuation too, sharing the original twelve-second wait budget.
+    deadline = time.monotonic() + 12
+    failure = _managed_task_failure(continuation)
+    if failure:
+        raise BrowserCompletionError(failure) from None
+    if not done.wait(max(0, deadline - time.monotonic())):
+        failure = _managed_task_failure(continuation)
+        if failure:
+            raise BrowserCompletionError(failure) from None
+        raise TimeoutError(timeout_message)
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError(timeout_message)
+    try:
+        completed = continuation.Wait(max(0, int(remaining * 1000)))
+    except Exception:
+        raise BrowserCompletionError(_managed_task_failure(continuation) or 'protocol_error') from None
+    if time.monotonic() >= deadline:
+        raise TimeoutError(timeout_message)
+    failure = _managed_task_failure(continuation)
+    if failure:
+        raise BrowserCompletionError(failure) from None
+    if completed is False:
+        raise TimeoutError(timeout_message)
+    if completed is not True:
+        raise BrowserCompletionError('protocol_error')
+    if time.monotonic() >= deadline:
+        raise TimeoutError(timeout_message)
+
+
+class _CaptureLifetime:
+    """One page-owned stream, including a submitted task without a callback."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.stream = self.source = self.continuation = None
+        self.registration_finished = self.unsubmitted = self.callback_active = False
+        self.aborted = self.submission_started = False
+        self.disposing = self.disposed = False
+
+    def dispose_stream(self):
+        with self.lock:
+            if self.disposed:
+                return True
+            if self.disposing:
+                return False
+            self.disposing = True
+            stream = self.stream
+        try:
+            if stream is not None:
+                stream.Dispose()
+        finally:
+            with self.lock:
+                self.disposed, self.disposing = True, False
+        return True
+
+    def retire(self, *, managed_completed=False, deadline=None):
+        def expired():
+            return deadline is not None and time.monotonic() >= deadline
+        if expired():
+            return False
+        with self.lock:
+            if not self.registration_finished or self.callback_active or self.disposing:
+                return False
+            source, continuation, unsubmitted = self.source, self.continuation, self.unsubmitted
+        if not managed_completed:
+            if source is None and not unsubmitted:
+                return False
+            for task in (source, continuation):
+                if task is None:
+                    continue
+                if expired():
+                    return False
+                _managed_task_failure(task)  # Observe known faults, without reading their details.
+                if expired():
+                    return False
+                try:
+                    if task.IsCompleted is not True:
+                        return False
+                except Exception:
+                    return False
+                if expired():
+                    return False
+        try:
+            return self.dispose_stream()
+        except Exception:
+            return True  # Disposal was attempted exactly once, with no usable result.
+
+    def wait_after_registration_failure(self):
+        # Never wait on the UI thread or while holding the page admission lock.
+        # A failed registration still owns its source task and stream.
+        deadline = time.monotonic() + 12
+        task = self.continuation if self.continuation is not None else self.source
+        if task is None:
+            return None
+        try:
+            _managed_task_failure(task)
+            if time.monotonic() >= deadline:
+                return None
+            if task.IsCompleted is not True:
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    task.Wait(max(0, int(remaining * 1000)))
+        except Exception:
+            pass
+        if time.monotonic() >= deadline:
+            return None
+        _managed_task_failure(task)
+        return deadline if time.monotonic() < deadline else None
+
+
 class NativeBrowser:
     def __init__(self, home, ui_dispatch=None, view_factory=None, clock=time.monotonic, session_check=None,
                  panel_id='forge-browser-panel', profile_name='native-browser-profile', navigation_guard=None, diagnostics=False,
@@ -612,6 +754,28 @@ PREVIEW_DIAGNOSTICS_SCRIPT = r'''(() => {
 class WebView2Page:
     """Raw control: no pywebview JS API, host objects, downloads or extension profile."""
     supports_pane_guard = True
+    _capture_admission_lock = threading.Lock()
+
+    def _retire_capture(self, lifetime, *, managed_completed=False, deadline=None):
+        if not lifetime.retire(managed_completed=managed_completed, deadline=deadline):
+            return False
+        with self._capture_admission_lock:
+            if getattr(self, '_capture_lifetime', None) is lifetime:
+                self._capture_lifetime = None
+        return True
+
+    def _reserve_capture(self):
+        # Lazy ownership also covers EmbeddedWebView2Page's separate initializer.
+        while True:
+            with self._capture_admission_lock:
+                previous = getattr(self, '_capture_lifetime', None)
+                if previous is None:
+                    lifetime = _CaptureLifetime()
+                    self._capture_lifetime = lifetime
+                    return lifetime
+            if not self._retire_capture(previous):
+                raise BrowserCompletionError('pending') from None
+
     def __init__(self, owner, home, ui_dispatch, changed):
         from webview.platforms.edgechromium import WebView2, CoreWebView2CreationProperties
         from System.Drawing import Color, Size, Font
@@ -826,17 +990,24 @@ class WebView2Page:
         done, result = threading.Event(), {}
         def complete(task):
             try:
+                failure = _managed_task_failure(task)
+                if failure:
+                    raise BrowserCompletionError(failure)
                 result['value'] = json.loads(str(task.Result))
-            except Exception as exc:
+            except BrowserCompletionError as exc:
                 result['error'] = exc
+            except (ValueError, TypeError):
+                result['error'] = BrowserCompletionError('protocol_error')
+            except Exception:
+                result['error'] = BrowserCompletionError('faulted')
             finally:
                 done.set()
         def execute(_):
             if check: check()
-            self.control.CoreWebView2.ExecuteScriptAsync(script).ContinueWith(Action[Task[String]](complete))
+            result['continuation'] = self.control.CoreWebView2.ExecuteScriptAsync(script).ContinueWith(Action[Task[String]](complete))
         self.ui(execute)
-        if not done.wait(12):
-            raise TimeoutError('Browser script timed out; inspect the action outcome before retrying.')
+        _wait_managed_callback(done, result.get('continuation'),
+            'Browser script timed out; inspect the action outcome before retrying.')
         if 'error' in result:
             raise result['error']
         if result.get('value') is None:
@@ -848,26 +1019,69 @@ class WebView2Page:
         from System import Action
         from System.IO import MemoryStream
         from System.Threading.Tasks import Task
+        lifetime = self._reserve_capture()
         done, result = threading.Event(), {}
-        stream = MemoryStream()
         def complete(task):
+            with lifetime.lock:
+                lifetime.callback_active = True
             try:
+                failure = _managed_task_failure(task)
+                if failure:
+                    raise BrowserCompletionError(failure)
                 task.GetAwaiter().GetResult()
-                result['value'] = bytes(stream.ToArray())
-            except Exception as exc:
+                result['value'] = bytes(lifetime.stream.ToArray())
+            except BrowserCompletionError as exc:
                 result['error'] = exc
+            except Exception:
+                result['error'] = BrowserCompletionError('faulted')
             finally:
-                stream.Dispose()
-                done.set()
+                try:
+                    lifetime.dispose_stream()
+                except Exception:
+                    result['error'] = BrowserCompletionError('faulted')
+                finally:
+                    with lifetime.lock:
+                        lifetime.callback_active = False
+                    done.set()
         def capture(_):
+            with lifetime.lock:
+                if lifetime.aborted:
+                    return
             if check: check()
-            self.control.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream).ContinueWith(Action[Task](complete))
-        try:self.ui(capture)
+            with lifetime.lock:
+                if lifetime.aborted:
+                    return
+                lifetime.submission_started = True
+            try:
+                lifetime.source = self.control.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, lifetime.stream)
+                lifetime.continuation = lifetime.source.ContinueWith(Action[Task](complete))
+            finally:
+                with lifetime.lock:
+                    lifetime.registration_finished = True
+        try:
+            lifetime.stream = MemoryStream()
+            self.ui(capture)
         except BaseException:
-            stream.Dispose()
+            with lifetime.lock:
+                lifetime.aborted = True
+                started = lifetime.submission_started
+                if not started:
+                    lifetime.unsubmitted = lifetime.registration_finished = True
+            if not started:
+                self._retire_capture(lifetime)
+                raise
+            deadline = lifetime.wait_after_registration_failure()
+            if deadline is not None:
+                self._retire_capture(lifetime, deadline=deadline)
+            raise BrowserCompletionError('protocol_error') from None
+        try:
+            _wait_managed_callback(done, lifetime.continuation, 'Browser screenshot timed out.')
+        except TimeoutError:
+            raise  # Keep ownership; do not extend the expired budget with retirement.
+        except BaseException:
+            self._retire_capture(lifetime)
             raise
-        if not done.wait(12):
-            raise TimeoutError('Browser screenshot timed out.')
+        self._retire_capture(lifetime, managed_completed=True)
         if 'error' in result:
             raise result['error']
         return result['value']

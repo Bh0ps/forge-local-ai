@@ -153,6 +153,22 @@ function Write-ForgeSmokeDiagnostics {
     if (@('not-executed','outcome-unknown','refused') -contains $SmokeData.tool_failure) { $toolFailure=$SmokeData.tool_failure }
     $researchViewCreated=$null
     if ($SmokeData.research_view_created -is [bool]) { $researchViewCreated=$SmokeData.research_view_created }
+    $standaloneReadiness=$null
+    $observation=$SmokeData.smoke_standalone_readiness
+    if ($observation -is [pscustomobject]) {
+        $standaloneReadiness=[ordered]@{}
+        foreach ($name in @('view_present','owner_same','snapshot_observed','native_observed',
+                'owner_visible','view_visible','status_visible','loading_complete','dom_visible','dom_hud',
+                'dom_modal','layout_valid','native_bound_present','bounds_match','same_sample','deadline_expired')) {
+            $standaloneReadiness[$name]=$null
+            if ($observation.$name -is [bool]) { $standaloneReadiness[$name]=$observation.$name }
+        }
+        $standaloneReadiness['iterations']=$null
+        if (($observation.iterations -is [int] -or $observation.iterations -is [long]) -and
+                $observation.iterations -ge 0 -and $observation.iterations -le 512) {
+            $standaloneReadiness['iterations']=$observation.iterations
+        }
+    }
     $handoffFeature=$null; $handoffReason='unrecorded'; $handoffPhase='unrecorded'; $handoffParticipants=$null
     $floor=$SmokeData.handoff_seed
     if ($floor.feature_available -is [bool]) { $handoffFeature=$floor.feature_available }
@@ -163,6 +179,7 @@ function Write-ForgeSmokeDiagnostics {
     $summary = [ordered]@{ gate=$Gate; phase=$phase; process_exit=$ExitCode; error_present=$hasError;
         error_category=$category; error_type=$errorType; safe_error=$message; report_state=$ReportState;
         tool_failure=$toolFailure; research_view_created=$researchViewCreated;
+        smoke_standalone_readiness=$standaloneReadiness;
         handoff_feature_available=$handoffFeature; handoff_reason=$handoffReason; handoff_phase=$handoffPhase;
         handoff_participant_count=$handoffParticipants;
         checkpoint_state=$CheckpointState; checkpoint_phase=$checkpointPhase;

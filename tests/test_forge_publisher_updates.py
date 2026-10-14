@@ -410,7 +410,10 @@ def test_retirement_rejects_a_real_windows_junction_without_unlinking(fixture, t
         result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
             'New-Item -ItemType Junction -Path $env:FORGE_FIXTURE_LINK -Target $env:FORGE_FIXTURE_TARGET | Out-Null'],
             env={**os.environ, 'FORGE_FIXTURE_LINK': str(junction), 'FORGE_FIXTURE_TARGET': str(outside)},
-            capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+            # Cold PowerShell startup can exceed ten seconds on a busy Windows
+            # runner. This bounds fixture creation only; retirement assertions
+            # still require a real junction and preserve its external contents.
+            capture_output=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
         assert result.returncode == 0 and junction.is_junction()
     else:
         junction.symlink_to(outside, target_is_directory=True)
