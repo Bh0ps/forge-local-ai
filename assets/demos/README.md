@@ -1,5 +1,17 @@
 # Forge demo media
 
+The 5.1.13 captures use the production UI with synthetic API responses. They
+contain no actual chats, credentials, native captures or personal model settings.
+The model-selection image demonstrates keyboard focus on the selected button;
+its complete model-ID label is available to assistive technology.
+
+| Image | Demonstrates |
+|---|---|
+| `forge-5.1.13-helper-count-dark.png` | One exact retained-helper count in the existing Desktop view. |
+| `forge-5.1.13-model-controls-light.png` | The selected-model control in a narrow light workspace. |
+
+## Previous 5.1.12 captures
+
 The 5.1.12 captures use the production UI with synthetic API responses. They
 show retained helper activity and the small scoped browser target cue. They
 contain no actual native page, personal screen, model session, or OS cursor.

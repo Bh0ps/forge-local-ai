@@ -36,14 +36,14 @@ describe('retired helper desktop activity', () => {
     response = retired;
     await tick(1500);
     expect(screen.getByText('Request completed')).toBeTruthy();
-    expect(screen.getByText('2 recorded steps')).toBeTruthy();
-    expect(screen.getByText('Earlier helper activity · 2 steps')).toBeTruthy();
+    expect(screen.getByText('2 recorded helper steps')).toBeTruthy();
+    expect(screen.queryByText('Earlier helper activity · 2 steps')).toBeNull();
     expect(screen.getByText('Earlier helper activity retained. No snapshot is available.')).toBeTruthy();
     expect(screen.queryByRole('img')).toBeNull();
     expect(document.activeElement).toBe(activity);
     mounted.unmount();
     render(<ComputerView chatId="synthetic-chat" onActivity={() => {}}/>); await tick();
-    expect(screen.getByText('Earlier helper activity · 2 steps')).toBeTruthy();
+    expect(screen.getByText('2 recorded helper steps')).toBeTruthy();
     expect(call.mock.calls.map(([action]) => action)).toEqual(['computer_view_state', 'computer_view_state', 'computer_view_state']);
   });
 
@@ -67,6 +67,22 @@ describe('retired helper desktop activity', () => {
     render(<ComputerView chatId="synthetic-chat" onActivity={() => {}}/>); await tick();
     expect(screen.getByText('At least 2048 recorded steps')).toBeTruthy();
     expect(screen.getByText('Earlier helper activity · at least 2048 steps')).toBeTruthy();
+  });
+
+  it('does not mistake capped equal counts for exclusively retired helper activity', async () => {
+    bridge(() => ({...retained(), action_count: 2048, action_count_truncated: true,
+      retired_action_count: 2048, retired_action_count_truncated: false}));
+    render(<ComputerView chatId="synthetic-chat" onActivity={() => {}}/>); await tick();
+    expect(screen.getByText('At least 2048 recorded steps')).toBeTruthy();
+    expect(screen.getByText('Earlier helper activity · 2048 steps')).toBeTruthy();
+    expect(screen.queryByText('2048 recorded helper steps')).toBeNull();
+  });
+
+  it('keeps exact singular helper provenance compact', async () => {
+    bridge(() => ({...retained(), action_count: 1, retired_action_count: 1}));
+    render(<ComputerView chatId="synthetic-chat" onActivity={() => {}}/>); await tick();
+    expect(screen.getByText('1 recorded helper step')).toBeTruthy();
+    expect(screen.queryByText('Earlier helper activity · 1 step')).toBeNull();
   });
 
   it('does not invent retained helper activity for legacy responses without that metadata', async () => {

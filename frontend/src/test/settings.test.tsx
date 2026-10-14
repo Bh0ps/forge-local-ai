@@ -116,6 +116,31 @@ describe('settings navigation', () => {
     expect(call.mock.calls.some(([action]) => ['provider_save', 'provider_test'].includes(action))).toBe(false);
     expect(onChange).not.toHaveBeenCalled();
   });
+
+  it('names selected model icons and keeps exact manual selection accessible by keyboard', async () => {
+    bridge();
+    const changed = vi.fn();
+    function Harness() {
+      const [settings, setSettings] = useState({...DEFAULT_SETTINGS, model:'synthetic-current:latest'});
+      return <SettingsPage settings={settings} onChange={async delta => {changed(delta); setSettings(previous => ({...previous,...delta}));}}
+        tab="models" setTab={() => {}} notify={() => {}} capabilities={{}}
+        models={[{name:'synthetic-current:latest'},{name:'synthetic-other:latest'}]} refreshModels={async () => {}} applyRecommendation={async () => {}}/>;
+    }
+    render(<Harness/>);
+    const selected = await screen.findByRole('button', {name:'Selected model synthetic-current:latest'});
+    expect(selected.getAttribute('aria-pressed')).toBe('true');
+    selected.focus(); await userEvent.keyboard('{Enter}');
+    expect(changed).toHaveBeenLastCalledWith({model:'synthetic-current:latest'});
+    expect(document.activeElement).toBe(selected);
+    const other = screen.getByRole('button', {name:'Use model synthetic-other:latest'});
+    expect(other.getAttribute('aria-pressed')).toBe('false');
+    other.focus(); await userEvent.keyboard('{Enter}');
+    expect(changed).toHaveBeenLastCalledWith({model:'synthetic-other:latest'});
+    expect(changed).toHaveBeenCalledTimes(2);
+    expect(screen.getByRole('button', {name:'Selected model synthetic-other:latest'}).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByRole('button', {name:'Use model synthetic-current:latest'}).getAttribute('aria-pressed')).toBe('false');
+    expect(document.activeElement).toBe(other);
+  });
 });
 
 describe('local engine connection editor', () => {

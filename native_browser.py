@@ -156,22 +156,28 @@ class NativeBrowser:
                 self.snapshot = None
 
     def status(self, scope=None):
+        def eligible(indicator):
+            return bool(indicator is not None and indicator is self._indicator and not self.closed
+                and self._pane_allowed and not self.cancelled.is_set()
+                and 0 <= self.clock()-indicator['time'] < 3 and indicator['pane'] == self._pane_generation
+                and indicator['generation'] == self.generation and not self.state['loading']
+                and getattr(self.view, 'visible', False))
         with self.lock:
             available = not self.closed and bool(self.view_factory or os.name == 'nt' and self.ui_dispatch)
             indicator = self._indicator
+            # Expired or revoked cues need no ancestry query. Recheck after the
+            # query as its read may overlap Hide, Stop, navigation or expiry.
+            candidate = eligible(indicator)
             result = dict(available=available, engine='WebView2', **self.state,
                 embedded=True, visible=bool(getattr(self.view, 'visible', False)),
                 message=self.state['error'] or ('Ready — uses the Windows web runtime' if available else 'Open Forge desktop to use the built-in browser'),
                 capabilities=['navigate', 'inspect', 'click', 'type', 'screenshot', 'back', 'forward', 'reload'])
         active = False
-        if indicator and self.indicator_scope and self.panel_id == 'forge-browser-panel':
+        if candidate and self.indicator_scope and self.panel_id == 'forge-browser-panel':
             try: active = self.indicator_scope(indicator['run'], scope or {}) is True
             except Exception: active = False
         with self.lock:
-            active = bool(active and indicator is self._indicator and self._pane_allowed and not self.cancelled.is_set()
-                and self.clock()-indicator['time'] < 3 and indicator['pane'] == self._pane_generation
-                and indicator['generation'] == self.generation and not self.state['loading']
-                and getattr(self.view, 'visible', True))
+            active = bool(active and eligible(indicator))
         result['target_indicator'] = 'active' if active else 'none'
         return result
 
