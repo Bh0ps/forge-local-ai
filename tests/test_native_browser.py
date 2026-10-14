@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from native_browser import NativeBrowser
+from native_browser import NativeBrowser, CLEAR_TARGET_SCRIPT
 
 
 class FakePage:
@@ -24,6 +24,7 @@ class FakePage:
         self.changed('navigation', url)
         self.changed('loaded')
     def evaluate(self, script):
+        if script == CLEAR_TARGET_SCRIPT:return True
         if 'const key=' in script:
             return {'url': self.url, 'title': 'Disposable fixture', 'text': 'Read-only fixture',
                     'targets': [{'selector': '[data-forge-native="test"]', 'signature': ['button'], 'label': 'Fixture button'}]}
@@ -94,7 +95,7 @@ def test_native_browser_expiry_navigation_and_cancel_reject_before_effect(tmp_pa
         browser.shutdown()
 
 
-def test_native_dom_preflight_precedes_focus_and_ambiguous_effect_is_unknown(tmp_path):
+def test_native_dom_preflight_precedes_effect_and_background_action_never_focuses(tmp_path):
     browser, views = browser_for(tmp_path)
     try:
         inspected = snapshot(browser)
@@ -108,7 +109,8 @@ def test_native_dom_preflight_precedes_focus_and_ambiguous_effect_is_unknown(tmp
         page.timeout_after_click = True
         with pytest.raises(TimeoutError, match='already have completed'):
             browser.execute('browser_click', args, {'run_id': 'first'})
-        assert page.effects == ['focus', 'click']
+        assert page.effects == ['click']
+        assert browser.execute('browser_click',args,{'run_id':'first'})['not_executed']
     finally:
         browser.shutdown()
 
@@ -161,22 +163,22 @@ def test_missing_page_and_invalid_url_reject_without_creating_window(tmp_path):
         browser.shutdown()
 
 
-def test_cancel_after_approved_focus_prevents_click_without_false_no_effect_claim(tmp_path):
+def test_cancel_after_dom_validation_prevents_click_without_activating_the_host(tmp_path):
     browser, views = browser_for(tmp_path)
     cancel = threading.Event()
     try:
         inspected = snapshot(browser)
         page = views[0]
         page.focus = False
-        show = page.show
-        def focus_then_cancel():
-            show()
-            cancel.set()
-        page.show = focus_then_cancel
-        with pytest.raises(RuntimeError, match='focused, then action cancelled'):
-            browser.execute('browser_click', {'snapshot_id': inspected['snapshot_id'],
-                'selector': inspected['targets'][0]['selector']}, {'run_id': 'first', 'cancel': cancel})
-        assert page.effects == ['focus']
+        evaluate=page.evaluate
+        def validate_then_cancel(script):
+            result=evaluate(script)
+            if '"operation": "validate"' in script:cancel.set()
+            return result
+        page.evaluate=validate_then_cancel
+        result=browser.execute('browser_click', {'snapshot_id': inspected['snapshot_id'],
+            'selector': inspected['targets'][0]['selector']}, {'run_id': 'first', 'cancel': cancel})
+        assert result['not_executed'] and page.effects==[]
     finally:
         browser.shutdown()
 

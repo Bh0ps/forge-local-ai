@@ -36,6 +36,7 @@ def preview_readiness_fixture():
     view.visible, view.bound, view.disposed = True, (250, 150, 700, 600), False
     view.panel_id = 'forge-preview-panel'
     view.container = SimpleNamespace(Visible=True)
+    view.changed = lambda *args: None
     view.ui = lambda operation: operation(owner)
     view._layout = lambda: snapshot
     browser = SimpleNamespace(view=view, status=lambda: {'visible': view.visible, 'loading': False})
@@ -123,7 +124,8 @@ def test_standalone_ready_does_not_relax_final_guard_or_retry_viewport(tmp_path)
     # The real Embedded preflight must reject a later move before importing WinForms
     # or setting a viewport; readiness is an observation, not an authorization.
     snapshot['rect']['height'] = 560
-    native = NativeBrowser(tmp_path, view_factory=lambda changed: view, session_check=lambda: True)
+    native = NativeBrowser(tmp_path, view_factory=lambda changed: view, session_check=lambda: True,
+                           panel_id='forge-preview-panel')
     native.view = view
     calls = []
     def execute(run, name, args, cancel):
@@ -248,8 +250,14 @@ def test_research_smoke_retains_native_refusal_and_unknown_outcome_evidence(tmp_
         'timeout': TimeoutError('Synthetic browser dispatch timeout'),
         'runtime': RuntimeError('Synthetic browser initialization failure')}
     class Page:
+        supports_pane_guard = True
         def ready(self): pass
-        def show(self): raise errors[failure]
+        def show(self, check=None):
+            if check: check()
+        def navigate(self, url, check=None):
+            if failure == 'guard': raise errors[failure]
+            if check: check()
+            raise errors[failure]
     browser = BrowserTools(tmp_path)
     native = NativeBrowser(tmp_path, view_factory=lambda changed: Page(), session_check=lambda: True)
     browser.native = native
@@ -267,6 +275,7 @@ def test_research_smoke_retains_native_refusal_and_unknown_outcome_evidence(tmp_
         'run': {'id': 'synthetic-smoke', 'project_id': None}, 'cancel': threading.Event()}
     exec(compile(ast.Module(body=[definition], type_ignores=[]), desktop.__file__, 'exec'), namespace)
     try:
+        native.dispatch('show')  # Only the current UI owns showing the research pane.
         with pytest.raises(ValueError):
             namespace['tool']('browser_navigate', {'url': 'http://127.0.0.1:1/'})
         assert result == {'tool_failure': expected, 'research_view_created': True}

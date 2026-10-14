@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+from copy import deepcopy
 import json
 import os
 from pathlib import Path
@@ -15,16 +16,22 @@ from computer_tools import session_available
 
 class BrowserGuard(ValueError):
     """A rejected preflight, before any browser side effect was sent."""
+    def __init__(self, message, reason=None):
+        super().__init__(message)
+        self.reason = reason
 
 
 class NativeBrowser:
     def __init__(self, home, ui_dispatch=None, view_factory=None, clock=time.monotonic, session_check=None,
-                 panel_id='forge-browser-panel', profile_name='native-browser-profile', navigation_guard=None, diagnostics=False):
+                 panel_id='forge-browser-panel', profile_name='native-browser-profile', navigation_guard=None, diagnostics=False,
+                 indicator_scope=None):
         self.home = Path(home)
         self.ui_dispatch = ui_dispatch
         self.view_factory = view_factory
         self.panel_id, self.profile_name = panel_id, profile_name
         self.navigation_guard, self.capture_diagnostics = navigation_guard, diagnostics
+        self.indicator_scope = indicator_scope
+        self._indicator = None
         self.clock = clock
         self.session_check = session_check or (lambda: bool(self.view_factory) or session_available())
         self.view = None
@@ -34,6 +41,8 @@ class NativeBrowser:
         self.cancelled = threading.Event()
         self.snapshot = None
         self.generation = 0
+        self._pane_generation = 0
+        self._pane_allowed = False
         self.closed = False
         self.state = dict(running=False, loading=False, url='about:blank', title='', error=None)
 
@@ -68,6 +77,61 @@ class NativeBrowser:
             raise BrowserGuard('Browser action cancelled.')
         if not self.session_check():
             raise BrowserGuard('Windows desktop session is unavailable. Unlock Windows before continuing browser work.')
+        if self.closed or self.cancelled.is_set() or (hasattr(cancel, 'is_set') and cancel.is_set()):
+            raise BrowserGuard('Browser action cancelled.')
+
+    def _revoke_pane(self):
+        with self.lock:
+            self._pane_generation += 1
+            self._pane_allowed = False
+            self.snapshot = None
+            self._indicator = None
+
+    def _clear_indicator(self):
+        with self.lock:
+            self._indicator = None
+            view = self.view
+        if view is not None and hasattr(view, 'clear_indicator'):
+            try: view.clear_indicator()
+            except Exception: pass  # Decoration cannot change action/replay outcomes.
+
+    def _pane_check(self, generation, context=None, *, require=True):
+        self._check(context)
+        if self.panel_id != 'forge-browser-panel':
+            return
+        with self.lock:
+            if generation != self._pane_generation:
+                raise BrowserGuard('The Browser pane changed. Open Browser and inspect again.', 'browser_owner_changed')
+            if require and not self._pane_allowed:
+                raise BrowserGuard('Open the Browser pane before continuing browser work.', 'browser_hidden')
+
+    def _view_call(self, name, *args, check=None, effect=False):
+        # Real hosts recheck on their UI thread after marshaling. Legacy injected
+        # test views retain their call shape; no native lock spans that wait.
+        if check: check()
+        method = getattr(self.view, name)
+        sent = False
+        def admission():
+            nonlocal sent
+            if check: check()
+            sent = True
+        try:
+            if check and getattr(self.view, 'supports_pane_guard', False) is True:
+                result = method(*args, check=admission if effect else check)
+            else:
+                sent = True
+                result = method(*args)
+        except BrowserGuard as exc:
+            if effect and sent:
+                raise RuntimeError('Browser action outcome is unknown. Inspect before retrying.') from exc
+            raise
+        try:
+            if check: check()
+        except BrowserGuard as exc:
+            if effect and sent and not (isinstance(result, dict) and result.get('not_executed') is True):
+                raise RuntimeError('Browser action outcome is unknown. Inspect before retrying.') from exc
+            raise
+        return result
 
     def _changed(self, kind, value=None):
         with self.lock:
@@ -75,6 +139,7 @@ class NativeBrowser:
                 self.generation += 1
                 self.snapshot = None
                 self.state.update(url=str(value), loading=True, error=None)
+                self._indicator = None
             elif kind == 'loaded':
                 self.state.update(loading=False, error=value)
             elif kind == 'title':
@@ -82,16 +147,33 @@ class NativeBrowser:
             elif kind == 'closed':
                 self.generation += 1
                 self.snapshot = None
+                self._indicator = None
                 self.state.update(running=False, loading=False)
                 self.view = None
+            if kind in ('closed', 'hidden') and self.panel_id == 'forge-browser-panel':
+                self._pane_generation += 1
+                self._pane_allowed = False
+                self.snapshot = None
 
-    def status(self):
+    def status(self, scope=None):
         with self.lock:
             available = not self.closed and bool(self.view_factory or os.name == 'nt' and self.ui_dispatch)
-            return dict(available=available, engine='WebView2', **self.state,
+            indicator = self._indicator
+            result = dict(available=available, engine='WebView2', **self.state,
                 embedded=True, visible=bool(getattr(self.view, 'visible', False)),
                 message=self.state['error'] or ('Ready — uses the Windows web runtime' if available else 'Open Forge desktop to use the built-in browser'),
                 capabilities=['navigate', 'inspect', 'click', 'type', 'screenshot', 'back', 'forward', 'reload'])
+        active = False
+        if indicator and self.indicator_scope and self.panel_id == 'forge-browser-panel':
+            try: active = self.indicator_scope(indicator['run'], scope or {}) is True
+            except Exception: active = False
+        with self.lock:
+            active = bool(active and indicator is self._indicator and self._pane_allowed and not self.cancelled.is_set()
+                and self.clock()-indicator['time'] < 3 and indicator['pane'] == self._pane_generation
+                and indicator['generation'] == self.generation and not self.state['loading']
+                and getattr(self.view, 'visible', True))
+        result['target_indicator'] = 'active' if active else 'none'
+        return result
 
     def _start(self):
         if self.view is not None:
@@ -124,33 +206,52 @@ class NativeBrowser:
         if not isinstance(data, dict):
             raise ValueError('Expected browser controls object.')
         if action == 'status':
-            return self.status()
+            return self.status(data)
         if action not in ('open', 'show', 'resize', 'hide', 'navigate', 'back', 'forward', 'reload', 'close'):
             raise ValueError('Unknown native browser control.')
-        return self._submit(self._manual, action, data).result(timeout=45)
+        if action in ('hide', 'close') and self.panel_id == 'forge-browser-panel':
+            self._revoke_pane()
+        with self.lock:
+            generation = self._pane_generation
+        return self._submit(self._manual, action, deepcopy(data), generation).result(timeout=45)
 
-    def _manual(self, action, data):
+    def _manual(self, action, data, generation):
         if action in ('close', 'hide'):
+            self._clear_indicator()
             if self.view:
                 self.view.close()
             return {'ok': True, **self.status()}
         # A new direct user command may continue after Stop; old agent requests
         # retain their own cancellation event and cannot reuse a cleared snapshot.
+        if self.panel_id == 'forge-browser-panel':
+            with self.lock:
+                if generation != self._pane_generation:
+                    raise BrowserGuard('The Browser pane changed. Open Browser and inspect again.', 'browser_owner_changed')
         self.cancelled.clear()
         self._check()
         self._start()
+        self._clear_indicator()
+        guard = lambda: self._pane_check(generation, require=False)
+        guard()
         if action in ('show', 'resize') and data.get('rect') is not None:
             if not hasattr(self.view, 'bind'): raise BrowserGuard('This browser does not support an embedded pane.')
-            self.view.bind(data)
+            self._view_call('bind', data, check=guard)
         elif action != 'open' or not getattr(self.view, 'embedded', False):
-            self.view.show()
+            self._view_call('show', check=guard)
+        with self.lock:
+            if self.panel_id == 'forge-browser-panel' and generation == self._pane_generation:
+                if action in ('show', 'resize') or not getattr(self.view, 'embedded', False):
+                    if not getattr(self.view, 'visible', True):
+                        raise BrowserGuard('Open the Browser pane in the visible Forge workspace.', 'browser_hidden')
+                    self._pane_allowed = True
+        guard()
         if action in ('open', 'navigate') and (action == 'navigate' or data.get('url')):
             url = browser_url(data.get('url', 'about:blank'))
             if self.navigation_guard and not self.navigation_guard(url):
                 raise BrowserGuard('Preview navigation must stay on its owned loopback origin.')
-            self.view.navigate(url)
+            self._view_call('navigate', url, check=guard)
         elif action in ('back', 'forward', 'reload'):
-            self.view.history(action)
+            self._view_call('history', action, check=guard)
         return {'ok': True, **self.status()}
 
     def describe_target(self, args=None, context=None):
@@ -165,13 +266,23 @@ class NativeBrowser:
             return {'ok': False, 'error': str(exc), 'not_executed': True}
 
     def execute(self, name, args, context=None):
+        context = dict(context or {})
         try:
-            return self._submit(self._perform, name, dict(args), context).result(timeout=45)
+            if name == 'browser_close' and self.panel_id == 'forge-browser-panel':
+                self._check(context)
+                self._revoke_pane()
+            with self.lock:
+                generation = self._pane_generation
+                self._indicator = None
+            return self._submit(self._perform, name, deepcopy(args), context, generation).result(timeout=45)
         except BrowserGuard as exc:
-            return {'ok': False, 'error': str(exc), 'not_executed': True}
+            return {'ok': False, 'error': str(exc), 'not_executed': True,
+                    **({'reason': exc.reason} if exc.reason in ('browser_hidden', 'browser_owner_changed') else {})}
 
-    def _snapshot(self, args, context, focus=True):
+    def _snapshot(self, args, context, focus=True, pane=None):
         self._check(context)
+        if self.panel_id == 'forge-browser-panel':
+            self._pane_check(self._pane_generation if pane is None else pane, context)
         with self.lock:
             snapshot = self.snapshot
             if not snapshot or args.get('snapshot_id') != snapshot['id'] or snapshot['run'] != self._run(context):
@@ -180,16 +291,27 @@ class NativeBrowser:
                 raise BrowserGuard('Browser page changed or snapshot expired. Inspect again.')
             if self.state['loading'] or snapshot['url'] != self.state['url'] or not self.view:
                 raise BrowserGuard('Browser page is navigating or closed. Inspect again.')
+            if self.panel_id == 'forge-browser-panel' and snapshot.get('pane') != self._pane_generation:
+                raise BrowserGuard('The Browser pane changed. Inspect again.', 'browser_owner_changed')
         if focus and not self.view.focused():
             raise BrowserGuard('Forge browser is not focused. Open its window, then inspect again.')
         return snapshot
 
-    def _perform(self, name, data, context):
+    def _perform(self, name, data, context, pane):
         self._check(context)
         if name == 'browser_close':
+            guard = lambda: self._pane_check(pane, context, require=False)
+            guard()
+            self._clear_indicator()
             if self.view:
-                self.view.close()
+                if getattr(self.view, 'supports_pane_guard', False) is True:
+                    self.view.close(check=guard)
+                else:
+                    self.view.close()
             return {'ok': True}
+        guard = lambda: self._pane_check(pane, context)
+        guard()
+        self._clear_indicator()
         if name == 'browser_navigate':
             try:
                 url = browser_url(data.get('url', ''))
@@ -197,14 +319,16 @@ class NativeBrowser:
                 raise BrowserGuard(str(exc)) from None
             if self.navigation_guard and not self.navigation_guard(url):
                 raise BrowserGuard('Preview navigation must stay on its owned loopback origin.')
-            self._start()
+            if self.panel_id != 'forge-browser-panel': self._start()
+            elif self.view is None:
+                raise BrowserGuard('Open the Browser pane before navigating.', 'browser_hidden')
             try:
                 self._check(context)
             except BrowserGuard as exc:
                 # Starting an owned window is already a completed host action.
                 raise RuntimeError('Browser window opened; navigation was cancelled before dispatch.') from exc
-            self.view.show()
-            self.view.navigate(url)
+            if self.panel_id != 'forge-browser-panel': self.view.show()
+            self._view_call('navigate', url, check=guard, effect=True)
             return {'ok': True, 'url': url, 'loading': True, 'next_action': 'Use browser_inspect after navigation finishes.'}
         if name not in ('browser_inspect', 'browser_screenshot', 'browser_click', 'browser_type',
                         'browser_select', 'browser_key', 'browser_scroll', 'browser_wait'):
@@ -212,16 +336,20 @@ class NativeBrowser:
         if self.view is None:
             raise BrowserGuard('Open Forge Browser or use browser_navigate before inspecting this page.')
         if name == 'browser_inspect':
-            return self._inspect(context)
+            return self._inspect(context, pane)
         if name == 'browser_screenshot':
             if self.panel_id == 'forge-preview-panel' and getattr(self.view, 'embedded', False) and not getattr(self.view, 'visible', False):
                 raise BrowserGuard('Open the Builder preview pane before capturing visual evidence.')
             if hasattr(self.view, 'preflight'):
-                self.view.preflight()
+                self._view_call('preflight', check=guard)
             with self.lock:
                 generation = self.generation
             self._check(context)
-            raw = self.view.screenshot()
+            if self.panel_id == 'forge-browser-panel':
+                cleared = self._view_call('evaluate', CLEAR_TARGET_SCRIPT, check=guard)
+                if cleared is not True:
+                    raise BrowserGuard('The browser target indicator could not be cleared before capture.')
+            raw = self._view_call('screenshot', check=guard)
             with self.lock:
                 if generation != self.generation:
                     raise BrowserGuard('Browser navigated while capturing. Inspect again.')
@@ -231,17 +359,17 @@ class NativeBrowser:
             artifact.write_bytes(raw)
             return {'ok': True, 'artifact': str(artifact), 'mimeType': 'image/png', 'url': self.state['url'],
                 'content': [{'type': 'image', 'artifact': str(artifact), 'mimeType': 'image/png'}]}
-        snapshot = self._snapshot(data, context, focus=False)
-        if hasattr(self.view, 'preflight'): self.view.preflight()
+        snapshot = self._snapshot(data, context, focus=False, pane=pane)
+        if hasattr(self.view, 'preflight'): self._view_call('preflight', check=guard)
         if name == 'browser_wait':
             text, timeout = data.get('text'), data.get('timeout_ms', 5000)
             if not isinstance(text, str) or not 1 <= len(text) <= 2000 or type(timeout) is not int or not 100 <= timeout <= 15000:
                 raise BrowserGuard('Wait for text up to 2000 characters with a 100–15000 ms timeout.')
             deadline = time.monotonic() + timeout / 1000
             while time.monotonic() < deadline:
-                self._snapshot(data, context, focus=False)
+                self._snapshot(data, context, focus=False, pane=pane)
                 payload = json.dumps({'url': snapshot['url'], 'text': text})
-                result = self.view.evaluate("(() => {const d=" + payload + ";return {same_url:location.href===d.url,matched:(document.body?.innerText||'').includes(d.text)};})()")
+                result = self._view_call('evaluate', "(() => {const d=" + payload + ";return {same_url:location.href===d.url,matched:(document.body?.innerText||'').includes(d.text)};})()", check=guard)
                 if not result.get('same_url'):
                     raise BrowserGuard('Preview navigated while waiting. Inspect again.')
                 if result.get('matched'):
@@ -254,9 +382,9 @@ class NativeBrowser:
                 raise BrowserGuard('Scroll by integer offsets of at most 1500 CSS pixels.')
             payload = json.dumps({'url': snapshot['url'], 'x': x, 'y': y})
             self._check(context)
-            result = self.view.evaluate("(() => {const d=" + payload + ";if(location.href!==d.url)return {ok:false,not_executed:true,error:'Preview navigated.'};window.scrollBy(d.x,d.y);return {ok:true,inspect_again:true};})()")
             with self.lock:
                 self.snapshot = None
+            result = self._view_call('evaluate', "(() => {const d=" + payload + ";if(location.href!==d.url)return {ok:false,not_executed:true,error:'Preview navigated.'};window.scrollBy(d.x,d.y);return {ok:true,inspect_again:true};})()", check=guard, effect=True)
             return result
         selector = data.get('selector')
         if selector not in snapshot['signatures']:
@@ -273,27 +401,35 @@ class NativeBrowser:
         # Validation and DOM action share one script: no host round-trip race.
         payload = json.dumps(dict(selector=selector, signature=expected, operation=name, text=text,
                                   value=data.get('value'), key=data.get('key'),
+                                  preserve_focus=self.panel_id == 'forge-browser-panel',
+                                  indicate=self.panel_id == 'forge-browser-panel',
                                   url=snapshot['url']), ensure_ascii=True)
         check = json.dumps(dict(selector=selector, signature=expected, operation='validate', action=name, key=data.get('key'), text=None,
                                 url=snapshot['url']), ensure_ascii=True)
-        preflight = self.view.evaluate(ACTION_SCRIPT.replace('__FORGE_DATA__', check))
+        preflight = self._view_call('evaluate', ACTION_SCRIPT.replace('__FORGE_DATA__', check), check=guard)
         if preflight.get('not_executed'):
             return preflight
-        self._snapshot(data, context, focus=False)
-        focused_effect = not self.view.focused()
+        self._snapshot(data, context, focus=False, pane=pane)
+        focused_effect = self.panel_id != 'forge-browser-panel' and not self.view.focused()
         if focused_effect:
             self.view.show()
-        if not self.view.focused():
+        if self.panel_id != 'forge-browser-panel' and not self.view.focused():
             raise RuntimeError('Owned browser focus changed after focusing. Inspect before retrying.')
         try:
             self._check(context)
-            if hasattr(self.view, 'preflight'): self.view.preflight()
+            if hasattr(self.view, 'preflight'): self._view_call('preflight', check=guard)
         except BrowserGuard as exc:
             if focused_effect:
                 raise RuntimeError('Browser focused, then action cancelled before dispatch.') from exc
             raise
-        result = self.view.evaluate(ACTION_SCRIPT.replace('__FORGE_DATA__', payload))
+        guard()
+        with self.lock:
+            self.snapshot = None
+            if self.panel_id == 'forge-browser-panel' and self._pane_allowed and self._pane_generation == pane:
+                self._indicator = dict(run=self._run(context), pane=pane, generation=self.generation, time=self.clock())
+        result = self._view_call('evaluate', ACTION_SCRIPT.replace('__FORGE_DATA__', payload), check=guard, effect=True)
         if result.get('not_executed'):
+            self._clear_indicator()
             if focused_effect:
                 result = dict(result)
                 result.pop('not_executed', None)
@@ -305,22 +441,26 @@ class NativeBrowser:
             self.snapshot = None
         return {'ok': True, 'inspect_again': True, 'backend': 'native'}
 
-    def _inspect(self, context):
+    def _inspect(self, context, pane):
         self._check(context)
+        self._pane_check(pane, context)
         with self.lock:
             if self.state['loading']:
                 raise BrowserGuard('Browser page is still loading. Inspect again when navigation completes.')
             generation = self.generation
         key = uuid4().hex
-        result = self.view.evaluate(INSPECT_SCRIPT.replace('__FORGE_KEY__', json.dumps(key)))
+        result = self._view_call('evaluate', INSPECT_SCRIPT.replace('__FORGE_KEY__', json.dumps(key)), check=lambda: self._pane_check(pane, context))
         if not isinstance(result, dict) or not result.get('url'):
             raise BrowserGuard('Browser page could not be inspected.')
         self._check(context)
+        self._pane_check(pane, context)
         with self.lock:
             if generation != self.generation or self.state['loading'] or result['url'] != self.state['url']:
                 raise BrowserGuard('Browser navigated while inspecting. Inspect again.')
+            if self.panel_id == 'forge-browser-panel' and (pane != self._pane_generation or not self._pane_allowed):
+                raise BrowserGuard('The Browser pane changed. Inspect again.', 'browser_owner_changed')
             signatures = {target['selector']: target.pop('signature') for target in result['targets']}
-            self.snapshot = dict(id=key, run=self._run(context), time=self.clock(), generation=generation,
+            self.snapshot = dict(id=key, run=self._run(context), time=self.clock(), generation=generation, pane=pane,
                                  url=result['url'], signatures=signatures)
         return dict(ok=True, snapshot_id=key, backend='native', **result)
 
@@ -353,6 +493,8 @@ class NativeBrowser:
 
     def stop(self):
         self.cancelled.set()
+        if self.panel_id == 'forge-browser-panel': self._revoke_pane()
+        self._clear_indicator()
         with self.lock:
             self.snapshot = None
         if self.view:
@@ -365,6 +507,8 @@ class NativeBrowser:
         if self.closed:
             return
         self.cancelled.set()
+        if self.panel_id == 'forge-browser-panel': self._revoke_pane()
+        self._clear_indicator()
         if self.view:
             (getattr(self.view, 'dispose', None) or self.view.close)()
         self.closed = True
@@ -383,9 +527,20 @@ INSPECT_SCRIPT = r'''(() => {
  return {url:location.href,title:document.title.slice(0,500),text:(document.body?.innerText||'').slice(0,24000),targets};
 })()'''
 
+CLEAR_TARGET_SCRIPT = r'''(() => {document.querySelectorAll('[data-forge-ai-target]').forEach(el=>el.remove());return true;})()'''
+
 ACTION_SCRIPT = r'''(() => {
  const d=__FORGE_DATA__;
  const fail=error=>({ok:false,error,not_executed:true});
+ const mark=()=>{if(d.indicate!==true)return;try{
+  const left=Math.max(0,r.left),top=Math.max(0,r.top),right=Math.min(innerWidth,r.right),bottom=Math.min(innerHeight,r.bottom);
+  if(![left,top,right,bottom].every(Number.isFinite)||right<=left||bottom<=top)return;
+  document.querySelectorAll('[data-forge-ai-target]').forEach(node=>node.remove());
+  const node=document.createElement('div');node.setAttribute('data-forge-ai-target','');node.setAttribute('aria-hidden','true');node.inert=true;
+  node.style.cssText='position:fixed!important;pointer-events:none!important;z-index:2147483647!important;border:2px solid #bc683f!important;border-radius:5px!important;box-sizing:border-box!important;background:transparent!important;';
+  for(const [name,value] of [['left',left],['top',top],['width',right-left],['height',bottom-top]])node.style.setProperty(name,value+'px','important');
+  document.documentElement.append(node);setTimeout(()=>node.remove(),3000);
+ }catch{}};
  if(location.href!==d.url)return fail('Browser navigated. Inspect again.');
  const matches=document.querySelectorAll(d.selector);if(matches.length!==1)return fail('Browser target changed. Inspect again.');
  const el=matches[0],r=el.getBoundingClientRect();
@@ -406,10 +561,10 @@ ACTION_SCRIPT = r'''(() => {
   if(el.tagName!=='SELECT'||el.options.length>200)return fail('Select a dropdown with at most 200 options from the snapshot.');
   const option=[...el.options].find(option=>option.value===d.value&&!option.disabled);if(!option)return fail('Option changed or is disabled. Inspect again.');
   const setter=Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value')?.set;if(!setter)return fail('Dropdown cannot be edited.');
-  setter.call(el,d.value);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return {ok:true};
+  mark();setter.call(el,d.value);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return {ok:true};
  }
  if(d.operation==='browser_key'){
-  el.focus();const proceed=el.dispatchEvent(new KeyboardEvent('keydown',{key:d.key,bubbles:true,cancelable:true}));
+  mark();if(d.preserve_focus!==true)el.focus();const proceed=el.dispatchEvent(new KeyboardEvent('keydown',{key:d.key,bubbles:true,cancelable:true}));
    if(proceed&&d.key==='Enter'){
     if(button||el.tagName==='A')el.click();
     else if(el.tagName==='TEXTAREA'){
@@ -430,10 +585,10 @@ ACTION_SCRIPT = r'''(() => {
  }
  if(d.operation==='browser_type'&&!['INPUT','TEXTAREA'].includes(el.tagName))return fail('Select an editable text field.');
  if(d.operation==='browser_type'&&!['text','search','email','url','tel','number',''].includes(el.type||''))return fail('Unsupported input type.');
- if(d.operation==='browser_click'){el.click();return {ok:true};}
+ if(d.operation==='browser_click'){mark();el.click();return {ok:true};}
  const prototype=el.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;
  const setter=Object.getOwnPropertyDescriptor(prototype,'value')?.set;if(!setter)return fail('This field cannot be edited.');
- el.focus();setter.call(el,d.text);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return {ok:true};
+ mark();if(d.preserve_focus!==true)el.focus();setter.call(el,d.text);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return {ok:true};
 })()'''
 
 
@@ -450,6 +605,7 @@ PREVIEW_DIAGNOSTICS_SCRIPT = r'''(() => {
 
 class WebView2Page:
     """Raw control: no pywebview JS API, host objects, downloads or extension profile."""
+    supports_pane_guard = True
     def __init__(self, owner, home, ui_dispatch, changed):
         from webview.platforms.edgechromium import WebView2, CoreWebView2CreationProperties
         from System.Drawing import Color, Size, Font
@@ -566,6 +722,8 @@ class WebView2Page:
             guard = getattr(self, 'navigation_guard', None)
             if guard and not guard(url):
                 raise ValueError('Preview navigation must stay on its owned loopback origin.')
+            try: self.clear_indicator()
+            except Exception: pass
             self.address.Text = url
             self.changed('navigation', url)
         except ValueError:
@@ -584,6 +742,8 @@ class WebView2Page:
             return
         # SPA/history/fragment changes need the same invalidation as full loads.
         source = str(self.control.CoreWebView2.Source)
+        try: self.clear_indicator()
+        except Exception: pass
         self.address.Text = source
         self.changed('navigation', source)
         if not args.IsNewDocument:
@@ -618,23 +778,28 @@ class WebView2Page:
         if self.error:
             raise self.error
 
-    def show(self):
-        self.ui(lambda _: (self.form.Show(), self.form.Activate()))
+    def show(self, check=None):
+        def reveal(_):
+            if check: check()
+            self.form.Show(); self.form.Activate()
+        self.ui(reveal)
 
     def focused(self):
         return self.ui(lambda _: bool(self.form.ContainsFocus and self.form.Visible))
 
-    def navigate(self, url):
+    def navigate(self, url, check=None):
         # Navigate schedules WebView2 events asynchronously. Mark loading before
         # returning, and reject old completions while the next Starting is pending.
         def request(_):
+            if check: check()
             self._navigation_id = None
             self.changed('navigation', url)
             self.control.CoreWebView2.Navigate(url)
         self.ui(request)
 
-    def history(self, action):
+    def history(self, action, check=None):
         def change(_):
+            if check: check()
             core = self.control.CoreWebView2
             if action == 'back' and core.CanGoBack:
                 operation = core.GoBack
@@ -649,7 +814,7 @@ class WebView2Page:
             operation()
         self.ui(change)
 
-    def evaluate(self, script):
+    def evaluate(self, script, check=None):
         from System import Action, String
         from System.Threading.Tasks import Task
         done, result = threading.Event(), {}
@@ -660,7 +825,10 @@ class WebView2Page:
                 result['error'] = exc
             finally:
                 done.set()
-        self.ui(lambda _: self.control.CoreWebView2.ExecuteScriptAsync(script).ContinueWith(Action[Task[String]](complete)))
+        def execute(_):
+            if check: check()
+            self.control.CoreWebView2.ExecuteScriptAsync(script).ContinueWith(Action[Task[String]](complete))
+        self.ui(execute)
         if not done.wait(12):
             raise TimeoutError('Browser script timed out; inspect the action outcome before retrying.')
         if 'error' in result:
@@ -669,7 +837,7 @@ class WebView2Page:
             raise RuntimeError('Browser script did not return a result; inspect the page before retrying.')
         return result['value']
 
-    def screenshot(self):
+    def screenshot(self, check=None):
         from Microsoft.Web.WebView2.Core import CoreWebView2CapturePreviewImageFormat
         from System import Action
         from System.IO import MemoryStream
@@ -685,7 +853,13 @@ class WebView2Page:
             finally:
                 stream.Dispose()
                 done.set()
-        self.ui(lambda _: self.control.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream).ContinueWith(Action[Task](complete)))
+        def capture(_):
+            if check: check()
+            self.control.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, stream).ContinueWith(Action[Task](complete))
+        try:self.ui(capture)
+        except BaseException:
+            stream.Dispose()
+            raise
         if not done.wait(12):
             raise TimeoutError('Browser screenshot timed out.')
         if 'error' in result:
@@ -695,5 +869,14 @@ class WebView2Page:
     def stop(self):
         self.ui(lambda _: self.control.CoreWebView2.Stop())
 
-    def close(self):
-        self.ui(lambda _: self.form.Close())
+    def clear_indicator(self):
+        def clear(_):
+            try:self.control.CoreWebView2.ExecuteScriptAsync(CLEAR_TARGET_SCRIPT)
+            except Exception:pass
+        self.ui(clear)
+
+    def close(self, check=None):
+        def close(_):
+            if check: check()
+            self.form.Close()
+        self.ui(close)

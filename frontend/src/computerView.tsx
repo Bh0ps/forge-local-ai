@@ -9,6 +9,7 @@ export interface ComputerViewState {
   chat_id: string; scope_run_id: string | null; mode: 'shared_desktop'; run_id: string | null;
   invocation_id: string | null; tool: string | null; status: string; action_count: number;
   action_count_truncated: boolean; evidence_mode: 'none' | 'accessibility_only' | 'image';
+  retired_action_count?: number; retired_action_count_truncated?: boolean;
   snapshot: {run_id: string; invocation_id: string; data_url: string; mime_type: string; width: number; height: number; age_seconds: number | null} | null;
   failure: 'evidence_unavailable' | 'inspection_refused' | null;
 }
@@ -44,11 +45,12 @@ function SnapshotDialog({snapshot, close, owns}: {snapshot:Snapshot; close:()=>v
   </dialog>;
 }
 
-export function StopComputerActivity() {
+export function StopComputerActivity({onStop}: {onStop?: () => void} = {}) {
   const [state, setState] = useState<'idle' | 'pending' | 'requested' | 'failed'>('idle');
   const owner = useRef(true); useEffect(() => {owner.current = true; return () => {owner.current = false;};}, []);
   async function stop() {
     if (state === 'pending') return;
+    onStop?.();
     setState('pending');
     try { await api('emergency_stop'); if (owner.current) setState('requested'); }
     catch { if (owner.current) setState('failed'); }
@@ -62,6 +64,10 @@ export function ComputerView({chatId, runId, visible: hostVisible = true, onActi
   const transport = window.pywebview?.api.call || window.fetch;
   const stateTransport = useRef(transport);
   const visible = state && stateTransport.current === transport && chatId && valid(state, chatId, runId) ? state : null;
+  const retainedCount = typeof visible?.retired_action_count === 'number' && Number.isInteger(visible.retired_action_count)
+    && typeof visible.retired_action_count_truncated === 'boolean'
+    && visible.retired_action_count > 0 && visible.retired_action_count <= 2048 && visible.retired_action_count <= visible.action_count
+    ? visible.retired_action_count : 0;
   const imageOwner = useRef({chatId, runId, transport, snapshot:visible?.snapshot, visible:hostVisible});
   imageOwner.current = {chatId, runId, transport, snapshot:visible?.snapshot, visible:hostVisible};
   const ownsZoom = (captured:NonNullable<typeof zoom>) => {
@@ -103,9 +109,9 @@ export function ComputerView({chatId, runId, visible: hostVisible = true, onActi
   return <section className="computer-view" aria-label="Desktop activity"><header><div><strong>Shared desktop</strong><p>Actions can use your Windows pointer and activate apps.</p></div><IconButton label="Refresh desktop activity" onClick={() => setRefresh(value => value + 1)}><RotateCw size={14}/></IconButton></header>
     {failed ? <p className="computer-view-error" role="alert">Desktop activity is unavailable. Refresh to try again.</p> : !visible ? <p className="muted">Loading saved activity…</p> : <>
       <p className="computer-state" role="status">{statusLabels[visible.status] || 'Needs attention'}</p>
-      {visible.snapshot && /^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(visible.snapshot.data_url) ? <figure><button type="button" className="computer-snapshot-open" aria-label="Enlarge earlier snapshot" disabled={disabled} onClick={enlarge}><img src={visible.snapshot.data_url} alt="Earlier shared-desktop snapshot"/></button><figcaption>Earlier snapshot{age(visible.snapshot.age_seconds)}<span>May include other visible windows.</span></figcaption></figure> : <div className="computer-empty"><Monitor size={26}/><p>{visible.evidence_mode === 'accessibility_only' ? 'Accessibility evidence recorded. No image is available.' : visible.failure ? 'Saved snapshot is unavailable.' : 'No desktop snapshot yet.'}</p></div>}
+      {visible.snapshot && /^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(visible.snapshot.data_url) ? <figure><button type="button" className="computer-snapshot-open" aria-label="Enlarge earlier snapshot" disabled={disabled} onClick={enlarge}><img src={visible.snapshot.data_url} alt="Earlier shared-desktop snapshot"/></button><figcaption>Earlier snapshot{age(visible.snapshot.age_seconds)}<span>May include other visible windows.</span></figcaption></figure> : <div className="computer-empty"><Monitor size={26}/><p>{visible.evidence_mode === 'accessibility_only' ? 'Accessibility evidence recorded. No image is available.' : visible.failure ? 'Saved snapshot is unavailable.' : retainedCount > 0 ? 'Earlier helper activity retained. No snapshot is available.' : 'No desktop snapshot yet.'}</p></div>}
       <p className="computer-evidence-note">Opening this view does not capture your screen or control an app.</p>
-      {visible.action_count > 0 && <div className="computer-last-step"><span>{toolLabels[visible.tool || ''] || 'Desktop step recorded'}<small>{visible.action_count_truncated ? 'At least ' : ''}{visible.action_count} recorded {visible.action_count === 1 ? 'step' : 'steps'}</small></span><button className="text-button" type="button" onClick={onActivity}><Activity size={13}/>Activity</button></div>}
+      {visible.action_count > 0 && <div className="computer-last-step"><span>{toolLabels[visible.tool || ''] || 'Desktop step recorded'}<small>{visible.action_count_truncated ? 'At least ' : ''}{visible.action_count} recorded {visible.action_count === 1 ? 'step' : 'steps'}</small>{retainedCount > 0 && <small>Earlier helper activity · {visible.retired_action_count_truncated === true ? 'at least ' : ''}{retainedCount} {retainedCount === 1 ? 'step' : 'steps'}</small>}</span><button className="text-button" type="button" onClick={onActivity}><Activity size={13}/>Activity</button></div>}
     </>}{currentZoom && <SnapshotDialog snapshot={currentZoom.snapshot} close={() => setZoom(null)} owns={() => ownsZoom(currentZoom)}/>}
   </section>;
 }

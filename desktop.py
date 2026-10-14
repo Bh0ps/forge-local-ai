@@ -352,7 +352,9 @@ class Bridge:
         integrations = getattr(self._service, 'integrations', None)
         if integrations and not getattr(integrations.browser, 'native', None):
             from native_browser import NativeBrowser
-            integrations.browser.native = NativeBrowser(home, ui_dispatch=self._native)
+            from browser_tools import BrowserTools
+            integrations.browser.native = NativeBrowser(home, ui_dispatch=self._native,
+                indicator_scope=lambda owner, scope: BrowserTools.native_indicator_scope(self._service.store, owner, scope))
         if hasattr(self._service, 'get_builder'):
             self._service.get_builder().previews.attach_browser(self._native)
         if self._lifecycle is None:
@@ -1331,6 +1333,11 @@ def main():
                                     result['research_view_created'] = getattr(browser.native, 'view', None) is not None
                                     raise ValueError(outcome.get('error', 'Native browser fixture failed'))
                                 return outcome
+                            # An agent may not reopen a hidden research pane.
+                            # This explicit smoke UI Show owns the pane first.
+                            result['smoke_phase'] = 'research-start'
+                            _smoke_checkpoint(result['smoke_phase'])
+                            browser.native.dispatch('show')
                             result['smoke_phase'] = 'research-navigate'
                             _smoke_checkpoint(result['smoke_phase'])
                             tool('browser_navigate', {'url': url})

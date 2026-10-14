@@ -7,7 +7,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from native_browser import BrowserGuard, WebView2Page
+from native_browser import BrowserGuard, WebView2Page, CLEAR_TARGET_SCRIPT
 
 PANEL_ID = 'forge-browser-panel'
 
@@ -112,13 +112,16 @@ class EmbeddedWebView2Page(WebView2Page):
            viewport:{width:innerWidth,height:innerHeight},rect:{x:r.x,y:r.y,width:r.width,height:r.height}};
         })()'''.replace('__PANEL_ID__', json.dumps(self.panel_id)))
 
-    def bind(self, request=None):
+    def bind(self, request=None, check=None):
         snapshot = self._layout()
         def position(owner):
             from System.Drawing import Rectangle
             main = owner.webview
             client = (main.Left, main.Top, main.ClientSize.Width, main.ClientSize.Height)
             bounds = validate_bounds(request or {'panel_id':self.panel_id}, snapshot, client, self.panel_id)
+            if check: check()
+            if not owner.Visible:
+                raise BrowserGuard('Open the Browser panel in the visible Forge workspace.')
             self.container.Bounds = Rectangle(*bounds)
             self.container.BringToFront()
             self.container.Visible = bool(owner.Visible)
@@ -129,18 +132,20 @@ class EmbeddedWebView2Page(WebView2Page):
             self.hide()
             raise
 
-    def preflight(self):
+    def preflight(self, check=None):
         if self.disposed: raise BrowserGuard('Browser view has been disposed.')
+        if check: check()
         if not self.visible: return
         snapshot = self._layout()
-        def check(owner):
+        def validate(owner):
             main = owner.webview
             bounds = validate_bounds({'panel_id':self.panel_id}, snapshot,
                 (main.Left, main.Top, main.ClientSize.Width, main.ClientSize.Height), self.panel_id)
             if not owner.Visible or bounds != self.bound:
                 self._hide_ui()
                 raise BrowserGuard('Browser panel changed. Inspect again after reopening it.')
-        try: self.ui(check)
+            if check: check()
+        try: self.ui(validate)
         except BrowserGuard:
             self.hide()
             raise
@@ -157,17 +162,24 @@ class EmbeddedWebView2Page(WebView2Page):
         except (BrowserGuard, TypeError):
             return False
 
-    def show(self, activate=True):
+    def show(self, activate=True, check=None):
+        if check: check()
         if not self._contained_layout():
             event = 'forge:preview-open' if self.panel_id == 'forge-preview-panel' else 'forge:browser-open'
+            if check: check()
             self._main_evaluate('window.dispatchEvent(new CustomEvent('+json.dumps(event)+'));true')
             deadline = time.monotonic()+3
             while time.monotonic()<deadline:
+                if check: check()
                 if self._contained_layout(): break
                 time.sleep(.05)
-        self.bind()
+        if check:self.bind(check=check)
+        else:self.bind()
         if activate:
-            self.ui(lambda owner: (owner.Show(), owner.Activate(), self.control.Focus()))
+            def reveal(owner):
+                if check: check()
+                owner.Show(); owner.Activate(); self.control.Focus()
+            self.ui(reveal)
 
     def focused(self):
         return self.ui(lambda owner: bool(self.visible and owner.Visible and self.control.ContainsFocus))
@@ -193,12 +205,18 @@ class EmbeddedWebView2Page(WebView2Page):
         self.container.Visible = False
         self.visible = False
         self.bound = None
+        try:self.control.CoreWebView2.ExecuteScriptAsync(CLEAR_TARGET_SCRIPT)
+        except Exception:pass
+        self.changed('hidden')
 
-    def hide(self):
-        if not self.disposed: self.ui(lambda owner: self._hide_ui())
+    def hide(self, check=None):
+        def hide(owner):
+            if check: check()
+            self._hide_ui()
+        if not self.disposed: self.ui(hide)
 
-    def close(self):
-        self.hide()  # Tab/HUD transitions preserve document and browser history.
+    def close(self, check=None):
+        self.hide(check=check)  # Tab/HUD transitions preserve document and browser history.
 
     def dispose(self):
         if self.disposed: return

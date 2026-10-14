@@ -92,6 +92,25 @@ class BrowserTools:
             raise RuntimeError('Open Forge desktop to use its built-in browser.')
         return self.native.dispatch(action, data)
 
+    @staticmethod
+    def native_indicator_scope(store, owner_run, scope):
+        """Read only exact run ancestry; publish neither IDs nor content."""
+        valid=lambda value:isinstance(value,str) and re.fullmatch(r'[A-Za-z0-9_-]{1,80}',value)
+        if not isinstance(scope,dict) or not all(valid(value) for value in
+            (owner_run,scope.get('run_id'),scope.get('chat_id'))):return False
+        seen=set()
+        with store._connection(transaction='read') as db:
+            current=owner_run
+            for _ in range(16):
+                if current in seen:return False
+                seen.add(current)
+                row=db.execute('SELECT id,chat_id,parent_id FROM runs WHERE id=?',(current,)).fetchone()
+                if not row:return False
+                if row['id']==scope['run_id']:return row['chat_id']==scope['chat_id']
+                current=row['parent_id']
+                if not valid(current):return False
+        return False
+
     def extension_info(self):
         folder = Path(__file__).resolve().parent / 'browser-extension'
         manifest = self.root / 'config/native-messaging/org.forge.browser.json'

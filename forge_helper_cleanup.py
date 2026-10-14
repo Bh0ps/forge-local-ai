@@ -6,6 +6,7 @@ data. This coordinator operation never removes user files or worktrees.
 """
 import json
 
+from forge_computer_activity import capture_summary
 from forge_store import encode
 from storage import _now
 
@@ -100,6 +101,11 @@ def cleanup_helpers(store, live_run_ids=()):
                     json.loads(row['metadata']).get('status', 'complete') == 'complete'), None)
                 report = final['content'].strip() if final else ''
                 tool_count = db.execute("SELECT COUNT(*) FROM invocations WHERE run_id=? AND name NOT IN ('delegate_agent','agent_result','tools_search','tools_load')", (child['id'],)).fetchone()[0]
+                computer_activity = capture_summary(db, child, parent)
+                # Keep the full journal if its coordinator metadata cannot be
+                # represented safely; retirement must not invent ownership.
+                if computer_activity is None:
+                    continue
                 compact = {key: child[key] for key in RUN_FIELDS if key in child}
                 settings = child.get('settings', {})
                 compact_settings = {key: settings.get(key) for key in ('provider_id', 'model', 'context')}
@@ -110,7 +116,8 @@ def cleanup_helpers(store, live_run_ids=()):
                 compact.update(request='', settings=compact_settings,
                     helper_cleanup={'version': 1, 'cleaned_at': _now(), 'tool_count': tool_count,
                         'summary': report[:8000], 'summary_truncated': len(report) > 8000,
-                        'messages_removed': len(messages)}, phase='retired', pending_calls=[])
+                        'messages_removed': len(messages), 'computer_activity': computer_activity},
+                    phase='retired', pending_calls=[])
                 # These rows have no surviving message references. Deduplication
                 # keys, usage totals, worktrees and parent evidence stay intact.
                 db.execute('DELETE FROM provider_turn_state WHERE run_id=?', (child['id'],))

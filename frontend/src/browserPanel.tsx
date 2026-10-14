@@ -5,8 +5,9 @@ import { Empty, ErrorNotice, IconButton } from './components';
 import { updateReadiness, useUpdateReadiness } from './updateReadiness';
 import { ComputerView, StopComputerActivity } from './computerView';
 import type { BrowserMode } from './workspaceLayout';
+import './browserPanel.css';
 
-interface BrowserState { url?: string; title?: string; running?: boolean; loading?: boolean; available?: boolean; message?: string; }
+interface BrowserState { url?: string; title?: string; running?: boolean; loading?: boolean; available?: boolean; message?: string; target_indicator?:'active'|'none'; }
 const pageAddress = (state: BrowserState) => state.url === 'about:blank' ? '' : state.url || '';
 async function hideBrowser() {
   const result = await api<{ok?: boolean}>('browser_native_hide');
@@ -26,6 +27,11 @@ export function BrowserPanel({chatId = null, runId, projectId, visible = true, o
   transportRef.current = transport; modeRef.current = mode;
   const mounted = useRef(true), wanted = useRef(false), transition = useRef(0);
   const previousRelease = useRef<Promise<unknown>>(Promise.resolve());
+  const nativeStop = useRef<(() => void) | null>(null);
+  function ownStop(clear: () => void) {
+    nativeStop.current = clear;
+    return () => {if (nativeStop.current === clear) nativeStop.current = null;};
+  }
   useUpdateReadiness(); const disabled = !updateReadiness.canEdit();
   useEffect(() => {mounted.current = true; return () => {mounted.current = false;};}, []);
   function confirmDesktop(drain: Promise<unknown>) {
@@ -68,12 +74,12 @@ export function BrowserPanel({chatId = null, runId, projectId, visible = true, o
   }
   const waiting = !preferenceReady || mode === 'loading';
   return <div className="computer-browser-view"><div className="computer-view-modes" role="group" aria-label="Workspace browser mode"><button type="button" aria-pressed={mode === 'browser' && !waiting} disabled={disabled || waiting || mode === 'hiding' || mode === 'hide_failed'} onClick={() => choose('browser')}>Browser</button><button type="button" aria-pressed={choice === 'desktop' && !waiting} disabled={disabled || waiting || mode === 'hiding' || mode === 'hide_failed'} onClick={() => choose('desktop')}>Desktop</button></div>
-    {waiting ? <div className="computer-hide-state"><p role={preferenceError === 'load' ? 'alert' : 'status'}>{preferenceError === 'load' ? 'The workspace view preference could not be loaded.' : 'Loading workspace view…'}</p>{preferenceError === 'load' && onPreferenceRetry && <button type="button" className="secondary" disabled={disabled || preferenceRetrying} onClick={() => void onPreferenceRetry()}>{preferenceRetrying ? 'Retrying…' : 'Retry view preference'}</button>}</div> : mode === 'browser' ? <NativeBrowserPanel visible={visible} onReleased={released} onNativeOwned={owned => {nativeOwned.current = owned;}}/> : mode === 'desktop' ? <ComputerView key={`view:${projectId || ''}:${chatId || ''}:${runId || ''}`} chatId={chatId} runId={runId} visible={visible} onActivity={onActivity}/> : <div className="computer-hide-state"><p role="status">{mode === 'hiding' ? 'Hiding the browser…' : 'The browser could not be hidden. Retry switching to Desktop.'}</p>{mode === 'hide_failed' && <button className="secondary" type="button" disabled={disabled} onClick={() => {setMode('hiding'); confirmDesktop(previousRelease.current);}}>Retry switching</button>}</div>}
-    {mode !== 'browser' && <StopComputerActivity key={`stop:${projectId || ''}:${chatId || ''}:${runId || ''}`}/>}
+    {waiting ? <div className="computer-hide-state"><p role={preferenceError === 'load' ? 'alert' : 'status'}>{preferenceError === 'load' ? 'The workspace view preference could not be loaded.' : 'Loading workspace view…'}</p>{preferenceError === 'load' && onPreferenceRetry && <button type="button" className="secondary" disabled={disabled || preferenceRetrying} onClick={() => void onPreferenceRetry()}>{preferenceRetrying ? 'Retrying…' : 'Retry view preference'}</button>}</div> : mode === 'browser' ? <NativeBrowserPanel visible={visible} chatId={chatId} runId={runId} projectId={projectId} onReleased={released} onNativeOwned={owned => {nativeOwned.current = owned;}} onStopOwner={ownStop}/> : mode === 'desktop' ? <ComputerView key={`view:${projectId || ''}:${chatId || ''}:${runId || ''}`} chatId={chatId} runId={runId} visible={visible} onActivity={onActivity}/> : <div className="computer-hide-state"><p role="status">{mode === 'hiding' ? 'Hiding the browser…' : 'The browser could not be hidden. Retry switching to Desktop.'}</p>{mode === 'hide_failed' && <button className="secondary" type="button" disabled={disabled} onClick={() => {setMode('hiding'); confirmDesktop(previousRelease.current);}}>Retry switching</button>}</div>}
+    <StopComputerActivity key={`stop:${projectId || ''}:${chatId || ''}:${runId || ''}`} onStop={() => nativeStop.current?.()}/>
   </div>;
 }
 
-function NativeBrowserPanel({onReleased, onNativeOwned, visible}: {onReleased: (hidden: Promise<unknown>, admittedBridge:unknown) => void; onNativeOwned: (owned:boolean) => void; visible: boolean}) {
+function NativeBrowserPanel({onReleased, onNativeOwned, onStopOwner, visible,chatId,runId,projectId}: {onReleased: (hidden: Promise<unknown>, admittedBridge:unknown) => void; onNativeOwned: (owned:boolean) => void; onStopOwner: (clear: () => void) => (() => void); visible: boolean;chatId:string|null;runId?:string;projectId?:string|null}) {
   const pane = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<BrowserState>({}); const [address, setAddress] = useState('');
   const [pending, setPending] = useState(false);
@@ -81,6 +87,8 @@ function NativeBrowserPanel({onReleased, onNativeOwned, visible}: {onReleased: (
   const currentState = useRef<BrowserState>({}); const request = useRef(0); const actionPending = useRef(false);
   const lifetime = useRef<object | null>(null); const input = useRef({ focused: false, dirty: false, revision: 0 });
   const effects = useRef(new Set<Promise<unknown>>());
+  const transport=window.pywebview?.api.call || window.fetch,scope=JSON.stringify([projectId,chatId,runId]);
+  const stateScope=useRef({scope:'',transport:undefined as unknown}),drain=useRef<Promise<unknown>>(Promise.resolve());
   const hostVisible = useRef(visible); hostVisible.current = visible;
   async function tracked<T>(name: string, data: Record<string, unknown> = {}): Promise<T> {
     const work = api<T>(name, data); effects.current.add(work);
@@ -88,19 +96,34 @@ function NativeBrowserPanel({onReleased, onNativeOwned, visible}: {onReleased: (
   }
   useUpdateReadiness(); const disabled = !updateReadiness.canEdit();
   function acceptState(next: BrowserState) {
+    stateScope.current={scope,transport};
     currentState.current = next; setState(next);
     if (!input.current.focused && !input.current.dirty) setAddress(pageAddress(next));
   }
+  useEffect(() => {
+    if (state.target_indicator !== 'active') return;
+    const timer = setTimeout(() => setState(value => ({...value, target_indicator:'none'})), 3000);
+    return () => clearTimeout(timer);
+  }, [state, scope, transport]);
   useEffect(() => {
     if (!isNative() || !pane.current) return;
     const admittedBridge = window.pywebview?.api.call || window.fetch;
     onNativeOwned(true);
     const owner = {}; lifetime.current = owner;
-    let disposed = false; let frame = 0; let pending = false; let dirty = false; let last = '';
+    actionPending.current=false;setPending(false);
+    let disposed = false; let frame = 0; let pending = false; let dirty = false; let last = '';let admitted=false;
+    const retireStop = onStopOwner(() => {
+      if (disposed || lifetime.current !== owner || admittedBridge !== (window.pywebview?.api.call || window.fetch)) return;
+      request.current++;
+      currentState.current = {...currentState.current, target_indicator:'none'};
+      setState(value => ({...value, target_indicator:'none'}));
+      actionPending.current = false; setPending(false);
+    });
     async function bind() {
       if (disposed || !pane.current) return;
+      if(!admitted){dirty=true;return;}
       if (pending) { dirty = true; return; }
-      const blocked = Boolean(document.querySelector('.modal-backdrop, dialog[open]'));
+      const blocked = !hostVisible.current || document.visibilityState==='hidden' || Boolean(document.querySelector('.modal-backdrop, dialog[open]'));
       const rect = pane.current.getBoundingClientRect();
       const data = { panel_id: 'forge-browser-panel', rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, viewport: { width: innerWidth, height: innerHeight } };
       const key = blocked ? 'hidden' : JSON.stringify(data);
@@ -116,35 +139,45 @@ function NativeBrowserPanel({onReleased, onNativeOwned, visible}: {onReleased: (
     async function refresh() {
       if (disposed || actionPending.current || !hostVisible.current || document.visibilityState === 'hidden') return;
       const identity = ++request.current;
+      const started = performance.now();
       try {
-        const next = await api<BrowserState & { visible?: boolean }>('browser_native_status');
-        if (!disposed && identity === request.current) {
-          acceptState(next); setStatusError('');
+        const next = await api<BrowserState & { visible?: boolean }>('browser_native_status',{...(chatId?{chat_id:chatId}:{}),...(runId?{run_id:runId}:{})});
+        if (!disposed && identity === request.current && transport===(window.pywebview?.api.call || window.fetch)) {
+          acceptState({...next, target_indicator: next.target_indicator === 'active' && performance.now() - started < 3000 ? 'active' : 'none'}); setStatusError('');
           if (next.running && next.visible === false && !document.querySelector('.modal-backdrop, dialog[open]')) { last = ''; schedule(); }
         }
-      } catch (e) { if (!disposed && identity === request.current) setStatusError(errorText(e)); }
+      } catch (e) { if (!disposed && identity === request.current && transport === (window.pywebview?.api.call || window.fetch)) {
+        setState(value => ({...value, target_indicator:'none'})); setStatusError(errorText(e));
+      } }
     }
-    window.addEventListener('resize', schedule); document.addEventListener('visibilitychange', refresh); schedule(); void refresh(); const timer = setInterval(() => void refresh(), 1500);
+    function visibility(){request.current++;setState(value=>({...value,target_indicator:'none'}));schedule();void refresh();}
+    window.addEventListener('resize', schedule); document.addEventListener('visibilitychange', visibility);
+    void drain.current.catch(()=>{}).then(()=>{if(!disposed){admitted=true;schedule();}});
+    void refresh(); const timer = setInterval(() => void refresh(), 1500);
     return () => {
       onNativeOwned(false);
+      retireStop();
       disposed = true; if (lifetime.current === owner) lifetime.current = null;
-      clearInterval(timer); cancelAnimationFrame(frame); observer.disconnect(); dialogs.disconnect(); window.removeEventListener('resize', schedule); document.removeEventListener('visibilitychange', refresh);
+      clearInterval(timer); cancelAnimationFrame(frame); observer.disconnect(); dialogs.disconnect(); window.removeEventListener('resize', schedule); document.removeEventListener('visibilitychange', visibility);
       // Await every admitted browser effect before the final hide; otherwise a
       // late Show/navigation can cover a newly mounted desktop evidence view.
       const outstanding = [...effects.current];
       const firstHide = hideBrowser();
       const hidden = outstanding.length ? Promise.allSettled([...outstanding, firstHide]).then(hideBrowser) : firstHide;
+      drain.current=hidden;
       onReleased(hidden, admittedBridge); void hidden.catch(() => {});
     };
-  }, []);
+  }, [scope,transport,visible]);
   async function action(name: string, data: Record<string, unknown> = {}) {
     const owner = lifetime.current;
-    if (!owner || !updateReadiness.canEdit()) return;
+    if (!owner || !hostVisible.current || document.visibilityState==='hidden' || !updateReadiness.canEdit()) return;
     const identity = ++request.current; const revision = input.current.revision;
     actionPending.current = true; setPending(true); setActionError('');
+    setState(value=>({...value,target_indicator:'none'}));
+    stateScope.current={scope,transport};
     try {
       const next = await tracked<BrowserState>(`browser_native_${name}`, data);
-      if (lifetime.current !== owner || identity !== request.current) return;
+      if (lifetime.current !== owner || identity !== request.current || transport!==(window.pywebview?.api.call || window.fetch)) return;
       currentState.current = next; setState(next); setStatusError('');
       // A submitted address belongs to this action until it settles. Later edits
       // remain private input, including when the user moves focus elsewhere.
@@ -156,6 +189,7 @@ function NativeBrowserPanel({onReleased, onNativeOwned, visible}: {onReleased: (
   }
   if (!isNative()) return <Empty icon={<Globe size={22} />} title="Open Forge desktop" text="The native browser shares this panel with your agent in the Windows app. Web research tools remain available here." />;
   const error = actionError || statusError || bindError;
+  const indicator=Boolean(chatId && runId && visible && document.visibilityState!=='hidden' && stateScope.current.scope===scope && stateScope.current.transport===transport && state.target_indicator==='active');
   return <div className="browser-pane"><div className="browser-toolbar"><IconButton label="Browser back" disabled={disabled} onClick={() => void action('back')}><ArrowLeft size={14} /></IconButton><IconButton label="Browser forward" disabled={disabled} onClick={() => void action('forward')}><ArrowRight size={14} /></IconButton><IconButton label="Reload browser" disabled={disabled} onClick={() => void action('reload')}>{pending || state.loading ? <LoaderCircle size={14} className="spin" /> : <RotateCw size={14} />}</IconButton><form onSubmit={e => {
     e.preventDefault(); if (!updateReadiness.canEdit()) return;
     const raw = address.trim(); if (!raw) return;
@@ -167,5 +201,5 @@ function NativeBrowserPanel({onReleased, onNativeOwned, visible}: {onReleased: (
   }} onFocus={() => { input.current.focused = true; }} onBlur={() => {
     input.current.focused = false;
     if (!input.current.dirty && !actionPending.current) setAddress(pageAddress(currentState.current));
-  }} /></form></div>{error && <ErrorNotice error={error} />}<div className="browser-page" id="forge-browser-panel" data-forge-browser-panel="forge-browser-panel" ref={pane}><div className="browser-placeholder"><Globe size={25} /><p>{state.running ? 'Your agent browses the same page.' : 'Starting Windows WebView2…'}</p></div></div><small className="browser-caption">{state.title || 'Forge browser'} · Agent actions follow your permissions</small></div>;
+  }} /></form>{indicator && <span className="browser-target-cue" role="status" aria-label="AI browser target">AI target</span>}</div>{error && <ErrorNotice error={error} />}<div className="browser-page" id="forge-browser-panel" data-forge-browser-panel="forge-browser-panel" ref={pane}><div className="browser-placeholder"><Globe size={25} /><p>{state.running ? 'Your agent browses the same page.' : 'Starting Windows WebView2…'}</p></div></div><small className="browser-caption">{state.title || 'Forge browser'} · Agent actions follow your permissions</small></div>;
 }

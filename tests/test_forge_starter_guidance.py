@@ -39,7 +39,7 @@ def test_every_shipped_recipe_manifest_and_lazy_example_matches_canonical_source
             assert (folder / relative).read_bytes() == expected.encode("utf-8"), (item["id"], relative)
     assert len(WORKFLOWS) == 28
     assert {item["id"] for item in WORKFLOWS if item.get("examples")} == UPGRADED | {
-        "windows-dotnet", "windows-native-cpp", "desktop-executable", "windows-computer",
+        "windows-dotnet", "windows-native-cpp", "desktop-executable", "windows-computer", "browser-research",
     }
     assert {item["version"] for item in WORKFLOWS if item["id"] in UPGRADED} == {"2.1.0"}
     # The previously shipped guided-task recipe is not downgraded by generation.
@@ -62,7 +62,7 @@ def test_catalog_discovery_never_injects_instruction_bodies(hub):
     assert lazy["ok"] and BY_ID["efficient-tools"]["examples"][0]["scenario"] in lazy["text"]
 
 
-@pytest.mark.parametrize("identity", sorted(UPGRADED))
+@pytest.mark.parametrize("identity", sorted(UPGRADED | {"browser-research"}))
 def test_complete_primary_guidance_fits_8k_context_with_two_lazy_supporting_recipes(identity):
     primary = BY_ID[identity]
     others = [item for item in WORKFLOWS if item["id"] != identity][:2]
@@ -98,6 +98,26 @@ def test_worked_example_calls_validate_against_current_real_schemas():
                 count += 1
         assert set(item["recommended_tools"]) <= schemas.keys()
     assert count == 26
+
+
+def test_browser_recipe_examples_are_lazy_and_use_the_current_browser_contract(hub):
+    from browser_tools import BrowserTools
+
+    item = BY_ID["browser-research"]
+    schemas = {value["function"]["name"]: value["function"]["parameters"]
+               for value in BrowserTools.schemas()}
+    assert set(item["recommended_tools"]) <= schemas.keys()
+    for case in item["examples"]:
+        for call in case["calls"]:
+            jsonschema.validate(call["arguments"], schemas[call["tool"]])
+    selected = hub.active_skill_instructions(explicit=["browser-research"], query="")
+    recipe = next(value for value in selected if value["skill"]["library_id"] == "browser-research")
+    assert recipe["text"] == markdown(item)
+    assert item["examples"][0]["scenario"] not in recipe["text"]
+    resource = hub.read_skill_resource(recipe["skill"]["id"], "references/examples.md")
+    assert resource["ok"] and item["examples"][1]["scenario"] in resource["text"]
+    assert not CONTENT_FIELDS.intersection(next(value for value in STARTER_SKILLS
+                                               if value["id"] == "browser-research"))
 
 
 def test_upgrade_preserves_modified_deleted_resources_preferences_and_identity(tmp_path, monkeypatch):
@@ -156,6 +176,7 @@ def test_upgrade_preserves_modified_deleted_resources_preferences_and_identity(t
     ("Polish the design and layout", "plan", "ui-design"),
     ("Exercise the live app preview and verify screenshots", "verify", "preview-verification"),
     ("Review code for security regressions", "verify", "code-review"),
+    ("Inspect the intended browser page", "research", "browser-research"),
 ])
 def test_updated_workflows_route_without_granting_their_recommended_tools(hub, query, phase, identity):
     result = hub.route_preview({"query": query, "phase": phase, "available_tools": []})

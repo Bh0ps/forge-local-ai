@@ -8,22 +8,12 @@ import re
 import stat
 
 from forge_images import provider_image_url
+from forge_computer_activity import (MAX_STEPS, RUN_STATES, TOOLS, completion_time,
+                                     identifier as _identifier, invocation_id as _invocation_id,
+                                     retired_summary)
 from PIL import Image
 
-TOOLS = frozenset(('computer_windows', 'computer_inspect', 'computer_focus', 'computer_click',
-                  'computer_type', 'computer_set_value', 'computer_key', 'computer_coordinate_click',
-                  'computer_clipboard_read', 'computer_clipboard_write'))
-RUN_STATES = frozenset(('queued', 'running', 'compacting', 'reviewing', 'awaiting_approval',
-                       'awaiting_question', 'paused', 'interrupted', 'failed', 'completed', 'cancelled'))
 MAX_ARTIFACT_BYTES = 16_000_000
-
-
-def _identifier(value):
-    return isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9_-]{1,64}', value)
-
-
-def _invocation_id(value):
-    return value if isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9:_-]{1,160}', value) else None
 
 
 def _record(path):
@@ -60,10 +50,17 @@ def computer_view_state(store, data):
             raise ValueError('Conversation is unavailable.')
         # A helper can have a separate chat, but only descendants of this exact
         # conversation belong to its activity. A bounded depth handles cycles.
+        fields = ('SELECT DISTINCT r.id,r.status,r.parent_id,r.chat_id,p.chat_id AS parent_chat_id,'
+            "CASE WHEN json_valid(r.data) THEN CASE WHEN json_type(r.data,'$.helper_cleanup.version')='integer' "
+            "AND json_extract(r.data,'$.helper_cleanup.version')=1 "
+            "AND json_extract(r.data,'$.phase')='retired' "
+            "AND json_type(r.data,'$.helper_cleanup.computer_activity')='object' "
+            "THEN json_extract(r.data,'$.helper_cleanup.computer_activity') END END AS computer_activity "
+            'FROM runs r JOIN scope s ON r.id=s.id LEFT JOIN runs p ON p.id=r.parent_id LIMIT 2049')
         rows = db.execute('WITH RECURSIVE scope(id,depth) AS ('
             'SELECT id,0 FROM runs WHERE chat_id=? UNION ALL '
             'SELECT r.id,s.depth+1 FROM runs r JOIN scope s ON r.parent_id=s.id WHERE s.depth<16) '
-            'SELECT DISTINCT r.id,r.status,r.parent_id FROM runs r JOIN scope s ON r.id=s.id LIMIT 2049', (chat_id,)).fetchall()
+            + fields, (chat_id,)).fetchall()
         if len(rows) > 2048:
             raise ValueError('Desktop activity scope exceeds its bound.')
         ids = {row['id'] for row in rows}
@@ -73,7 +70,7 @@ def computer_view_state(store, data):
             rows = db.execute('WITH RECURSIVE scope(id,depth) AS ('
                 'SELECT id,0 FROM runs WHERE id=? UNION ALL '
                 'SELECT r.id,s.depth+1 FROM runs r JOIN scope s ON r.parent_id=s.id WHERE s.depth<16) '
-                'SELECT DISTINCT r.id,r.status,r.parent_id FROM runs r JOIN scope s ON r.id=s.id LIMIT 2049', (selected,)).fetchall()
+                + fields, (selected,)).fetchall()
             if len(rows) > 2048: raise ValueError('Desktop activity scope exceeds its bound.')
             ids = {row['id'] for row in rows}
         if any(not _identifier(row['id']) for row in rows):
@@ -81,16 +78,31 @@ def computer_view_state(store, data):
         states = {row['id']: row['status'] for row in rows}
         parents = {row['id']: row['parent_id'] for row in rows}
         records = []
+        summaries = []
         if ids:
             marks, tool_marks = ','.join('?' for _ in ids), ','.join('?' for _ in TOOLS)
+            # A retained summary substitutes only for a removed journal. Even
+            # non-computer/uncompleted rows must prevent double counting.
+            current = {row['run_id'] for row in db.execute(
+                'SELECT DISTINCT run_id FROM invocations WHERE run_id IN (' + marks + ')', tuple(ids))}
+            summaries = [summary for row in rows if row['id'] not in current
+                and (summary := retired_summary(row['computer_activity'], row)) is not None]
             records = db.execute('SELECT id,run_id,name,updated_at FROM invocations '
-                'WHERE run_id IN (' + marks + ') AND name IN (' + tool_marks + ") AND status='completed' ORDER BY updated_at DESC,rowid DESC LIMIT 2049",
+                'WHERE run_id IN (' + marks + ') AND name IN (' + tool_marks + ") AND status='completed' "
+                'ORDER BY julianday(updated_at) DESC,updated_at DESC,rowid DESC LIMIT 2049',
                 (*ids, *TOOLS)).fetchall()
-        bounded = len(records) > 2048
-        records = records[:2048]
+        retired_count = sum(summary['action_count'] for summary in summaries)
+        retired_bounded = retired_count > MAX_STEPS or any(summary['action_count_truncated'] for summary in summaries)
+        bounded = len(records) + retired_count > MAX_STEPS or retired_bounded
+        records = records[:MAX_STEPS]
         inspected = next((row for row in records if row['name'] == 'computer_inspect'), None)
         inspected_result = db.execute("SELECT result FROM invocations WHERE id=? AND run_id=? AND name='computer_inspect' AND status='completed'", (inspected['id'], inspected['run_id'])).fetchone()[0] if inspected else None
-    latest = records[0] if records else None
+    earlier = [{'id': summary['latest']['invocation_id'], 'run_id': summary['run_id'],
+                'name': summary['latest']['tool'], 'updated_at': summary['latest']['completed_at']}
+               for summary in summaries if summary['latest']]
+    candidates = [*records, *earlier]
+    latest = max(candidates, key=lambda row: completion_time(row['updated_at']) or
+        datetime.min.replace(tzinfo=timezone.utc)) if candidates else None
     owner = selected or (latest['run_id'] if latest else None)
     if not selected:
         visited = set()
@@ -100,7 +112,8 @@ def computer_view_state(store, data):
     result = {'chat_id': chat_id, 'scope_run_id': selected, 'mode': 'shared_desktop',
               'run_id': owner, 'invocation_id': _invocation_id(latest['id']) if latest else None,
               'tool': latest['name'] if latest else None, 'status': 'idle',
-              'action_count': len(records), 'action_count_truncated': bounded,
+              'action_count': min(len(records) + retired_count, MAX_STEPS), 'action_count_truncated': bounded,
+              'retired_action_count': min(retired_count, MAX_STEPS), 'retired_action_count_truncated': retired_bounded,
               'evidence_mode': 'none', 'snapshot': None, 'failure': None}
     state = states.get(result['run_id'])
     result['status'] = state if state in RUN_STATES else ('needs_attention' if state else 'idle')

@@ -1,5 +1,22 @@
 # Forge demo media
 
+The 5.1.12 captures use the production UI with synthetic API responses. They
+show retained helper activity and the small scoped browser target cue. They
+contain no actual native page, personal screen, model session, or OS cursor.
+Both were visually reviewed and contain no embedded metadata.
+
+| File | Demonstration |
+| --- | --- |
+| `forge-5.1.12-retained-helper-dark.png` | Completed helper activity remains visible after its temporary conversation retires. |
+| `forge-5.1.12-browser-target-light.png` | A short-lived target label in the existing narrow Browser overlay. |
+
+Production checks cover reopening, retained counts, Stop and stale responses,
+cue expiry, hidden polling, keyboard focus, enlarged text and light/dark
+contrast. The synthetic target cue does not demonstrate a live Windows cursor
+or an actual browser action; native behavior is verified separately.
+
+## Previous 5.1.11 captures
+
 The 5.1.11 captures show enlarged saved desktop evidence and the existing local
 engine editor with the new Textgen preset. They use synthetic API responses
 and a generated fixture image; no personal screen, engine or model was used.
