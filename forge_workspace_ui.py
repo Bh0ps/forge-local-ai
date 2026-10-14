@@ -95,7 +95,18 @@ class WorkspaceUI:
         return {**project, 'appearance': appearance}
 
     def projects(self):
-        return [self.project(project) for project in self.store.list_projects()]
+        # Project headers and their cosmetic records share one closed WAL
+        # snapshot; a project list must not open one connection per project.
+        with self.store._connection(transaction='read') as db:
+            projects=[dict(row) for row in db.execute('SELECT * FROM projects ORDER BY name COLLATE NOCASE,id')]
+            appearances={row['id']:row['data'] for row in db.execute(
+                "SELECT e.id,e.data FROM entities e JOIN projects p ON p.id=e.id WHERE e.kind='project_appearance'")}
+        result=[]
+        for project in projects:
+            try:appearance=project_appearance(json.loads(appearances[project['id']])['appearance'])
+            except (ValueError,KeyError,TypeError):appearance={'icon':'folder'}
+            result.append({**project,'appearance':appearance})
+        return result
 
     def save_project(self, data):
         project = self.store.get_project(data.get('project_id'))

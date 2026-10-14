@@ -146,7 +146,7 @@ function Write-ForgeSmokeDiagnostics {
     $states=@('missing','invalid','unsafe','too-large','ready','unrecorded')
     if ($states -notcontains $ReportState) { $ReportState='unrecorded' }
     if ($states -notcontains $CheckpointState) { $CheckpointState='unrecorded' }
-    $gates=@('process-timeout','report-missing','report-invalid','lifecycle-browser','handoff-floor','library','builder-preview','standalone-preview')
+    $gates=@('process-timeout','process-exit','report-missing','report-invalid','lifecycle-browser','handoff-floor','library','builder-preview','standalone-preview')
     if ($gates -notcontains $Gate) { $Gate='unclassified' }
     if ($ExitCode -isnot [int] -and $ExitCode -isnot [long]) { $ExitCode=$null }
     $toolFailure='unrecorded'
@@ -241,6 +241,10 @@ if (-not $process.WaitForExit(120000)) {
 }
 $partial = Read-ForgeSmokeReport $report
 $progress = Read-ForgeSmokeReport $checkpoint
+if ($process.ExitCode -ne 0) {
+    Write-ForgeSmokeDiagnostics $partial.data 'process-exit' $process.ExitCode $partial.state $progress.data $progress.state
+    throw 'Native smoke process exited unsuccessfully. See the disposable report.'
+}
 if ($partial.state -eq 'missing') { Write-ForgeSmokeDiagnostics $null 'report-missing' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native smoke did not produce a report. Check WebView2 and Windows runtime prerequisites.' }
 if ($partial.state -ne 'ready') { Write-ForgeSmokeDiagnostics $null 'report-invalid' $process.ExitCode $partial.state $progress.data $progress.state; throw 'Native smoke report is invalid.' }
 $result = $partial.data

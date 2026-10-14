@@ -326,6 +326,62 @@ def test_standalone_smoke_retains_exact_successful_evidence():
     assert len(calls) == 1 and not result
 
 
+@pytest.mark.parametrize('exit_code', [0, 1, -1, -1073741819])
+def test_native_smoke_requires_clean_process_exit_even_with_complete_report(tmp_path, exit_code):
+    shell = shutil.which('pwsh') or shutil.which('powershell')
+    if os.name != 'nt' or not shell:
+        pytest.skip('Windows PowerShell is required for the native exit gate.')
+    script = Path(__file__).resolve().parents[1] / 'scripts/release_smoke.ps1'
+    floor = dict(feature_available=False, phase='idle', reason='handoff_unavailable', participant_count=0)
+    for field in ('trusted_main', 'fence_installed', 'invalid_attempt_rejected', 'typed_block',
+                  'trust_floor_blocked', 'no_attempt', 'no_preparation', 'no_helper', 'no_restart'):
+        floor[field] = True
+    report = dict(title='Forge', close_hides=True, handoff_seed=floor,
+        library=dict(rendered=True, starter_skills=28, discover_cards=28),
+        native_browser=dict(fixture_updated=True, bridge_exposed='undefined'),
+        native_preview=dict(fixture_updated=True, separate_controller=True, separate_profile=True,
+            bridge_exposed='undefined', snapshot_guarded=True, viewport_verified=True,
+            diagnostics_captured=True, screenshot_bytes=1001, stopped=True),
+        native_standalone_preview=dict(pane_visible=True, fixture_updated=True,
+            without_builder=True, bridge_exposed='undefined', screenshot_bytes=1001))
+    (tmp_path / 'report.json').write_text(json.dumps(report), encoding='utf-8')
+    probe = tmp_path / 'exit-gate.ps1'
+    probe.write_text(r"""
+$ErrorActionPreference='Stop'
+$tokens=$null; $errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile($env:FORGE_EXIT_TEST_SCRIPT,[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw 'Smoke script syntax is invalid.' }
+$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst]},$true) | ForEach-Object { Invoke-Expression $_.Extent.Text }
+$root=$env:FORGE_EXIT_TEST_ROOT
+$report=Join-Path $root 'report.json'
+$checkpoint=Join-Path $root 'absent-checkpoint.json'
+$script:ForgeSmokeDiagnosticPath=Join-Path $root 'safe.json'
+$process=[pscustomobject]@{ExitCode=[int]$env:FORGE_EXIT_TEST_CODE}
+# Execute the real top-level post-wait gates. No executable is started.
+$statements=@($ast.EndBlock.Statements)
+$start=-1
+for($i=0;$i -lt $statements.Count;$i++) {
+ if($statements[$i].Extent.Text -eq '$partial = Read-ForgeSmokeReport $report') { $start=$i; break }
+}
+if($start -lt 0) { throw 'Post-wait evidence reader was not found.' }
+try {
+ for($i=$start;$i -lt $statements.Count;$i++) { Invoke-Expression $statements[$i].Extent.Text }
+ [IO.File]::WriteAllText((Join-Path $root 'outcome.json'),' {"accepted":true}')
+} catch {
+ $safe=[IO.File]::ReadAllText($script:ForgeSmokeDiagnosticPath)|ConvertFrom-Json
+ if($safe.gate -ne 'process-exit' -or $safe.process_exit -ne $process.ExitCode -or $safe.report_state -ne 'ready') {
+  throw 'Nonzero exit did not retain the fixed, bounded failure category.'
+ }
+ [IO.File]::WriteAllText((Join-Path $root 'outcome.json'),' {"accepted":false}')
+}
+""", encoding='utf-8')
+    result = subprocess.run([shell, '-NoProfile', '-File', str(probe)], capture_output=True, text=True,
+        timeout=30, env={**os.environ, 'FORGE_EXIT_TEST_SCRIPT': str(script),
+            'FORGE_EXIT_TEST_ROOT': str(tmp_path), 'FORGE_EXIT_TEST_CODE': str(exit_code)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads((tmp_path / 'outcome.json').read_text())['accepted'] is (exit_code == 0)
+
+
 def test_powershell_reads_bounded_reports_and_redacts_before_persistence(tmp_path):
     shell = shutil.which('pwsh') or shutil.which('powershell')
     if os.name != 'nt' or not shell:
