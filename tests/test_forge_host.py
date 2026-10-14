@@ -172,9 +172,14 @@ class FakeElement:
 
 def broker_for(window, clock=None, foreground=None, available=None, process_identity=None):
     desktop = SimpleNamespace(windows=lambda **kwargs: [window], window=lambda **kwargs: window)
+    def capture(*args, **kwargs):
+        from forge_window_capture import WindowCapture
+        picture = window.capture_as_image()  # Synthetic fixture only; preserves capture-race controls.
+        buffer = io.BytesIO(); picture.save(buffer, 'PNG')
+        return WindowCapture(True, 'captured', buffer.getvalue(), picture.size, picture.size)
     return ComputerBroker(desktop_factory=lambda: desktop, clock=clock or time.monotonic,
                           foreground=foreground or (lambda: 101), session_check=available or (lambda: True),
-                          process_identity=process_identity)
+                          process_identity=process_identity, capture=capture)
 
 
 def assert_not_executed(result, message):
@@ -276,14 +281,19 @@ def test_computer_post_effect_failure_is_never_labeled_not_executed():
     try:
         snapshot = broker.execute('computer_inspect', {'window_id': 101})
         args = {'snapshot_id': snapshot['snapshot_id'], 'element_id': 0}
-        with pytest.raises(TimeoutError, match='already have been delivered'):
+        with pytest.raises(ValueError, match='outcome is unknown') as exc:
             broker.execute('computer_click', args)
+        assert exc.value.not_executed is False
+        assert 'already have been delivered' not in str(exc.value)
         assert window.clicked == 1
+        # An uncertain dispatched action retires its nonce before another input.
+        snapshot = broker.execute('computer_inspect', {'window_id': 101})
+        args = {'snapshot_id': snapshot['snapshot_id'], 'element_id': 0}
         def focus_then_lose_target():
             window.focused += 1
             active[0] = 999
         window.set_focus = focus_then_lose_target
-        with pytest.raises(ValueError, match='focus changed') as exc:
+        with pytest.raises(ValueError, match='focused|focus changed') as exc:
             broker.execute('computer_type', {**args, 'text': 'hello'})
         assert exc.value.not_executed is False
         assert window.focused == 1

@@ -112,7 +112,7 @@ def test_disabled_and_nonautomatic_windows_recipes_keep_explicit_selection_rules
     assert not hub.execute("skills_read", {"id": dotnet["id"]})["ok"]
 
 
-@pytest.mark.parametrize("identity", sorted(NEW))
+@pytest.mark.parametrize("identity", sorted(NEW | {'windows-computer'}))
 def test_complete_windows_primary_recipe_fits_8k_context_with_lazy_support(identity):
     primary = BY_ID[identity]
     selected = [{"skill": {"id": str(index).zfill(20), "name": item["name"]}, "text": markdown(item)}
@@ -126,11 +126,12 @@ def test_complete_windows_primary_recipe_fits_8k_context_with_lazy_support(ident
     assert len(markdown(primary).split()) < 300
 
 
-@pytest.mark.parametrize("identity", sorted(NEW))
+@pytest.mark.parametrize("identity", sorted(NEW | {'windows-computer'}))
 def test_new_guidance_is_canonical_and_examples_stay_lazy(hub, identity):
     item = BY_ID[identity]
     folder = forge_library.ASSET_ROOT / "skills" / identity
-    assert LIBRARY_VERSION == item["version"] == "2.2.0"
+    assert LIBRARY_VERSION == "2.3.0"
+    assert item["version"] == ("2.3.0" if identity == 'windows-computer' else "2.2.0")
     for relative, expected in rendered_assets(item).items():
         assert (folder / relative).read_bytes() == expected.encode("utf-8")
     assert all(not CONTENT_FIELDS.intersection(row) for row in STARTER_SKILLS)
@@ -164,21 +165,23 @@ def test_every_windows_example_uses_actual_registered_tool_shapes():
     assert calls == 20
 
 
-def test_24_to_27_upgrade_preserves_owned_edits_deletions_preferences_and_identity(tmp_path, monkeypatch):
+@pytest.mark.parametrize('excluded,old_version,old_count', [
+    (NEW | {'windows-computer'}, '2.1.0', 24), ({'windows-computer'}, '2.2.0', 27)], ids=['from24', 'from27'])
+def test_upgrade_to_28_preserves_owned_edits_deletions_preferences_and_identity(tmp_path, monkeypatch, excluded, old_version, old_count):
     current_assets = forge_library.ASSET_ROOT
     old_assets = tmp_path / "old-bundle"
     shutil.copytree(current_assets, old_assets)
-    for identity in NEW:
+    for identity in excluded:
         shutil.rmtree(old_assets / "skills" / identity)
-    old_skills = [item for item in STARTER_SKILLS if item["id"] not in NEW]
+    old_skills = [item for item in STARTER_SKILLS if item["id"] not in excluded]
     root = tmp_path / "profile"
     root.mkdir()
     config = {}
     monkeypatch.setattr(forge_library, "ASSET_ROOT", old_assets)
     monkeypatch.setattr(forge_library, "STARTER_SKILLS", old_skills)
-    monkeypatch.setattr(forge_library, "LIBRARY_VERSION", "2.1.0")
+    monkeypatch.setattr(forge_library, "LIBRARY_VERSION", old_version)
     assert forge_library.reconcile_starters(root, config) == (True, [])
-    assert len(config["library"]["files"]) == 24
+    assert len(config["library"]["files"]) == old_count
     base = root / "skills" / "forge-starter"
     edited = base / "frontend-implementation" / "SKILL.md"
     edited.write_text("Local desktop conventions.\n", encoding="utf-8")
@@ -195,7 +198,7 @@ def test_24_to_27_upgrade_preserves_owned_edits_deletions_preferences_and_identi
     monkeypatch.setattr(forge_library, "STARTER_SKILLS", STARTER_SKILLS)
     monkeypatch.setattr(forge_library, "LIBRARY_VERSION", LIBRARY_VERSION)
     assert forge_library.reconcile_starters(root, config) == (True, [])
-    assert len(config["library"]["files"]) == 27 and config["library"]["version"] == "2.2.0"
+    assert len(config["library"]["files"]) == 28 and config["library"]["version"] == "2.3.0"
     assert edited.read_text(encoding="utf-8") == "Local desktop conventions.\n"
     assert not deleted.exists() and not removed_resource.exists()
     assert resource.read_text(encoding="utf-8") == "Private reviewed examples.\n"

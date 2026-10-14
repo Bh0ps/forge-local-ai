@@ -1,0 +1,31 @@
+.computer-browser-view {display:flex;flex-direction:column;min-height:0;height:100%;}
+.computer-view-modes {display:flex;gap:4px;padding:9px 12px;border-bottom:1px solid var(--border);flex-shrink:0;}
+.computer-view-modes>button {padding:6px 11px;border:0;border-radius:7px;background:transparent;color:var(--muted);font-size:12px;}
+.computer-view-modes>button[aria-pressed=true] {background:var(--accent-soft);color:var(--accent);}
+.computer-view-modes>button:focus-visible {outline:2px solid var(--accent);outline-offset:2px;}
+.computer-browser-view>.browser-pane {min-height:0;flex:1;}
+.computer-view {padding:14px 12px;min-width:0;overflow-y:auto;}
+.computer-view>header {display:flex;justify-content:space-between;align-items:flex-start;gap:10px;}
+.computer-view strong {font-size:13px;font-weight:550;}
+.computer-view header p,.computer-evidence-note,.computer-view figcaption,.computer-last-step {font-size:12px;line-height:1.6;color:var(--muted);}
+.computer-view header p {margin:4px 0 0;}
+.computer-state {font-size:12px;line-height:1.6;margin:13px 0;color:var(--secondary);}
+.computer-view figure {margin:0;}
+.computer-view figure img {display:block;width:100%;height:auto;max-height:55vh;object-fit:contain;border-radius:7px;background:var(--surface);}
+.computer-view figcaption {margin-top:8px;}
+.computer-view figcaption span {display:block;}
+.computer-empty {display:grid;justify-items:center;gap:8px;padding:34px 12px;color:var(--muted);font-size:12px;line-height:1.65;text-align:center;}
+.computer-empty p {margin:0;}
+.computer-evidence-note {margin:12px 0;}
+.computer-last-step {display:flex;justify-content:space-between;align-items:center;gap:8px;border-top:1px solid var(--border);padding-top:12px;}
+.computer-last-step span {min-width:0;overflow-wrap:anywhere;}
+.computer-last-step small {display:block;font-size:11px;}
+.computer-stop {padding:10px 12px 12px;display:grid;gap:8px;}
+.computer-stop button {justify-self:start;font-size:12px;}
+.computer-stop [role=status] {font-size:12px;line-height:1.6;color:var(--muted);}
+.computer-stop [role=status]:empty {display:none;}
+.computer-view-error,.computer-hide-state {font-size:12px;line-height:1.65;padding:10px 12px;overflow-wrap:anywhere;}
+.computer-view-error {color:var(--danger);padding:0;}
+.computer-view-modes>button {transition:background-color .15s,color .15s;}
+[data-motion=reduced] .computer-view-modes>button {transition:none!important;}
+@media(prefers-reduced-motion:reduce) {.computer-view-modes>button {transition:none!important;}}

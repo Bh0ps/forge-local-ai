@@ -3,16 +3,47 @@ import { ArrowLeft, ArrowRight, Globe, LoaderCircle, RotateCw } from 'lucide-rea
 import { api, errorText, isNative } from './api';
 import { Empty, ErrorNotice, IconButton } from './components';
 import { updateReadiness, useUpdateReadiness } from './updateReadiness';
+import { ComputerView, StopComputerActivity } from './computerView';
 
 interface BrowserState { url?: string; title?: string; running?: boolean; loading?: boolean; available?: boolean; message?: string; }
 const pageAddress = (state: BrowserState) => state.url === 'about:blank' ? '' : state.url || '';
-export function BrowserPanel() {
+async function hideBrowser() {
+  const result = await api<{ok?: boolean}>('browser_native_hide');
+  if (result?.ok !== true) throw new Error('Browser hide was not confirmed.');
+  return result;
+}
+export function BrowserPanel({chatId = null, runId, projectId, visible = true, onActivity = () => {}}: {chatId?: string | null; runId?: string; projectId?: string | null; visible?: boolean; onActivity?: () => void} = {}) {
+  const [mode, setMode] = useState<'browser' | 'hiding' | 'desktop' | 'hide_failed'>('browser');
+  const mounted = useRef(true), wanted = useRef(false), transition = useRef(0);
+  useEffect(() => {mounted.current = true; return () => {mounted.current = false;};}, []);
+  function released(hidden: Promise<unknown>) {
+    const identity = transition.current;
+    void hidden.then(() => {if (mounted.current && wanted.current && identity === transition.current) setMode('desktop');}, () => {if (mounted.current && wanted.current && identity === transition.current) setMode('hide_failed');});
+  }
+  function desktop() {
+    if (mode !== 'browser') return;
+    wanted.current = true; transition.current++;
+    setMode(isNative() ? 'hiding' : 'desktop');
+  }
+  return <div className="computer-browser-view"><div className="computer-view-modes" role="group" aria-label="Workspace browser mode"><button type="button" aria-pressed={mode === 'browser'} disabled={mode === 'hiding' || mode === 'hide_failed'} onClick={() => {wanted.current = false; transition.current++; setMode('browser');}}>Browser</button><button type="button" aria-pressed={mode !== 'browser'} disabled={mode === 'hiding' || mode === 'hide_failed'} onClick={desktop}>Desktop</button></div>
+    {mode === 'browser' ? <NativeBrowserPanel visible={visible} onReleased={released}/> : mode === 'desktop' ? <ComputerView key={`view:${projectId || ''}:${chatId || ''}:${runId || ''}`} chatId={chatId} runId={runId} visible={visible} onActivity={onActivity}/> : <div className="computer-hide-state"><p role="status">{mode === 'hiding' ? 'Hiding the browser…' : 'The browser could not be hidden. Retry switching to Desktop.'}</p>{mode === 'hide_failed' && <button className="secondary" type="button" onClick={() => {setMode('hiding'); released(hideBrowser());}}>Retry switching</button>}</div>}
+    {mode !== 'browser' && <StopComputerActivity key={`stop:${projectId || ''}:${chatId || ''}:${runId || ''}`}/>}
+  </div>;
+}
+
+function NativeBrowserPanel({onReleased, visible}: {onReleased: (hidden: Promise<unknown>) => void; visible: boolean}) {
   const pane = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<BrowserState>({}); const [address, setAddress] = useState('');
   const [pending, setPending] = useState(false);
   const [actionError, setActionError] = useState(''); const [statusError, setStatusError] = useState(''); const [bindError, setBindError] = useState('');
   const currentState = useRef<BrowserState>({}); const request = useRef(0); const actionPending = useRef(false);
   const lifetime = useRef<object | null>(null); const input = useRef({ focused: false, dirty: false, revision: 0 });
+  const effects = useRef(new Set<Promise<unknown>>());
+  const hostVisible = useRef(visible); hostVisible.current = visible;
+  async function tracked<T>(name: string, data: Record<string, unknown> = {}): Promise<T> {
+    const work = api<T>(name, data); effects.current.add(work);
+    try {return await work;} finally {effects.current.delete(work);}
+  }
   useUpdateReadiness(); const disabled = !updateReadiness.canEdit();
   function acceptState(next: BrowserState) {
     currentState.current = next; setState(next);
@@ -31,15 +62,15 @@ export function BrowserPanel() {
       const key = blocked ? 'hidden' : JSON.stringify(data);
       if (last === key || rect.width < 10 || rect.height < 10) return;
       pending = true;
-      try { await api(blocked ? 'browser_native_hide' : 'browser_native_show', blocked ? {} : data); if (!disposed) { last = key; setBindError(''); } }
+      try { await tracked(blocked ? 'browser_native_hide' : 'browser_native_show', blocked ? {} : data); if (!disposed) { last = key; setBindError(''); } }
       catch (e) { if (!disposed) setBindError(errorText(e)); }
-      finally { pending = false; if (disposed) void api('browser_native_hide').catch(() => {}); else if (dirty) { dirty = false; schedule(); } }
+      finally { pending = false; if (!disposed && dirty) { dirty = false; schedule(); } }
     }
     function schedule() { if (disposed || frame) return; frame = requestAnimationFrame(() => { frame = 0; void bind(); }); }
     const observer = new ResizeObserver(schedule); observer.observe(pane.current); observer.observe(document.documentElement);
     const dialogs = new MutationObserver(schedule); dialogs.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['open', 'class', 'style', 'hidden'] });
     async function refresh() {
-      if (disposed || actionPending.current) return;
+      if (disposed || actionPending.current || !hostVisible.current || document.visibilityState === 'hidden') return;
       const identity = ++request.current;
       try {
         const next = await api<BrowserState & { visible?: boolean }>('browser_native_status');
@@ -49,8 +80,17 @@ export function BrowserPanel() {
         }
       } catch (e) { if (!disposed && identity === request.current) setStatusError(errorText(e)); }
     }
-    window.addEventListener('resize', schedule); schedule(); void refresh(); const timer = setInterval(() => void refresh(), 1500);
-    return () => { disposed = true; if (lifetime.current === owner) lifetime.current = null; clearInterval(timer); cancelAnimationFrame(frame); observer.disconnect(); dialogs.disconnect(); window.removeEventListener('resize', schedule); void api('browser_native_hide').catch(() => {}); };
+    window.addEventListener('resize', schedule); document.addEventListener('visibilitychange', refresh); schedule(); void refresh(); const timer = setInterval(() => void refresh(), 1500);
+    return () => {
+      disposed = true; if (lifetime.current === owner) lifetime.current = null;
+      clearInterval(timer); cancelAnimationFrame(frame); observer.disconnect(); dialogs.disconnect(); window.removeEventListener('resize', schedule); document.removeEventListener('visibilitychange', refresh);
+      // Await every admitted browser effect before the final hide; otherwise a
+      // late Show/navigation can cover a newly mounted desktop evidence view.
+      const outstanding = [...effects.current];
+      const firstHide = hideBrowser();
+      const hidden = outstanding.length ? Promise.allSettled([...outstanding, firstHide]).then(hideBrowser) : firstHide;
+      onReleased(hidden); void hidden.catch(() => {});
+    };
   }, []);
   async function action(name: string, data: Record<string, unknown> = {}) {
     const owner = lifetime.current;
@@ -58,7 +98,7 @@ export function BrowserPanel() {
     const identity = ++request.current; const revision = input.current.revision;
     actionPending.current = true; setPending(true); setActionError('');
     try {
-      const next = await api<BrowserState>(`browser_native_${name}`, data);
+      const next = await tracked<BrowserState>(`browser_native_${name}`, data);
       if (lifetime.current !== owner || identity !== request.current) return;
       currentState.current = next; setState(next); setStatusError('');
       // A submitted address belongs to this action until it settles. Later edits

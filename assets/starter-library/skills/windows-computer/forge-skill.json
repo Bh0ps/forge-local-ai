@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "version": "2.3.0",
+  "bundle": "delivery",
+  "phases": [
+    "discover",
+    "implement",
+    "verify"
+  ],
+  "intents": [
+    "computer",
+    "automate"
+  ],
+  "triggers": [
+    "computer use",
+    "desktop automation",
+    "windows controls",
+    "uia",
+    "edit a background window",
+    "automate windows"
+  ],
+  "recommended_tools": [
+    "computer_windows",
+    "computer_inspect",
+    "computer_set_value"
+  ],
+  "exclude_triggers": [],
+  "resources": [
+    "references/examples.md"
+  ]
+}

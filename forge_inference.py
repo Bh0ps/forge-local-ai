@@ -224,8 +224,9 @@ class CompatibleProvider:
         pending=[]
         for index,message in enumerate(messages):
             if message.get('images'):
+                from forge_images import provider_image_url
                 message['content']=[{'type':'text','text':message['content']}]+[
-                    {'type':'image_url','image_url':{'url':'data:image/png;base64,'+v}} for v in message.pop('images')]
+                    {'type':'image_url','image_url':{'url':provider_image_url(v)}} for v in message.pop('images')]
             for call in message.get('tool_calls',[]):
                 call.setdefault('id','forge_call_'+str(index)+'_'+str(len(pending)))
                 call.setdefault('type','function')

@@ -1070,6 +1070,9 @@ def _tray(api):
 
 
 def main():
+    if '--forge-window-capture' in sys.argv:
+        from forge_window_capture import helper_entry
+        return helper_entry()
     if '--forge-update' in sys.argv:
         from forge_native_handoff import helper_entry
         return helper_entry()
@@ -1200,7 +1203,7 @@ def main():
                     result['smoke_phase'] = 'library'
                     _smoke_checkpoint(result['smoke_phase'])
                     starters = [skill for skill in api.call('skills')['skills'] if skill.get('builtin')]
-                    if len(starters) != 27 or not all(skill['enabled'] and skill['automatic'] for skill in starters):
+                    if len(starters) != 28 or not all(skill['enabled'] and skill['automatic'] for skill in starters):
                         raise ValueError('The packaged starter library was not prepared correctly.')
                     api._window.evaluate_js("(()=>{const button=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='Tools');button?.click();return true;})()")
                     time.sleep(.1)

@@ -1,5 +1,6 @@
 """Durable rounds: replay events, action-bound approvals and resumable compaction."""
 from contextlib import nullcontext
+from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
 import base64
 import hashlib
@@ -247,7 +248,32 @@ class ToolRegistry:
         if name.startswith('github__') and capability=='write': return 'ask'
         if profile=='full_access': return 'allow'
         return 'allow' if capability in ('read','journal') else 'ask'
-    def execute(self,run,name,args,cancel,*,invocation_id=None):
+    def computer_authority(self,run,schema,args,target,policy,approved):
+        """Private exact admission; never resolve UIA targets on its own worker.
+
+        Preserve an approved one-shot ask. A previously allowed call newly
+        requiring approval must stop. The callback takes no coordinator locks.
+        """
+        run,schema,args,target=deepcopy((run,schema,args,target))
+        admitted=approved is True and policy in ('allow','ask')
+        def signature(identifier,name,arguments):
+            return hashlib.sha256(json.dumps([identifier,name,arguments],sort_keys=True,
+                ensure_ascii=True,allow_nan=False,separators=(',',':')).encode()).digest()
+        binding=signature(run['id'],schema['function']['name'],args)
+        def check():
+            if not admitted: return False
+            try:
+                latest=self.permission(run,schema,args,target)
+                return latest=='allow' or latest=='ask' and policy=='ask'
+            except Exception:
+                return False
+        def matches(identifier,name,arguments):
+            try: return admitted and signature(identifier,name,arguments)==binding
+            except Exception: return False
+        check.matches=matches
+        return check
+
+    def execute(self,run,name,args,cancel,*,invocation_id=None,native_authority=None):
         service=self.service; store=service.store
         mismatch=self._preview_browser_mismatch(run,name,args)
         if mismatch: return mismatch
@@ -356,7 +382,15 @@ class ToolRegistry:
         if name=='web_search': return service.core.dispatch('research',{'query':args['query']})
         if name=='web_fetch': return service.web_fetch(args['url'])
         if name.startswith('computer_') and service.computer_broker:
-            return service.computer_broker.execute(name,args,{'run_id':run['id'],'cancel':cancel})
+            args=deepcopy(args)
+            if native_authority is not None:
+                try: bound=native_authority.matches(run['id'],name,args) is True
+                except Exception: bound=False
+                if not bound:
+                    return {'ok':False,'not_executed':True,'error':'Computer action changed after admission. Review the exact action before continuing.'}
+            context={'run_id':run['id'],'cancel':cancel}
+            if native_authority is not None: context['authority_check']=native_authority
+            return service.computer_broker.execute(name,args,context)
         if name.startswith(('mcp__','browser_','skills_')) and service.integrations:
             return service.integrations.execute(name,args,run_context={'run_id':run['id'],'project_id':run.get('project_id'),
                 'project':store.get_project(run['project_id']) if run.get('project_id') else None,'cancel':cancel})
@@ -1146,7 +1180,7 @@ class RunManager:
             '\nNo action from this batch executed. Send a corrected complete call once. Use tools_search/tools_load for absent tools. Do not repeat completed actions.')
 
     def _execute_call(self,run,job,call,index,names,info,started):
-        identifier=run['id']; name=call['function']['name']; args=call['function']['arguments']
+        identifier=run['id']; name=call['function']['name']; args=deepcopy(call['function']['arguments'])
         invocation=identifier+':'+str(run['rounds'])+':'+str(index)
         record=self.store.invocation(invocation,identifier,name,args)
         if record['status']=='completed': return json.loads(record['result'])
@@ -1193,7 +1227,10 @@ class RunManager:
         else:
             self.store.event(identifier,'tool',name=name,arguments=args,state='running',invocation_id=invocation)
             try:
-                result=self.registry.execute(run,name,args,job['cancel'],invocation_id=invocation)
+                native_options={}
+                if name.startswith('computer_'):
+                    native_options['native_authority']=self.registry.computer_authority(run,schema,args,target,policy,allowed)
+                result=self.registry.execute(run,name,args,job['cancel'],invocation_id=invocation,**native_options)
                 if self.registry.capability(schema) not in ('read','journal') and isinstance(result,dict) and not result.get('not_executed') and (result.get('timed_out') or result.get('cancelled') or result.get('outcome_unknown')):
                     raise RuntimeError('Action was interrupted after starting.')
             except Exception as exc:

@@ -1,13 +1,15 @@
 import type { Settings } from './types';
 import { updateReadiness } from './updateReadiness';
-const readActions=new Set(('bootstrap commands projects chats get_chat attachment tasks runs poll plans plan_get unknown_actions goals goal_get spaces agents schedules usage providers provider_presets models show permission_overrides storage_info setup_status openrouter_status github_status github_repos channel_list channel_notifications memory_list memory_export update_status browser_status browser_native_status dictation_status runtime_status hf_status performance_status pending_questions skills skill_read skill_preview plugins catalogs catalog_discover integrations tools skills_search skills_resource_read skill_route_preview skill_versions builder_list builder_get builder_read build_brief_get builder_changes preview_status preview_logs preview_browser_status preview_browser_inspect preview_browser_capture preview_browser_diagnostics run_context_inspect usage_requests command_session_status command_session_read command_session_wait artifact_list artifact_get artifact_download document_list performance performance_benchmarks performance_calibrations draft_get submission_get builder_runtime_get ai_workflow_status ai_workflow_self_test_status ui_layout_get run_activity run_diagnostics_export host_status').split(' '));
+const readActions=new Set(('bootstrap commands projects chats get_chat attachment tasks runs poll plans plan_get unknown_actions goals goal_get spaces agents schedules usage providers provider_presets models show permission_overrides storage_info setup_status openrouter_status github_status github_repos channel_list channel_notifications memory_list memory_export update_status browser_status browser_native_status computer_view_state dictation_status runtime_status hf_status performance_status pending_questions skills skill_read skill_preview plugins catalogs catalog_discover integrations tools skills_search skills_resource_read skill_route_preview skill_versions builder_list builder_get builder_read build_brief_get builder_changes preview_status preview_logs preview_browser_status preview_browser_inspect preview_browser_capture preview_browser_diagnostics run_context_inspect usage_requests command_session_status command_session_read command_session_wait artifact_list artifact_get artifact_download document_list performance performance_benchmarks performance_calibrations draft_get submission_get builder_runtime_get ai_workflow_status ai_workflow_self_test_status ui_layout_get run_activity run_diagnostics_export host_status').split(' '));
 const persistenceActions=new Set(['draft_save','draft_confirm','ui_layout_save']);
 let pendingMutations=0;
 updateReadiness.register({kind:'requests',inspect:()=>({reasons:pendingMutations ? ['submission_pending'] : [],pending:pendingMutations,state:pendingMutations?'waiting':'ready'}),flushAndConfirm:async()=>pendingMutations ? {ok:false,reason:'submission_pending'} : {ok:true,receipts:[]}});
 function mutationAdmission(action:string,data:Record<string,unknown>) {
   if(action.startsWith('update_handoff_') || readActions.has(action) || action==='settings' && !Object.keys(data).length)return ()=>{};
   if(persistenceActions.has(action) && ['idle','failed','checking'].includes(updateReadiness.getSnapshot().phase))return ()=>{};
-  if(!updateReadiness.canEdit())throw new Error('Forge is confirming a restart. Keep working after cancellation is confirmed.');
+  // Stop remains a counted mutation: invalidate restart readiness, but never
+  // let a locked workspace prevent the host from cancelling active effects.
+  if(!updateReadiness.canEdit() && action!=='emergency_stop')throw new Error('Forge is confirming a restart. Keep working after cancellation is confirmed.');
   pendingMutations++;updateReadiness.changed();let finished=false;
   return ()=>{if(!finished){finished=true;pendingMutations--;updateReadiness.changed();}};
 }
@@ -68,6 +70,8 @@ export async function api<T = Record<string, unknown>>(action: string, data: Rec
     }
   }
   if (result && typeof result === 'object' && 'error' in result && (result as { error?: unknown }).error) throw new Error(String((result as { error: unknown }).error));
+  if (action === 'emergency_stop' && (!result || typeof result !== 'object' || !('ok' in result) || result.ok !== true))
+    throw new Error('The emergency stop could not be confirmed. Use the Forge tray menu or emergency shortcut.');
   return result as T;
   } finally {finish();}
 }

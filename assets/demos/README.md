@@ -1,5 +1,23 @@
 # Forge demo media
 
+The 5.1.10 captures show the read-only Desktop view using synthetic saved
+evidence. Opening this view starts no capture or tool action. The dark and
+narrow light screenshots retain Forge's Copper palette; both were visually
+reviewed and contain no embedded metadata. They do not depict a second OS
+cursor or an isolated desktop.
+
+| File | Demonstration |
+| --- | --- |
+| `forge-5.1.10-desktop-dark.png` | Saved desktop evidence and activity in the dark workspace. |
+| `forge-5.1.10-desktop-light.png` | The same view in a narrow light workspace. |
+
+Private production checks cover keyboard controls, delayed native hiding,
+hidden polling, enlarged text, reduced motion and retained drafts. Native
+capture tests use separate original disposable windows; their raw receipts
+remain private.
+
+## Previous 5.1.9 captures
+
 The 5.1.9 captures show Performance settings with consistent supporting text,
 spacing and panel insets. They use a disposable workspace with synthetic data,
 without model inference, external requests or personal content. Both PNG files

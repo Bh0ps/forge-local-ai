@@ -37,9 +37,9 @@ def test_every_shipped_recipe_manifest_and_lazy_example_matches_canonical_source
         folder = forge_library.ASSET_ROOT / "skills" / item["id"]
         for relative, expected in generate_starter_skills.rendered_assets(item).items():
             assert (folder / relative).read_bytes() == expected.encode("utf-8"), (item["id"], relative)
-    assert len(WORKFLOWS) == 27
+    assert len(WORKFLOWS) == 28
     assert {item["id"] for item in WORKFLOWS if item.get("examples")} == UPGRADED | {
-        "windows-dotnet", "windows-native-cpp", "desktop-executable",
+        "windows-dotnet", "windows-native-cpp", "desktop-executable", "windows-computer",
     }
     assert {item["version"] for item in WORKFLOWS if item["id"] in UPGRADED} == {"2.1.0"}
     # The previously shipped guided-task recipe is not downgraded by generation.

@@ -20,10 +20,10 @@ def starter(hub, identity):
     return next(item for item in hub.discover_skills() if item.get("library_id") == identity)
 
 
-def test_27_workflows_have_compact_guidance_and_real_resources(skills):
+def test_28_workflows_have_compact_guidance_and_real_resources(skills):
     rows = skills.discover_skills()
-    assert len(rows) == 27 and len({item["bundle"] for item in rows}) == 6
-    assert len({item["description"] for item in rows}) == 27
+    assert len(rows) == 28 and len({item["bundle"] for item in rows}) == 6
+    assert len({item["description"] for item in rows}) == 28
     for row in rows:
         document = skills.read_skill(row["id"])
         assert not document["truncated"] and len(document["text"]) < 6000
@@ -184,8 +184,9 @@ def test_shipped_tool_examples_match_real_coordinator_schemas(skills):
     from forge_runs import WORKFLOW
     from project_tools import ProjectTools
     from forge_builder import BuilderManager
+    from computer_tools import ComputerBroker
     schemas = {item["function"]["name"]: item["function"]["parameters"]
-               for item in ProjectTools.schemas() + BUILTINS + [WEB_TOOL] + WORKFLOW + skills.schemas() + BuilderManager.schemas(None)}
+               for item in ProjectTools.schemas() + BUILTINS + [WEB_TOOL] + WORKFLOW + skills.schemas() + BuilderManager.schemas(None) + ComputerBroker.schemas(None)}
     for item in WORKFLOWS:
         match = re.fullmatch(r"(\w+)\((.*)\)", item["example"])
         assert match and match[1] in schemas, item["id"]
