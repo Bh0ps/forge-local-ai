@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { api, isNative } from './api';
 import { updateReadiness, useReadinessParticipant } from './updateReadiness';
 
-export interface WorkspaceLayout {sidebar_open:boolean;sidebar_width:number;right_panel_open:boolean;right_panel_width:number;right_panel_tab:string;collapsed_project_ids:string[];}
-export const DEFAULT_LAYOUT: WorkspaceLayout = {sidebar_open:true,sidebar_width:260,right_panel_open:false,right_panel_width:320,right_panel_tab:'activity',collapsed_project_ids:[]};
+export type BrowserMode = 'browser' | 'desktop';
+export interface WorkspaceLayout {sidebar_open:boolean;sidebar_width:number;right_panel_open:boolean;right_panel_width:number;right_panel_tab:string;collapsed_project_ids:string[];browser_mode:BrowserMode;}
+export const DEFAULT_LAYOUT: WorkspaceLayout = {sidebar_open:true,sidebar_width:260,right_panel_open:false,right_panel_width:320,right_panel_tab:'activity',collapsed_project_ids:[],browser_mode:'browser'};
 const tabs=['context','browser','activity','goals','files'];
 export function normalizeLayout(value:Partial<WorkspaceLayout>):WorkspaceLayout {
   const width=(candidate:unknown,fallback:number,min:number,max:number)=>typeof candidate==='number'&&Number.isFinite(candidate)?Math.round(Math.max(min,Math.min(max,candidate))):fallback;
-  return {sidebar_open:typeof value.sidebar_open==='boolean'?value.sidebar_open:true,sidebar_width:width(value.sidebar_width,260,220,360),right_panel_open:typeof value.right_panel_open==='boolean'?value.right_panel_open:false,right_panel_width:width(value.right_panel_width,320,280,520),right_panel_tab:tabs.includes(value.right_panel_tab || '')?value.right_panel_tab!:'activity',collapsed_project_ids:Array.isArray(value.collapsed_project_ids)?value.collapsed_project_ids.filter(id=>typeof id==='string'):[]};
+  return {sidebar_open:typeof value.sidebar_open==='boolean'?value.sidebar_open:true,sidebar_width:width(value.sidebar_width,260,220,360),right_panel_open:typeof value.right_panel_open==='boolean'?value.right_panel_open:false,right_panel_width:width(value.right_panel_width,320,280,520),right_panel_tab:tabs.includes(value.right_panel_tab || '')?value.right_panel_tab!:'activity',collapsed_project_ids:Array.isArray(value.collapsed_project_ids)?value.collapsed_project_ids.filter(id=>typeof id==='string'):[],browser_mode:value.browser_mode==='desktop'?'desktop':'browser'};
 }
 function acknowledgedLayout(value:unknown):WorkspaceLayout|null {
   if(!value || typeof value!=='object' || Array.isArray(value))return null;
@@ -16,7 +17,8 @@ function acknowledgedLayout(value:unknown):WorkspaceLayout|null {
     || typeof saved.sidebar_width!=='number' || !Number.isFinite(saved.sidebar_width)
     || typeof saved.right_panel_width!=='number' || !Number.isFinite(saved.right_panel_width)
     || !tabs.includes(saved.right_panel_tab || '') || !Array.isArray(saved.collapsed_project_ids)
-    || saved.collapsed_project_ids.some(id=>typeof id!=='string'))return null;
+    || saved.collapsed_project_ids.some(id=>typeof id!=='string')
+    || saved.browser_mode!==undefined && saved.browser_mode!=='browser' && saved.browser_mode!=='desktop')return null;
   return normalizeLayout(saved);
 }
 let browserClient='';
@@ -29,14 +31,18 @@ export function layoutClientId() {
   return browserClient;
 }
 export function useWorkspaceLayout(enabled:boolean,notify:(message:string)=>void) {
+  const transport=window.pywebview?.api.call || window.fetch;
   const [layout,setLayout]=useState<WorkspaceLayout>(DEFAULT_LAYOUT), [ready,setReady]=useState(false), [transportRevision,setTransportRevision]=useState(0);
   const [error,setError]=useState<'load'|'save'|null>(null), [retrying,setRetrying]=useState(false);
   const touched=useRef(false), latest=useRef(layout), lastSaved=useRef(''), client=useRef(''), queue=useRef(Promise.resolve()), mounted=useRef(true);
+  const browserModeTouched=useRef(false);
   const scopeGeneration=useRef(0), loadRequest=useRef(0), enabledRef=useRef(enabled), readyRef=useRef(false), loadStarted=useRef(false);
   const errorRef=useRef<'load'|'save'|null>(null), retryingRef=useRef(false);
+  const boundTransport=useRef(transport);
   enabledRef.current=enabled;
   latest.current=layout;
-  const current=(identity:string,generation:number)=>enabledRef.current && identity===client.current && identity===layoutClientId() && generation===scopeGeneration.current;
+  const current=(identity:string,generation:number)=>enabledRef.current && identity===client.current && identity===layoutClientId() && generation===scopeGeneration.current
+    && boundTransport.current===(window.pywebview?.api.call || window.fetch);
   const failure=(value:'load'|'save'|null)=>{errorRef.current=value;if(mounted.current)setError(value);};
   const loaded=(value:boolean)=>{readyRef.current=value;if(mounted.current)setReady(value);};
 
@@ -86,6 +92,11 @@ export function useWorkspaceLayout(enabled:boolean,notify:(message:string)=>void
       if(!next)throw new Error('Invalid layout response');
       lastSaved.current=JSON.stringify(next);
       if(!touched.current){latest.current=next;setLayout(next);}
+      else if(!browserModeTouched.current){
+        // A pane resize before the first read does not select Browser. Adopt
+        // the saved subview while retaining the user's other local edits.
+        latest.current={...latest.current,browser_mode:next.browser_mode};setLayout(latest.current);
+      }
       failure(null);
       loaded(true);
       return true;
@@ -119,8 +130,8 @@ export function useWorkspaceLayout(enabled:boolean,notify:(message:string)=>void
   };
   useReadinessParticipant({
     kind:'layout',
-    inspect:()=>({reasons:enabled && (!readyRef.current || errorRef.current || retryingRef.current)?['preferences_pending']:[],
-      state:!enabled?'disabled':retryingRef.current?'retrying':errorRef.current==='load'?'load_failed':errorRef.current==='save'?'save_failed':!client.current?'uninitialized':!readyRef.current?'loading':'ready',
+    inspect:()=>({reasons:enabled && (!current(client.current,scopeGeneration.current) || !readyRef.current || errorRef.current || retryingRef.current)?['preferences_pending']:[],
+      state:!enabled?'disabled':retryingRef.current?'retrying':errorRef.current==='load'?'load_failed':errorRef.current==='save'?'save_failed':!client.current?'uninitialized':!current(client.current,scopeGeneration.current) || !readyRef.current?'loading':'ready',
       load_started:loadStarted.current,
     }),
     flushAndConfirm:async()=>{
@@ -133,23 +144,29 @@ export function useWorkspaceLayout(enabled:boolean,notify:(message:string)=>void
   });
   useEffect(()=>{
     mounted.current=true;
-    const nativeReady=()=>{if(client.current && client.current!==layoutClientId())setTransportRevision(value=>value+1);};
+    const nativeReady=()=>{if(client.current && (client.current!==layoutClientId() || boundTransport.current!==(window.pywebview?.api.call || window.fetch)))setTransportRevision(value=>value+1);};
     window.addEventListener('pywebviewready',nativeReady);
     return()=>{mounted.current=false;loadRequest.current++;window.removeEventListener('pywebviewready',nativeReady);};
   },[]);
   useEffect(()=>{
     if(!enabled)return;
     const identity=layoutClientId(),generation=++scopeGeneration.current;
+    const sameRowTransportChange=client.current===identity && boundTransport.current!==transport;
+    const previousWrites=queue.current;
     if(client.current && client.current!==identity){
-      touched.current=false;updateReadiness.changed();
+      touched.current=false;browserModeTouched.current=false;updateReadiness.changed();
       // Retired requests still finish against their explicit old client_id.
       // They must not hold writes to the new client's separate coordinator row.
       queue.current=Promise.resolve();
     }
-    client.current=identity;loaded(false);loadStarted.current=false;lastSaved.current='';failure(null);retryingRef.current=false;setRetrying(false);
-    void load(identity,generation);
+    if(sameRowTransportChange)updateReadiness.changed();
+    client.current=identity;boundTransport.current=transport;loaded(false);loadStarted.current=false;lastSaved.current='';failure(null);retryingRef.current=false;setRetrying(false);
+    // The same row may still have an admitted old write. Read its current
+    // value only after that queue drains; unsent old writes fail their fence.
+    if(sameRowTransportChange)void previousWrites.then(()=>{if(current(identity,generation))void load(identity,generation);});
+    else void load(identity,generation);
     return()=>{loadRequest.current++;};
-  },[enabled,transportRevision]);
+  },[enabled,transportRevision,transport]);
   useEffect(()=>{
     if(!ready || error || retrying)return;
     const timer=setTimeout(()=>void save(layout),300);
@@ -159,9 +176,10 @@ export function useWorkspaceLayout(enabled:boolean,notify:(message:string)=>void
   const update=(delta:Partial<WorkspaceLayout>)=>{
     if(!updateReadiness.canEdit())return;
     updateReadiness.changed();touched.current=true;
+    if(Object.prototype.hasOwnProperty.call(delta,'browser_mode'))browserModeTouched.current=true;
     const next=normalizeLayout({...latest.current,...delta});latest.current=next;setLayout(next);
   };
-  return {layout,update,ready,error,retrying,retry};
+  return {layout,update,ready:enabled && ready && current(client.current,scopeGeneration.current),error,retrying,retry};
 }
 export function ResizeHandle({label,value,min,max,change,reverse=false}: {label:string;value:number;min:number;max:number;change:(value:number)=>void;reverse?:boolean}) {
   const drag=useRef<{x:number;width:number;pointer:number}|null>(null);

@@ -84,6 +84,15 @@ def _identifier(value):
     return isinstance(value, str) and 0 < len(value) <= 512 and not any(ord(char) < 32 for char in value)
 
 
+def textgen_catalog(value):
+    """Textgen advertises only its current loaded model, never loader authority."""
+    models = value.get('data') if isinstance(value, dict) else None
+    if (not isinstance(models, list) or len(models) > 1
+            or any(not isinstance(item, dict) or not _identifier(item.get('id')) for item in models)):
+        raise ValueError('Textgen returned an invalid loaded-model catalog.')
+    return [{'id': item['id']} for item in models]
+
+
 def _context(value):
     return value if type(value) is int and 1 <= value <= 2**31 - 1 else None
 

@@ -166,7 +166,11 @@ class CompatibleProvider:
         from forge_provider_metadata import fetch_json
         try:
             result=fetch_json(self.base+'/models',headers_factory=self._headers)
-            return [{'name':m['id'],'model':m['id'],'capabilities':self.config.get('capabilities',[])} for m in result.get('data',[])]
+            if self.config.get('preset_id')=='textgen':
+                from forge_provider_metadata import textgen_catalog
+                entries=textgen_catalog(result)
+            else:entries=result.get('data',[])
+            return [{'name':m['id'],'model':m['id'],'capabilities':self.config.get('capabilities',[])} for m in entries]
         except EngineAccessFailure:raise
         except httpx.HTTPError as exc:
             status=exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
@@ -209,16 +213,34 @@ class CompatibleProvider:
         cancel = cancel if cancel is not None else threading.Event()
         url=self.base+'/chat/completions'
         guard=data.get('_request_guard')
-        def headers():
+        def headers(target=url):
             from forge_cloud_policy import CloudPolicyRejected
             from forge_openrouter import OpenRouterFailure
             try:
                 if guard is not None:guard()
-                result=self._headers(url,cancel)
+                result=self._headers(target,cancel)
                 if guard is not None:guard()
                 return result
             except (EngineAccessFailure,CloudPolicyRejected,OpenRouterFailure):raise
             except Exception:raise EngineAccessFailure('configuration',provider_id=self.config.get('kind')) from None
+        exact_textgen=self.config.get('preset_id')=='textgen'
+        if exact_textgen:
+            from forge_provider_metadata import fetch_json,textgen_catalog,ProviderProbeRevoked
+            from forge_cloud_policy import CloudPolicyRejected
+            from forge_openrouter import OpenRouterFailure
+            try:
+                catalog=textgen_catalog(fetch_json(self.base+'/models',cancel=cancel,headers_factory=headers))
+            except (EngineAccessFailure,CloudPolicyRejected,OpenRouterFailure):raise
+            except ProviderProbeRevoked:
+                raise EngineAccessFailure('cancelled',provider_id=self.config.get('kind')) from None
+            except httpx.HTTPStatusError as exc:
+                status=exc.response.status_code
+                raise ProviderStreamFailure('Textgen model verification failed. Check the connection and saved credentials.',
+                    category='authentication' if status in (401,403) else 'metadata',http_status=status) from None
+            except Exception:
+                raise ProviderStreamFailure('Textgen could not verify its loaded model. Refresh models after checking the engine.',category='protocol') from None
+            if len(catalog)!=1 or catalog[0]['id']!=data.get('model'):
+                raise ProviderStreamFailure('The selected Textgen model is not currently loaded. Load it in Textgen and refresh models.',category='protocol')
         payload=Core._agent_payload(data)
         messages=payload['messages']
         pending=[]
@@ -260,6 +282,15 @@ class CompatibleProvider:
                 try: packet=json.loads(raw)
                 except ValueError: raise ValueError('Provider returned an invalid response stream.') from None
                 if not isinstance(packet,dict): raise ValueError('Provider returned an invalid response packet.')
+                if exact_textgen and packet.get('error'):
+                    # Error-only SSE packets need not have model identity. They
+                    # never publish deltas; preserve their established recovery.
+                    error=packet['error']
+                    code=error.get('code') if isinstance(error,dict) else None
+                    raise ProviderStreamFailure('Provider rejected the streamed response.',category='provider_error',
+                        http_status=code if type(code) is int and 400<=code<=599 else None)
+                if exact_textgen and packet.get('model')!=data.get('model'):
+                    raise ProviderStreamFailure('Textgen changed or omitted the selected model identity. Refresh models before retrying.',category='protocol')
                 if isinstance(packet.get('model'),str) and len(packet['model'])<=300:
                     if final.get('provider_model') and final['provider_model']!=packet['model']:
                         raise ProviderStreamFailure('Provider changed model identity within one response.')

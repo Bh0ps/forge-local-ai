@@ -66,6 +66,156 @@ def sample(tps=10,**extra):
         'decode_seconds':20/tps,'prefill_seconds':.2,'ttft_seconds':.1,'total_seconds':20/tps+.3,
         'input_tokens':40,'output_tokens':20,**extra}
 
+
+def metadata_reads(manager,monkeypatch):
+    core=manager.service.providers.core;reads={'models':0,'show':0,'version':0}
+    dispatch=core.dispatch;request=core.request
+    def counted_dispatch(action,data):
+        if action in reads:reads[action]+=1
+        return dispatch(action,data)
+    def counted_request(method,path):
+        if path=='/version':reads['version']+=1
+        return request(method,path)
+    monkeypatch.setattr(core,'dispatch',counted_dispatch)
+    monkeypatch.setattr(core,'request',counted_request)
+    return reads
+
+
+def profiles(manager,count=10,**extra):
+    first=profile(manager,**extra)
+    for index in range(1,count):
+        manager.store.save_entity('calibrations',{**first,'id':f'measured-{index}'})
+    return [p['id'] for p in manager.store.entities('calibrations')]
+
+
+@pytest.mark.parametrize('count',[1,10])
+@pytest.mark.parametrize('stale',[False,True])
+def test_performance_snapshot_reads_exact_model_once_even_for_rejected_profiles(manager,monkeypatch,count,stale):
+    profiles(manager,count);manager.snapshot()
+    if stale:manager.service.providers.core.version='fixture-engine-2'
+    reads=metadata_reads(manager,monkeypatch)
+    for request in range(2):
+        result=manager.snapshot()
+        assert reads=={key:request+1 for key in reads}
+        assert len(result['calibrations'])==count
+        assert all(p['calibrated'] is (not stale) for p in result['calibrations'])
+        assert result['tuning']['eligible'] is True
+        if stale:assert all(p['eligibility_reason']=='binding_changed' for p in result['calibrations'])
+
+
+def test_failed_performance_metadata_is_read_once_and_retried_next_request(manager,monkeypatch):
+    profiles(manager);manager.snapshot()
+    core=manager.service.providers.core;original=core.dispatch
+    fail=True
+    def unavailable(action,data):
+        if fail and action=='models':raise ValueError('private-fixture-metadata-marker')
+        return original(action,data)
+    monkeypatch.setattr(core,'dispatch',unavailable)
+    reads=metadata_reads(manager,monkeypatch)
+    result=manager.snapshot()
+    assert reads=={'models':1,'show':0,'version':0}
+    assert all(not p['calibrated'] and p['eligibility_reason']=='identity_unavailable' for p in result['calibrations'])
+    assert result['tuning']['eligible'] is False
+    assert 'private-fixture-metadata-marker' not in str(result)
+    fail=False
+    result=manager.snapshot()
+    assert reads=={'models':2,'show':1,'version':1}
+    assert all(p['calibrated'] for p in result['calibrations']) and result['tuning']['eligible']
+
+
+def test_ineligible_profile_display_does_not_request_model_facts(manager,monkeypatch):
+    profiles(manager,validated=False)
+    reads=metadata_reads(manager,monkeypatch)
+    result=manager.dispatch('performance_calibrations',{})
+    assert reads=={'models':0,'show':0,'version':0}
+    assert all(p['eligibility_reason']=='recalibration_required' for p in result['calibrations'])
+
+
+@pytest.mark.parametrize('stale',[False,True])
+def test_adaptive_admission_shares_facts_but_each_request_revalidates(manager,monkeypatch,stale):
+    ids=profiles(manager)
+    current={**manager.store.get_settings(),'adaptive_enabled':True,'adaptive_profile_ids':ids}
+    if stale:manager.service.providers.core.version='fixture-engine-2'
+    reads=metadata_reads(manager,monkeypatch)
+    first=performance.adaptive_settings(manager.store,{},current,manager.service.providers)
+    assert reads=={'models':1,'show':1,'version':1}
+    assert first['num_thread']==(4 if stale else 8)
+    assert all(first[k]==current[k] for k in ('provider_id','model','context','thinking','tokens','temperature'))
+    manager.service.providers.core.version='fixture-engine-3'
+    second=performance.adaptive_settings(manager.store,{},current,manager.service.providers)
+    assert reads=={'models':2,'show':2,'version':2}
+    assert second['num_thread']==4 and 'adaptive_applied_profile' not in second
+
+
+@pytest.mark.parametrize('operation',['apply','approve','adaptive'])
+def test_display_facts_never_authorize_a_later_profile_change(manager,monkeypatch,operation):
+    ids=profiles(manager);manager.snapshot()
+    manager.service.providers.core.catalog[0]['digest']='b'*64
+    before=manager.store.get_settings();reads=metadata_reads(manager,monkeypatch)
+    if operation=='apply':
+        with pytest.raises(ValueError,match='recalibration'):manager.apply(ids[0])
+    elif operation=='approve':
+        with pytest.raises(ValueError,match='recalibration'):manager.dispatch('performance_profile_accept',{'id':ids[0]})
+    else:
+        current={**before,'adaptive_enabled':True,'adaptive_profile_ids':ids}
+        assert performance.adaptive_settings(manager.store,{},current,manager.service.providers)['num_thread']==4
+    assert reads=={'models':1,'show':1,'version':1} and manager.store.get_settings()==before
+
+
+def test_provider_change_during_profile_review_cannot_apply_prior_candidate(manager,monkeypatch):
+    ids=profiles(manager)
+    current={**manager.store.get_settings(),'adaptive_enabled':True,'adaptive_profile_ids':ids}
+    original=performance.fresh_profile;calls=0
+    def changed(*args,**kwargs):
+        nonlocal calls
+        result=original(*args,**kwargs);calls+=1
+        if calls==1:manager.service.providers.core.base='http://127.0.0.1:11435/api'
+        return result
+    monkeypatch.setattr(performance,'fresh_profile',changed)
+    reads=metadata_reads(manager,monkeypatch)
+    result=performance.adaptive_settings(manager.store,{},current,manager.service.providers)
+    assert reads=={'models':1,'show':1,'version':1}
+    assert result['num_thread']==4 and 'adaptive_applied_profile' not in result
+
+
+@pytest.mark.parametrize('median',[None,False,True,'0.1',0,-1,'missing'],
+                         ids=['null','false','true','string','zero','negative','missing'])
+def test_bad_stored_probe_timing_cannot_be_approved_applied_or_break_profile_display(manager,median):
+    bad=profile(manager,median_total_seconds=median)
+    if median=='missing':
+        bad.pop('median_total_seconds');manager.store.save_entity('calibrations',bad)
+    before=manager.store.get_settings()
+    with pytest.raises(ValueError,match='recalibration'):manager.dispatch('performance_profile_accept',{'id':bad['id']})
+    with pytest.raises(ValueError,match='recalibration'):manager.apply(bad['id'])
+    view=manager.snapshot()
+    assert not view['calibrations'][0]['calibrated']
+    assert view['calibrations'][0]['eligibility_reason']=='measurement_incomplete'
+    current={**before,'adaptive_enabled':True,'adaptive_profile_ids':[bad['id']]}
+    result=performance.adaptive_settings(manager.store,{},current,manager.service.providers)
+    assert result['num_thread']==before['num_thread'] and 'adaptive_applied_profile' not in result
+    assert manager.store.get_settings()==before
+    good=profile(manager,id='measured-good',median_total_seconds=2,settings={'num_thread':6})
+    result=performance.adaptive_settings(manager.store,{}, {**current,'adaptive_profile_ids':[bad['id'],good['id']]},manager.service.providers)
+    assert result['num_thread']==6 and result['adaptive_applied_profile']==good['id']
+    assert all(result[k]==before[k] for k in ('provider_id','model','context','thinking','tokens','temperature'))
+
+
+@pytest.mark.parametrize('median',[float('nan'),float('inf'),float('-inf')],ids=['nan','infinite','negative-infinite'])
+def test_nonfinite_in_memory_probe_timing_is_refused_before_model_reads(manager,monkeypatch,median):
+    bad=profile(manager);bad['median_total_seconds']=median
+    reads=metadata_reads(manager,monkeypatch)
+    with pytest.raises(ValueError,match='measurement_incomplete'):
+        performance.fresh_profile(manager.store,manager.service.providers,manager.store.get_settings(),bad)
+    assert reads=={'models':0,'show':0,'version':0}
+
+
+@pytest.mark.parametrize('median',[.000001,1,2.5])
+def test_finite_positive_legacy_probe_timing_still_approves_and_applies(manager,median):
+    good=profile(manager,median_total_seconds=median)
+    accepted=manager.dispatch('performance_profile_accept',{'id':good['id']})
+    assert good['id'] in accepted['settings']['adaptive_profile_ids']
+    assert manager.apply(good['id'])['settings']['num_thread']==8
+
 def run_tune(manager,monkeypatch,probe=None):
     settings=manager.store.get_settings();contract,facts=manager._tuning_contract(settings)
     assert contract['eligible']

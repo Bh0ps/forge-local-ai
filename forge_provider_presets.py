@@ -29,6 +29,9 @@ _PRESETS = tuple(MappingProxyType(dict(id=identifier, name=name, kind=kind, url=
         ('koboldcpp', 'KoboldCpp', 'openai-compatible', 'http://127.0.0.1:5001/v1',
          'https://github.com/LostRuins/koboldcpp/wiki',
          'Connect to KoboldCpp\'s compatible API; test the selected model separately.', 'desktop'),
+        ('textgen', 'Textgen (Oobabooga)', 'openai-compatible', 'http://127.0.0.1:5000/v1',
+         'https://github.com/oobabooga/textgen/wiki/12-%E2%80%90-OpenAI-API',
+         'Start Textgen with --api and load a model in the engine. Forge uses its OpenAI-compatible API.', 'desktop'),
     ))
 _BY_ID = MappingProxyType({preset['id']: preset for preset in _PRESETS})
 

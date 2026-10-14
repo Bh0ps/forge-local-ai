@@ -102,11 +102,38 @@ def calibration_binding(store,providers,settings):
     return calibration_facts(store,providers,settings)['binding']
 
 
+class _CalibrationRead:
+    """One lazy authoritative read for this operation, including failed reads.
+
+    Never retained in a manager/cache or reused by apply, approval or another
+    inference admission. A rejected profile does not discard the facts needed
+    to evaluate the remaining profiles in the same request.
+    """
+    def __init__(self,store,providers,settings,telemetry=None):
+        self.store=store;self.providers=providers;self.settings=dict(settings)
+        self.telemetry=telemetry;self.loaded=False;self.value=None;self.error=None
+
+    def get(self):
+        if not self.loaded:
+            self.loaded=True
+            try:self.value=calibration_facts(self.store,self.providers,self.settings,self.telemetry)
+            except Exception as error:self.error=error
+        if self.error is not None:
+            # Bound the traceback when a failure is consumed by many profiles.
+            raise self.error.with_traceback(None) from None
+        if self.value['provider_signature']!=_provider_signature(self.providers,self.settings.get('provider_id','ollama')):
+            raise ValueError('provider_changed')
+        return self.value
+
+
 def fresh_profile(store,providers,settings,profile,facts=None,telemetry=None):
     if profile.get('validated') is not True or profile.get('immutable_identity') is not True or not profile.get('binding'):
         raise ValueError('recalibration_required')
     if any(profile.get(key)!=settings.get(key) for key in ('provider_id','model','context','thinking','tokens','temperature')):
         raise ValueError('selection_changed')
+    median=profile.get('median_total_seconds')
+    if type(median) not in (int,float) or not math.isfinite(median) or median<=0:
+        raise ValueError('measurement_incomplete')
     knobs=profile.get('settings',{})
     if not isinstance(knobs,dict) or 'num_thread' in knobs and (type(knobs['num_thread']) is not int or not 1<=knobs['num_thread']<=64):
         raise ValueError('recalibration_required')
@@ -114,7 +141,7 @@ def fresh_profile(store,providers,settings,profile,facts=None,telemetry=None):
         benchmark=store.entity('benchmarks',profile.get('benchmark_id',''))
         if benchmark.get('status')!='completed' or benchmark.get('completed_requests')!=benchmark.get('total_requests') or not profile.get('measurement',{}).get('accepted'):
             raise ValueError('measurement_incomplete')
-    facts=facts if facts is not None else calibration_facts(store,providers,settings,telemetry)
+    facts=facts.get() if isinstance(facts,_CalibrationRead) else facts if facts is not None else calibration_facts(store,providers,settings,telemetry)
     if profile.get('model_digest')!=facts['model_digest'] or profile['binding']!=facts['binding']:
         raise ValueError('binding_changed')
     return facts
@@ -129,15 +156,17 @@ def adaptive_settings(store,data,current,providers=None):
     candidates=[]
     if not providers: return settings
     try:
-        facts=None
+        facts=_CalibrationRead(store,providers,settings)
         for profile in store.entities('calibrations'):
             if profile['id'] not in approved: continue
             try:
-                facts=fresh_profile(store,providers,settings,profile,facts)
+                fresh_profile(store,providers,settings,profile,facts)
                 candidates.append(profile)
             except ValueError: continue
     except Exception: return settings
     if not candidates: return settings
+    try:facts.get()
+    except Exception:return settings
     profile=min(candidates,key=lambda p:p.get('median_total_seconds',float('inf')))
     proposed=profile.get('settings',{})
     for key in ('num_thread','keep_alive'):
@@ -218,7 +247,7 @@ class PerformanceManager:
             try: info=self.service.providers.capabilities(provider_id,name) if hasattr(self.service.providers,'capabilities') else provider.capabilities(name)
             except Exception: info={}
             return {**model,'name':name,'capabilities':info.get('capabilities',model.get('capabilities',[])),
-                           'context_limit':advertised_context_limit(info) or 32768}
+                           'context_limit':advertised_context_limit(info)}
         catalog=self.service.providers.models(provider_id,refresh=refresh)
         visible=catalog[:24]
         chosen=next((model for model in catalog if (model.get('name') or model.get('model'))==selected_model),None)
@@ -228,12 +257,12 @@ class PerformanceManager:
             with self.lock:
                 if generation==self.cache_generation:self.cache[provider_id]=(time.monotonic(),values,(signature,selected_model))
         return values
-    def _profile_views(self,settings,telemetry=None):
-        values=[]; facts=None
+    def _profile_views(self,settings,telemetry=None,facts_read=None):
+        values=[]; facts=facts_read if facts_read is not None else _CalibrationRead(self.store,self.service.providers,settings,telemetry)
         for profile in self.store.entities('calibrations'):
             valid=False;reason='recalibration_required'
             try:
-                facts=fresh_profile(self.store,self.service.providers,settings,profile,facts,telemetry)
+                fresh_profile(self.store,self.service.providers,settings,profile,facts,telemetry)
                 valid=True;reason='fresh_measurement'
             except ValueError as error:
                 reason=str(error) if str(error) in ('recalibration_required','measurement_incomplete','selection_changed','binding_changed','provider_changed','model_unavailable','immutable_identity_missing','thinking_control_unsupported','hardware_unknown','gpu_telemetry_unknown','unsupported_engine','server_hardware_unknown') else 'identity_unavailable'
@@ -244,7 +273,8 @@ class PerformanceManager:
         try: models=self._models(settings['provider_id'],settings.get('model'),refresh)
         except Exception: models=[]
         capacity=max([g['total_bytes'] for g in telemetry['gpus']] or [telemetry['ram']['total_bytes']*.30])
-        eligible=[m for m in models if 'tools' in m['capabilities'] and 0<m.get('size',0)<capacity*.75 and m['context_limit']>=2048]
+        eligible=[m for m in models if 'tools' in m['capabilities'] and 0<m.get('size',0)<capacity*.75
+                  and type(m['context_limit']) is int and m['context_limit']>=2048]
         calibrated=profiles if profiles is not None else self._profile_views(settings,telemetry)
         result=[{'id':p['id'],'title':'Measured '+p.get('title',p['model']),
             'description':f"{p['model']} · {p['context']//1024}K · {p['median_total_seconds']:.2f}s median probe",
@@ -273,8 +303,9 @@ class PerformanceManager:
         telemetry=self._cached('hardware',4,hardware)
         signature=_provider_signature(self.service.providers,settings['provider_id'])
         engine=self._cached('engine:'+settings['provider_id'],10,lambda:self.engine(settings['provider_id']),signature)
-        profiles=self._profile_views(settings,telemetry)
-        tuning,_=self._tuning_contract(settings,telemetry)
+        facts_read=_CalibrationRead(self.store,self.service.providers,settings,telemetry)
+        profiles=self._profile_views(settings,telemetry,facts_read)
+        tuning,_=self._tuning_contract(settings,telemetry,facts_read)
         return {'telemetry':telemetry,'selected':{k:settings.get(k) for k in ('provider_id','model','context','thinking','keep_alive','num_thread')},
                 'profiles':ENGINE_PROFILES,
                 'engine':engine,'recommendations':self.recommendations(telemetry,settings,profiles),'tuning':tuning,
@@ -316,7 +347,7 @@ class PerformanceManager:
         with queue.condition:
             if queue.active or queue.pending:return 'foreground_work'
         return None
-    def _tuning_contract(self,settings,telemetry=None):
+    def _tuning_contract(self,settings,telemetry=None,facts_read=None):
         contract={'eligible':False,'reason':'unsupported_engine','phase':'unsupported','advisory_only':True,
             'selected':selected(settings),'candidate_threads':[],'baseline_threads':settings.get('num_thread'),
             'max_repetitions':REPETITIONS,'max_requests':MAX_REQUESTS,'max_seconds':MAX_SECONDS,
@@ -324,7 +355,7 @@ class PerformanceManager:
             'changes':['num_thread'],'scope':'Exact selected-model probes; context fit and task success are not guaranteed.'}
         facts=None
         try:
-            facts=calibration_facts(self.store,self.service.providers,settings,telemetry)
+            facts=facts_read.get() if facts_read is not None else calibration_facts(self.store,self.service.providers,settings,telemetry)
             reason=headroom_reason(facts['telemetry'],facts['model'])
             if reason:raise ValueError(reason)
             if 'tools' not in facts['info'].get('capabilities',[]):raise ValueError('tools_unavailable')

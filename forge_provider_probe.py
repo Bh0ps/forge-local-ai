@@ -93,6 +93,9 @@ def probe_provider(service, data):
             name = (item.get('name', item.get('model')) if draft['kind'] == 'ollama' else item.get('id'))
             if not isinstance(name, str) or not name or len(name) > 512 or any(ord(char) < 32 for char in name):
                 raise ValueError('Invalid catalog')
+        if preset == 'textgen':
+            from forge_provider_metadata import textgen_catalog
+            models = textgen_catalog(catalog)
     except ProviderProbeRevoked:
         raise
     except httpx.HTTPStatusError as exc:

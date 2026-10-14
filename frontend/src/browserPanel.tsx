@@ -4,6 +4,7 @@ import { api, errorText, isNative } from './api';
 import { Empty, ErrorNotice, IconButton } from './components';
 import { updateReadiness, useUpdateReadiness } from './updateReadiness';
 import { ComputerView, StopComputerActivity } from './computerView';
+import type { BrowserMode } from './workspaceLayout';
 
 interface BrowserState { url?: string; title?: string; running?: boolean; loading?: boolean; available?: boolean; message?: string; }
 const pageAddress = (state: BrowserState) => state.url === 'about:blank' ? '' : state.url || '';
@@ -12,26 +13,67 @@ async function hideBrowser() {
   if (result?.ok !== true) throw new Error('Browser hide was not confirmed.');
   return result;
 }
-export function BrowserPanel({chatId = null, runId, projectId, visible = true, onActivity = () => {}}: {chatId?: string | null; runId?: string; projectId?: string | null; visible?: boolean; onActivity?: () => void} = {}) {
-  const [mode, setMode] = useState<'browser' | 'hiding' | 'desktop' | 'hide_failed'>('browser');
+export function BrowserPanel({chatId = null, runId, projectId, visible = true, onActivity = () => {}, browserMode,
+  preferenceReady = true, preferenceError = null, preferenceRetrying = false, onPreferenceRetry, onModeChange}:
+  {chatId?: string | null; runId?: string; projectId?: string | null; visible?: boolean; onActivity?: () => void;
+   browserMode?: BrowserMode; preferenceReady?: boolean; preferenceError?: 'load'|'save'|null; preferenceRetrying?: boolean;
+   onPreferenceRetry?: () => Promise<boolean>; onModeChange?: (mode:BrowserMode) => void} = {}) {
+  const [mode, setMode] = useState<'loading' | 'browser' | 'hiding' | 'desktop' | 'hide_failed'>('loading');
+  const [localChoice, setLocalChoice] = useState<BrowserMode>('browser');
+  const choice = browserMode ?? localChoice;
+  const transport = window.pywebview?.api.call || window.fetch;
+  const transportRef = useRef(transport), modeRef = useRef(mode), nativeOwned = useRef(false);
+  transportRef.current = transport; modeRef.current = mode;
   const mounted = useRef(true), wanted = useRef(false), transition = useRef(0);
+  const previousRelease = useRef<Promise<unknown>>(Promise.resolve());
+  useUpdateReadiness(); const disabled = !updateReadiness.canEdit();
   useEffect(() => {mounted.current = true; return () => {mounted.current = false;};}, []);
-  function released(hidden: Promise<unknown>) {
+  function confirmDesktop(drain: Promise<unknown>) {
+    const identity = transition.current, bridge = transportRef.current;
+    const current = () => mounted.current && wanted.current && identity === transition.current && bridge === transportRef.current
+      && bridge === (window.pywebview?.api.call || window.fetch);
+    // A retired pane only supplies its drain. Desktop needs a fresh strict
+    // Hide from the transport that owns this transition after that drain.
+    void drain.catch(() => {}).then(async () => {
+      if (!current()) return;
+      try {await hideBrowser(); if (current()) setMode('desktop');}
+      catch {if (current()) setMode('hide_failed');}
+    });
+  }
+  function released(hidden: Promise<unknown>, admittedBridge:unknown) {
+    previousRelease.current = hidden;
+    if (!wanted.current) return;
+    if (admittedBridge !== transportRef.current) {confirmDesktop(hidden); return;}
     const identity = transition.current;
-    void hidden.then(() => {if (mounted.current && wanted.current && identity === transition.current) setMode('desktop');}, () => {if (mounted.current && wanted.current && identity === transition.current) setMode('hide_failed');});
+    const current = () => mounted.current && wanted.current && identity === transition.current && admittedBridge === transportRef.current
+      && admittedBridge === (window.pywebview?.api.call || window.fetch);
+    void hidden.then(() => {if (current()) setMode('desktop');}, () => {if (current()) setMode('hide_failed');});
   }
-  function desktop() {
-    if (mode !== 'browser') return;
-    wanted.current = true; transition.current++;
-    setMode(isNative() ? 'hiding' : 'desktop');
+  useEffect(() => {
+    transition.current++;
+    if (!preferenceReady) {wanted.current = false; setMode('loading'); return;}
+    wanted.current = choice === 'desktop';
+    if (choice === 'browser') {setMode('browser'); return;}
+    if (!isNative()) {setMode('desktop'); return;}
+    setMode('hiding');
+    // A mounted browser owns its outstanding effects and final Hide. A restored
+    // Desktop preference never mounts it, but still confirms the current Hide.
+    if (modeRef.current !== 'browser' || !nativeOwned.current) {
+      confirmDesktop(previousRelease.current);
+    }
+  }, [choice, preferenceReady, transport]);
+  function choose(next:BrowserMode) {
+    if (!preferenceReady || !updateReadiness.canEdit() || mode === 'hiding' || mode === 'hide_failed') return;
+    if (onModeChange) onModeChange(next); else setLocalChoice(next);
   }
-  return <div className="computer-browser-view"><div className="computer-view-modes" role="group" aria-label="Workspace browser mode"><button type="button" aria-pressed={mode === 'browser'} disabled={mode === 'hiding' || mode === 'hide_failed'} onClick={() => {wanted.current = false; transition.current++; setMode('browser');}}>Browser</button><button type="button" aria-pressed={mode !== 'browser'} disabled={mode === 'hiding' || mode === 'hide_failed'} onClick={desktop}>Desktop</button></div>
-    {mode === 'browser' ? <NativeBrowserPanel visible={visible} onReleased={released}/> : mode === 'desktop' ? <ComputerView key={`view:${projectId || ''}:${chatId || ''}:${runId || ''}`} chatId={chatId} runId={runId} visible={visible} onActivity={onActivity}/> : <div className="computer-hide-state"><p role="status">{mode === 'hiding' ? 'Hiding the browser…' : 'The browser could not be hidden. Retry switching to Desktop.'}</p>{mode === 'hide_failed' && <button className="secondary" type="button" onClick={() => {setMode('hiding'); released(hideBrowser());}}>Retry switching</button>}</div>}
+  const waiting = !preferenceReady || mode === 'loading';
+  return <div className="computer-browser-view"><div className="computer-view-modes" role="group" aria-label="Workspace browser mode"><button type="button" aria-pressed={mode === 'browser' && !waiting} disabled={disabled || waiting || mode === 'hiding' || mode === 'hide_failed'} onClick={() => choose('browser')}>Browser</button><button type="button" aria-pressed={choice === 'desktop' && !waiting} disabled={disabled || waiting || mode === 'hiding' || mode === 'hide_failed'} onClick={() => choose('desktop')}>Desktop</button></div>
+    {waiting ? <div className="computer-hide-state"><p role={preferenceError === 'load' ? 'alert' : 'status'}>{preferenceError === 'load' ? 'The workspace view preference could not be loaded.' : 'Loading workspace view…'}</p>{preferenceError === 'load' && onPreferenceRetry && <button type="button" className="secondary" disabled={disabled || preferenceRetrying} onClick={() => void onPreferenceRetry()}>{preferenceRetrying ? 'Retrying…' : 'Retry view preference'}</button>}</div> : mode === 'browser' ? <NativeBrowserPanel visible={visible} onReleased={released} onNativeOwned={owned => {nativeOwned.current = owned;}}/> : mode === 'desktop' ? <ComputerView key={`view:${projectId || ''}:${chatId || ''}:${runId || ''}`} chatId={chatId} runId={runId} visible={visible} onActivity={onActivity}/> : <div className="computer-hide-state"><p role="status">{mode === 'hiding' ? 'Hiding the browser…' : 'The browser could not be hidden. Retry switching to Desktop.'}</p>{mode === 'hide_failed' && <button className="secondary" type="button" disabled={disabled} onClick={() => {setMode('hiding'); confirmDesktop(previousRelease.current);}}>Retry switching</button>}</div>}
     {mode !== 'browser' && <StopComputerActivity key={`stop:${projectId || ''}:${chatId || ''}:${runId || ''}`}/>}
   </div>;
 }
 
-function NativeBrowserPanel({onReleased, visible}: {onReleased: (hidden: Promise<unknown>) => void; visible: boolean}) {
+function NativeBrowserPanel({onReleased, onNativeOwned, visible}: {onReleased: (hidden: Promise<unknown>, admittedBridge:unknown) => void; onNativeOwned: (owned:boolean) => void; visible: boolean}) {
   const pane = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<BrowserState>({}); const [address, setAddress] = useState('');
   const [pending, setPending] = useState(false);
@@ -51,6 +93,8 @@ function NativeBrowserPanel({onReleased, visible}: {onReleased: (hidden: Promise
   }
   useEffect(() => {
     if (!isNative() || !pane.current) return;
+    const admittedBridge = window.pywebview?.api.call || window.fetch;
+    onNativeOwned(true);
     const owner = {}; lifetime.current = owner;
     let disposed = false; let frame = 0; let pending = false; let dirty = false; let last = '';
     async function bind() {
@@ -82,6 +126,7 @@ function NativeBrowserPanel({onReleased, visible}: {onReleased: (hidden: Promise
     }
     window.addEventListener('resize', schedule); document.addEventListener('visibilitychange', refresh); schedule(); void refresh(); const timer = setInterval(() => void refresh(), 1500);
     return () => {
+      onNativeOwned(false);
       disposed = true; if (lifetime.current === owner) lifetime.current = null;
       clearInterval(timer); cancelAnimationFrame(frame); observer.disconnect(); dialogs.disconnect(); window.removeEventListener('resize', schedule); document.removeEventListener('visibilitychange', refresh);
       // Await every admitted browser effect before the final hide; otherwise a
@@ -89,7 +134,7 @@ function NativeBrowserPanel({onReleased, visible}: {onReleased: (hidden: Promise
       const outstanding = [...effects.current];
       const firstHide = hideBrowser();
       const hidden = outstanding.length ? Promise.allSettled([...outstanding, firstHide]).then(hideBrowser) : firstHide;
-      onReleased(hidden); void hidden.catch(() => {});
+      onReleased(hidden, admittedBridge); void hidden.catch(() => {});
     };
   }, []);
   async function action(name: string, data: Record<string, unknown> = {}) {

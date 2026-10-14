@@ -114,12 +114,33 @@ class WorkspaceUI:
                 current = _layout(saved, projects)
             except (ValueError, TypeError, KeyError):
                 current = deepcopy(DEFAULT_LAYOUT)
-            result = _layout(data.get('layout', {}) if save else {}, projects, current)
+            # Keep the legacy six-field row readable by earlier releases. The
+            # browser subview is a separate cosmetic record in this transaction.
+            view_row = db.execute("SELECT data FROM entities WHERE kind='ui_layout_views' AND id=?", (identifier,)).fetchone()
+            try:
+                view = json.loads(view_row[0]) if view_row else {}
+                browser_mode = view.get('browser_mode', 'browser') if isinstance(view, dict) and view.get('id', identifier) == identifier else 'browser'
+            except (ValueError, TypeError):
+                browser_mode = 'browser'
+            if browser_mode not in ('browser', 'desktop'):
+                browser_mode = 'browser'
+            value = data.get('layout', {}) if save else {}
+            if not isinstance(value, dict):
+                raise ValueError('Unknown workspace layout preference.')
+            if 'browser_mode' in value:
+                browser_mode = value['browser_mode']
+                if browser_mode not in ('browser', 'desktop'):
+                    raise ValueError('Choose Browser or Desktop view.')
+            result = _layout({key: item for key, item in value.items() if key != 'browser_mode'}, projects, current)
             if save:
                 payload = json.dumps({'id': identifier, 'layout': result}, ensure_ascii=False, allow_nan=False)
                 db.execute("INSERT INTO entities(kind,id,data) VALUES('ui_layout',?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
                            (identifier, payload))
-        return result
+                if 'browser_mode' in value:
+                    payload = json.dumps({'id': identifier, 'browser_mode': browser_mode}, ensure_ascii=False, allow_nan=False)
+                    db.execute("INSERT INTO entities(kind,id,data) VALUES('ui_layout_views',?,?) ON CONFLICT(kind,id) DO UPDATE SET data=excluded.data",
+                               (identifier, payload))
+        return {**result, 'browser_mode': browser_mode}
 
     @staticmethod
     def _groups(db, roots):

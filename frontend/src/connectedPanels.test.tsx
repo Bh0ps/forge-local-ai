@@ -5,6 +5,7 @@ import App from './App';
 import { BrowserPanel } from './browserPanel';
 import { GitHubSettings } from './githubSettings';
 import { DEFAULT_SETTINGS } from './types';
+import { DEFAULT_LAYOUT } from './workspaceLayout';
 
 const project = { id: 'project_fixture', name: 'Fixture project', path: '/fixture/project' };
 function bridge(responses: Record<string, unknown>) {
@@ -147,6 +148,7 @@ describe('native browser panel lifecycle', () => {
     const settings = { ...DEFAULT_SETTINGS, model: 'fixture', context: 32768 };
     const call = bridge({ bootstrap: { settings, projects: [project], chats: [], runs: [], capabilities: {} }, models: { models: [{ name: 'fixture' }] },
       projects: { projects: [project] }, chats: { chats: [] }, setup_status: { first_run: false, completed: true, jobs: [], state: {}, catalog: [] },
+      ui_layout_get: DEFAULT_LAYOUT, ui_layout_save: (data:Record<string,unknown>) => data.layout,
       browser_native_status: browserState, browser_native_show: { visible: true }, browser_native_hide: { visible: false },
       workspace_files: { entries: [{ name: 'fixture.txt', path: 'fixture.txt', is_dir: false }] }, workspace_read: { content: 'Synthetic file preview.' } });
     const view = render(<App />);

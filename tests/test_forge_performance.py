@@ -103,6 +103,22 @@ def test_unusable_below_minimum_model_context_is_not_recommended(manager):
     assert manager.recommendations(telemetry(), manager.store.get_settings()) == []
 
 
+@pytest.mark.parametrize('metadata',['missing','failed','invalid'])
+def test_unknown_context_never_becomes_a_guessed_performance_recommendation(manager,monkeypatch,metadata):
+    core=manager.service.providers.core;dispatch=core.dispatch
+    core.model_values=[dict(name='fixture',size=2*GIB,capabilities=['tools','vision'])]
+    def describe(action,data):
+        if action!='show':return dispatch(action,data)
+        if metadata=='failed':raise ValueError('Synthetic metadata unavailable')
+        return {'capabilities':['tools','vision'],'model_info':{'fixture.context_length':False} if metadata=='invalid' else {}}
+    monkeypatch.setattr(core,'dispatch',describe)
+    before=manager.store.get_settings()
+    assert manager._models('ollama','fixture')[0]['context_limit'] is None
+    assert manager.recommendations(telemetry(),before)==[]
+    with pytest.raises(ValueError,match='no longer available'):manager.apply('speed')
+    assert manager.store.get_settings()==before
+
+
 def test_profile_apply_refuses_active_writer_and_changes_only_after_acceptance(manager):
     before = manager.store.get_settings()
     manager.service.jobs.jobs['active'] = {'cancel': threading.Event()}

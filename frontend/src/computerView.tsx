@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { Activity, Monitor, RotateCw, Square } from 'lucide-react';
+import { Activity, Monitor, RotateCw, Square, X } from 'lucide-react';
 import { api } from './api';
 import { Empty, IconButton } from './components';
+import { updateReadiness, useDialogReadiness, useUpdateReadiness } from './updateReadiness';
 import './computerView.css';
 
 export interface ComputerViewState {
@@ -17,6 +18,31 @@ function valid(value: ComputerViewState, chatId: string, runId?: string) {
   return value && value.chat_id === chatId && value.scope_run_id === (runId || null) && value.mode === 'shared_desktop';
 }
 function age(seconds: number | null) { return seconds === null ? '' : seconds < 60 ? ` · recorded ${seconds}s ago` : seconds < 3600 ? ` · recorded ${Math.floor(seconds / 60)}m ago` : ' · saved evidence'; }
+type Snapshot = NonNullable<ComputerViewState['snapshot']>;
+function sameSnapshot(left:Snapshot | null | undefined, right:Snapshot) {
+  return left?.run_id === right.run_id && left.invocation_id === right.invocation_id && left.data_url === right.data_url
+    && left.mime_type === right.mime_type && left.width === right.width && left.height === right.height;
+}
+function SnapshotDialog({snapshot, close, owns}: {snapshot:Snapshot; close:()=>void; owns:()=>boolean}) {
+  useDialogReadiness();
+  const dialog = useRef<HTMLDialogElement>(null), [actual, setActual] = useState(false);
+  useEffect(() => {
+    const element = dialog.current, trigger = document.activeElement as HTMLElement | null;
+    element?.showModal();
+    return () => {
+      const active = document.activeElement, ownedFocus = active === document.body || Boolean(element?.contains(active));
+      element?.close();
+      if (ownedFocus && owns() && trigger?.isConnected) trigger.focus();
+    };
+  }, []);
+  return <dialog ref={dialog} className="modal computer-snapshot-dialog" aria-labelledby="computer-snapshot-title"
+    onCancel={event => {event.preventDefault(); close();}} onClick={event => {if (event.target === event.currentTarget) close();}}>
+    <header><div><h2 id="computer-snapshot-title">Earlier desktop snapshot</h2><p>Saved evidence · shared desktop</p></div><IconButton label="Close snapshot" onClick={close}><X size={18}/></IconButton></header>
+    <div className="computer-snapshot-size" role="group" aria-label="Snapshot size"><button type="button" className="secondary" aria-pressed={!actual} onClick={() => setActual(false)}>Fit</button><button type="button" className="secondary" aria-pressed={actual} onClick={() => setActual(true)}>100%</button><span>{snapshot.width} × {snapshot.height}</span></div>
+    <div className={`computer-snapshot-scroll ${actual ? 'actual-size' : ''}`} role="region" aria-label="Earlier snapshot image" tabIndex={0}><img src={snapshot.data_url} alt="Earlier shared-desktop snapshot enlarged"/></div>
+    <p className="computer-snapshot-note">Opening this image does not capture your screen or control an app.</p>
+  </dialog>;
+}
 
 export function StopComputerActivity() {
   const [state, setState] = useState<'idle' | 'pending' | 'requested' | 'failed'>('idle');
@@ -32,9 +58,29 @@ export function StopComputerActivity() {
 
 export function ComputerView({chatId, runId, visible: hostVisible = true, onActivity}: {chatId: string | null; runId?: string; visible?: boolean; onActivity: () => void}) {
   const [state, setState] = useState<ComputerViewState | null>(null), [failed, setFailed] = useState(false), [refresh, setRefresh] = useState(0);
+  const [zoom, setZoom] = useState<{snapshot:Snapshot; chatId:string; runId?:string; transport:unknown} | null>(null);
   const transport = window.pywebview?.api.call || window.fetch;
   const stateTransport = useRef(transport);
   const visible = state && stateTransport.current === transport && chatId && valid(state, chatId, runId) ? state : null;
+  const imageOwner = useRef({chatId, runId, transport, snapshot:visible?.snapshot, visible:hostVisible});
+  imageOwner.current = {chatId, runId, transport, snapshot:visible?.snapshot, visible:hostVisible};
+  const ownsZoom = (captured:NonNullable<typeof zoom>) => {
+    const current = imageOwner.current;
+    return current.visible && document.visibilityState !== 'hidden' && current.chatId === captured.chatId && current.runId === captured.runId
+      && current.transport === captured.transport && sameSnapshot(current.snapshot, captured.snapshot);
+  };
+  const currentZoom = zoom && ownsZoom(zoom) ? zoom : null;
+  useUpdateReadiness(); const disabled = !updateReadiness.canEdit();
+  useEffect(() => {if (zoom && !ownsZoom(zoom)) setZoom(null);}, [chatId, runId, transport, visible?.snapshot, hostVisible]);
+  useEffect(() => {
+    const hidden = () => {if (document.visibilityState === 'hidden') setZoom(null);};
+    document.addEventListener('visibilitychange', hidden);
+    return () => document.removeEventListener('visibilitychange', hidden);
+  }, []);
+  const enlarge = () => {
+    if (!updateReadiness.canEdit() || !chatId || !hostVisible || !visible?.snapshot || document.visibilityState === 'hidden') return;
+    setZoom({snapshot:visible.snapshot, chatId, runId, transport});
+  };
   useEffect(() => {
     setState(null); setFailed(false);
     if (!chatId) return;
@@ -57,9 +103,9 @@ export function ComputerView({chatId, runId, visible: hostVisible = true, onActi
   return <section className="computer-view" aria-label="Desktop activity"><header><div><strong>Shared desktop</strong><p>Actions can use your Windows pointer and activate apps.</p></div><IconButton label="Refresh desktop activity" onClick={() => setRefresh(value => value + 1)}><RotateCw size={14}/></IconButton></header>
     {failed ? <p className="computer-view-error" role="alert">Desktop activity is unavailable. Refresh to try again.</p> : !visible ? <p className="muted">Loading saved activity…</p> : <>
       <p className="computer-state" role="status">{statusLabels[visible.status] || 'Needs attention'}</p>
-      {visible.snapshot && /^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(visible.snapshot.data_url) ? <figure><img src={visible.snapshot.data_url} alt="Earlier shared-desktop snapshot"/><figcaption>Earlier snapshot{age(visible.snapshot.age_seconds)}<span>May include other visible windows.</span></figcaption></figure> : <div className="computer-empty"><Monitor size={26}/><p>{visible.evidence_mode === 'accessibility_only' ? 'Accessibility evidence recorded. No image is available.' : visible.failure ? 'Saved snapshot is unavailable.' : 'No desktop snapshot yet.'}</p></div>}
+      {visible.snapshot && /^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(visible.snapshot.data_url) ? <figure><button type="button" className="computer-snapshot-open" aria-label="Enlarge earlier snapshot" disabled={disabled} onClick={enlarge}><img src={visible.snapshot.data_url} alt="Earlier shared-desktop snapshot"/></button><figcaption>Earlier snapshot{age(visible.snapshot.age_seconds)}<span>May include other visible windows.</span></figcaption></figure> : <div className="computer-empty"><Monitor size={26}/><p>{visible.evidence_mode === 'accessibility_only' ? 'Accessibility evidence recorded. No image is available.' : visible.failure ? 'Saved snapshot is unavailable.' : 'No desktop snapshot yet.'}</p></div>}
       <p className="computer-evidence-note">Opening this view does not capture your screen or control an app.</p>
       {visible.action_count > 0 && <div className="computer-last-step"><span>{toolLabels[visible.tool || ''] || 'Desktop step recorded'}<small>{visible.action_count_truncated ? 'At least ' : ''}{visible.action_count} recorded {visible.action_count === 1 ? 'step' : 'steps'}</small></span><button className="text-button" type="button" onClick={onActivity}><Activity size={13}/>Activity</button></div>}
-    </>}
+    </>}{currentZoom && <SnapshotDialog snapshot={currentZoom.snapshot} close={() => setZoom(null)} owns={() => ownsZoom(currentZoom)}/>}
   </section>;
 }

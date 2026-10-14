@@ -1,5 +1,23 @@
 # Forge demo media
 
+The 5.1.11 captures show enlarged saved desktop evidence and the existing local
+engine editor with the new Textgen preset. They use synthetic API responses
+and a generated fixture image; no personal screen, engine or model was used.
+Both captures retain Forge's Copper controls, were visually reviewed and
+contain no embedded metadata.
+
+| File | Demonstration |
+| --- | --- |
+| `forge-5.1.11-desktop-zoom-dark.png` | Fit/original-size controls for an earlier saved snapshot. |
+| `forge-5.1.11-textgen-light.png` | Editable Textgen setup in the narrow light workspace. |
+
+Production checks cover scope and transport changes, delayed native Hide,
+keyboard focus, retained drafts, enlarged text, reduced motion, stale profile
+labels and legacy layout persistence. The depicted connection result is a
+synthetic test response, not a live model throughput or compatibility claim.
+
+## Previous 5.1.10 captures
+
 The 5.1.10 captures show the read-only Desktop view using synthetic saved
 evidence. Opening this view starts no capture or tool action. The dark and
 narrow light screenshots retain Forge's Copper palette; both were visually
