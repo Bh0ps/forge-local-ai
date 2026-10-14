@@ -17,8 +17,10 @@ import desktop
 class PreviewClock:
     def __init__(self):
         self.now = 0.
+        self.reads = 0
 
     def __call__(self):
+        self.reads += 1
         return self.now
 
     def pause(self, seconds):
@@ -61,8 +63,22 @@ def test_standalone_readiness_waits_for_real_matching_bounds_without_native_effe
     for name in ('show', 'bind', 'navigate', 'set_viewport', 'hide', 'evaluate', 'screenshot'):
         setattr(view, name, forbidden)
     manager.execute = forbidden
-    assert desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause) is True
-    assert len(calls) == 4 and clock.now == pytest.approx(.15)
+    status_calls, native_calls = [], []
+    status, native = manager.previews.browser.status, view.ui
+    manager.previews.browser.status = lambda: (status_calls.append(True), status())[1]
+    view.ui = lambda operation: (native_calls.append(True), native(operation))[1]
+    diagnostics = {}
+    assert desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause,
+                                       diagnostics=diagnostics) is True
+    assert len(calls) == len(status_calls) == len(native_calls) == 4
+    assert clock.now == pytest.approx(.15) and clock.reads == 16
+    observed = diagnostics['smoke_standalone_readiness']
+    assert set(observed) == set(desktop.SMOKE_STANDALONE_READINESS_FLAGS) | {'iterations'}
+    assert all(type(observed[key]) is bool for key in desktop.SMOKE_STANDALONE_READINESS_FLAGS)
+    assert type(observed['iterations']) is int and observed['iterations'] == 4
+    assert all(observed[key] for key in desktop.SMOKE_STANDALONE_READINESS_FLAGS
+               if key not in ('dom_hud', 'dom_modal', 'deadline_expired'))
+    assert not any(observed[key] for key in ('dom_hud', 'dom_modal', 'deadline_expired'))
 
 
 @pytest.mark.parametrize('condition', ['hidden', 'loading', 'modal', 'unbound', 'moving', 'invalid'])
@@ -82,9 +98,19 @@ def test_standalone_readiness_refuses_unstable_or_hidden_pane_at_original_deadli
     if condition == 'modal': snapshot['modal'] = True
     if condition == 'unbound': view.bound = (250, 150, 700, 560)
     if condition == 'invalid': snapshot['rect']['width'] = float('nan')
+    diagnostics = {}
     with pytest.raises(ValueError, match='The standalone preview pane did not open'):
-        desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause)
+        desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause,
+                                       diagnostics=diagnostics)
     assert clock.now == 10 and reads >= 2
+    observed = diagnostics['smoke_standalone_readiness']
+    assert observed['deadline_expired'] is True
+    assert observed['owner_same'] is True
+    assert observed['snapshot_observed'] is observed['native_observed'] is True
+    relevant = {'hidden': 'owner_visible', 'loading': 'loading_complete', 'modal': 'layout_valid',
+                'unbound': 'bounds_match', 'moving': 'same_sample', 'invalid': 'layout_valid'}
+    assert observed[relevant[condition]] is False
+    assert observed['dom_modal'] is (condition == 'modal')
 
 
 @pytest.mark.parametrize('change', ['view', 'browser', 'preview'])
@@ -96,9 +122,14 @@ def test_standalone_readiness_never_adopts_replaced_owner(change):
         else: manager.previews.browser_preview = 'other-preview'
         return snapshot
     view._layout = layout
+    diagnostics = {}
     with pytest.raises(ValueError, match='The standalone preview pane did not open'):
-        desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause)
+        desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause,
+                                       diagnostics=diagnostics)
     assert clock.now == 0
+    observed = diagnostics['smoke_standalone_readiness']
+    assert observed['owner_same'] is observed['native_observed'] is observed['deadline_expired'] is False
+    assert observed['snapshot_observed'] is True and observed['iterations'] == 1
 
 
 @pytest.mark.parametrize('phase', ['layout', 'native'])
@@ -112,9 +143,126 @@ def test_standalone_readiness_late_read_cannot_confirm_after_deadline(phase):
         if calls == 2: clock.now = 10.
         return original(*args)
     setattr(view, '_layout' if phase == 'layout' else 'ui', delayed)
+    diagnostics = {}
     with pytest.raises(ValueError, match='The standalone preview pane did not open'):
-        desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause)
+        desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause,
+                                       diagnostics=diagnostics)
     assert calls == 2
+    observed = diagnostics['smoke_standalone_readiness']
+    assert observed['deadline_expired'] is True and observed['iterations'] == 2
+    assert observed['native_observed'] is (phase == 'native')
+    assert observed['same_sample'] is False
+
+
+@pytest.mark.parametrize('mode', ['none', 'list', 'dict-subclass', 'foreign'],
+                         ids=['default-none', 'list-input', 'dict-subclass-input', 'foreign-input'])
+def test_standalone_readiness_ignores_non_plain_diagnostic_inputs_without_touching_them(mode):
+    class Foreign:
+        def __bool__(self):
+            pytest.fail('Diagnostic input must not be inspected.')
+        __str__ = __repr__ = __bool__
+    class ForeignDict(dict):
+        __bool__ = __str__ = __repr__ = Foreign.__bool__
+        def __setitem__(self, *args):
+            pytest.fail('Diagnostic input must not be written through a foreign method.')
+    diagnostics = {'none': None, 'list': [], 'dict-subclass': ForeignDict(), 'foreign': Foreign()}[mode]
+    manager, view, _, _, clock = preview_readiness_fixture()
+    calls = []
+    layout, native, status = view._layout, view.ui, manager.previews.browser.status
+    view._layout = lambda: (calls.append('layout'), layout())[1]
+    view.ui = lambda operation: (calls.append('native'), native(operation))[1]
+    manager.previews.browser.status = lambda: (calls.append('status'), status())[1]
+    assert desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock,
+                                       pause=clock.pause, diagnostics=diagnostics) is True
+    assert calls == ['status', 'layout', 'native'] * 2
+    assert clock.now == .05 and clock.reads == 8
+    if mode == 'dict-subclass':
+        assert len(diagnostics) == 0
+
+
+def test_standalone_readiness_report_contains_only_last_fixed_primitives_not_private_inputs():
+    manager, view, owner, snapshot, clock = preview_readiness_fixture()
+    marker = 'synthetic-private-path-api-key-opaque-content'
+    snapshot.update(text=marker, selector=marker, error=marker, url=marker, coordinates=[1, 2])
+    owner.title = marker
+    manager.previews.browser.status = lambda: {'visible': True, 'loading': False, 'error': marker, 'api_key': marker}
+    diagnostics = {'existing': marker}
+    assert desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock,
+                                       pause=clock.pause, diagnostics=diagnostics) is True
+    saved = diagnostics['smoke_standalone_readiness']
+    assert marker not in json.dumps(saved)
+    assert set(saved) == set(desktop.SMOKE_STANDALONE_READINESS_FLAGS) | {'iterations'}
+    assert all(type(value) in (bool, int) for value in saved.values())
+    assert diagnostics['existing'] == marker
+    # The reported object owns copied scalars, never the source DOM/native dict.
+    snapshot['modal'] = True
+    assert saved['dom_modal'] is False
+
+
+def test_standalone_readiness_iteration_diagnostic_saturates_without_shortening_deadline():
+    manager, view, _, _, clock = preview_readiness_fixture()
+    view.bound = None
+    pauses = []
+    def fast_pause(seconds):
+        pauses.append(seconds)
+        clock.now = min(1., clock.now + .001)
+    diagnostics = {}
+    with pytest.raises(ValueError, match='The standalone preview pane did not open'):
+        desktop._smoke_preview_ready(manager, 'preview', deadline=1, clock=clock,
+                                       pause=fast_pause, diagnostics=diagnostics)
+    assert clock.now == 1 and len(pauses) > 512
+    saved = diagnostics['smoke_standalone_readiness']
+    assert saved['iterations'] == 512 and type(saved['iterations']) is int
+    assert saved['deadline_expired'] is True and saved['native_bound_present'] is False
+
+
+@pytest.mark.parametrize('outcome', ['success', 'refusal', 'native-error'],
+                         ids=['success-preserved', 'fixed-refusal-preserved', 'native-error-preserved'])
+def test_standalone_diagnostic_publication_failure_preserves_original_outcome(monkeypatch, outcome):
+    from native_browser import BrowserGuard
+    manager, view, _, _, clock = preview_readiness_fixture()
+    original = BrowserGuard('Synthetic native failure')
+    if outcome == 'refusal':
+        view.bound = None
+    elif outcome == 'native-error':
+        def fail(operation):
+            raise original
+        view.ui = fail
+    publications = []
+    def publication(*args):
+        publications.append(True)
+        raise MemoryError('Synthetic diagnostic failure')
+    monkeypatch.setattr(desktop, '_smoke_preview_readiness_report', publication)
+    if outcome == 'success':
+        assert desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock,
+                                           pause=clock.pause, diagnostics={}) is True
+        assert clock.reads == 8 and clock.now == .05
+    else:
+        expected = ValueError if outcome == 'refusal' else BrowserGuard
+        with pytest.raises(expected) as raised:
+            desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock,
+                                           pause=clock.pause, diagnostics={})
+        if outcome == 'refusal':
+            assert str(raised.value) == 'The standalone preview pane did not open.' and clock.now == 10
+        else:
+            assert raised.value is original and clock.now == 0
+    assert publications == [True]
+
+
+@pytest.mark.parametrize('state', ['absent', 'expired'], ids=['no-owned-view', 'deadline-already-expired'])
+def test_standalone_readiness_unobserved_fields_cannot_claim_a_sample(state):
+    manager, view, _, _, clock = preview_readiness_fixture()
+    if state == 'absent':
+        manager.previews.browser.view = None
+    diagnostics = {}
+    with pytest.raises(ValueError, match='The standalone preview pane did not open'):
+        desktop._smoke_preview_ready(manager, 'preview', deadline=0 if state == 'expired' else 10,
+                                       clock=clock, pause=clock.pause, diagnostics=diagnostics)
+    saved = diagnostics['smoke_standalone_readiness']
+    assert saved['view_present'] is (state == 'expired')
+    assert saved['iterations'] == (0 if state == 'expired' else 1)
+    assert saved['deadline_expired'] is (state == 'expired')
+    assert not any(saved[name] for name in ('owner_same', 'snapshot_observed', 'native_observed', 'same_sample'))
 
 
 def test_standalone_ready_does_not_relax_final_guard_or_retry_viewport(tmp_path):
@@ -161,6 +309,8 @@ def test_standalone_viewport_phase_precedes_one_checked_call_and_both_new_phases
     starts = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name) and node.func.id == '_smoke_preview_ready']
     assert len(starts) == 1
+    assert any(keyword.arg == 'diagnostics' and isinstance(keyword.value, ast.Name)
+               and keyword.value.id == 'result' for keyword in starts[0].keywords)
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name) and node.func.id == '_smoke_preview_tool'
         and any(isinstance(arg, ast.Constant) and arg.value == 'preview_viewport' for arg in node.args)]
@@ -344,6 +494,8 @@ def test_native_smoke_requires_clean_process_exit_even_with_complete_report(tmp_
             diagnostics_captured=True, screenshot_bytes=1001, stopped=True),
         native_standalone_preview=dict(pane_visible=True, fixture_updated=True,
             without_builder=True, bridge_exposed='undefined', screenshot_bytes=1001))
+    report['smoke_standalone_readiness'] = dict.fromkeys(desktop.SMOKE_STANDALONE_READINESS_FLAGS, True)
+    report['smoke_standalone_readiness'].update(dom_hud=False, dom_modal=False, deadline_expired=False, iterations=2)
     (tmp_path / 'report.json').write_text(json.dumps(report), encoding='utf-8')
     probe = tmp_path / 'exit-gate.ps1'
     probe.write_text(r"""
@@ -380,6 +532,66 @@ try {
             'FORGE_EXIT_TEST_ROOT': str(tmp_path), 'FORGE_EXIT_TEST_CODE': str(exit_code)})
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads((tmp_path / 'outcome.json').read_text())['accepted'] is (exit_code == 0)
+
+
+def test_powershell_standalone_readiness_projects_only_strict_fixed_primitives(tmp_path):
+    shell = shutil.which('pwsh') or shutil.which('powershell')
+    if os.name != 'nt' or not shell:
+        pytest.skip('Windows PowerShell is required for the native diagnostic summary.')
+    script = Path(__file__).resolve().parents[1] / 'scripts/release_smoke.ps1'
+    probe = tmp_path / 'readiness-summary.ps1'
+    probe.write_text(r"""
+$ErrorActionPreference='Stop'
+$tokens=$null; $errors=$null
+$ast=[System.Management.Automation.Language.Parser]::ParseFile($env:FORGE_READINESS_TEST_SCRIPT,[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw 'Smoke script syntax is invalid.' }
+$ast.FindAll({param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -in @('Test-ForgeHandoffFloor','Write-ForgeSmokeDiagnostics')},$true) | ForEach-Object { Invoke-Expression $_.Extent.Text }
+$script:ForgeSmokeDiagnosticPath=Join-Path $env:FORGE_READINESS_TEST_ROOT 'safe.json'
+$secret='synthetic-private-path-key-opaque-value'
+$names=@('view_present','owner_same','snapshot_observed','native_observed',
+    'owner_visible','view_visible','status_visible','loading_complete','dom_visible','dom_hud',
+    'dom_modal','layout_valid','native_bound_present','bounds_match','same_sample','deadline_expired')
+function Project-Readiness($record) {
+    $data=[pscustomobject]@{smoke_phase='standalone-layout';smoke_standalone_readiness=$record;private=$secret}
+    Write-ForgeSmokeDiagnostics $data 'standalone-preview' $null 'ready'
+    $saved=[IO.File]::ReadAllText($script:ForgeSmokeDiagnosticPath)
+    if ($saved.Contains($secret)) { throw 'Private input escaped the sanitized summary.' }
+    return ($saved|ConvertFrom-Json).smoke_standalone_readiness
+}
+foreach ($bad in @($null,$secret,$true,4,@(1,2))) {
+    if ($null -ne (Project-Readiness $bad)) { throw 'Nonrecord diagnostic input was accepted.' }
+}
+$record=[pscustomobject]@{iterations=512;private=$secret;rect=@(1,2,3,4);url=$secret;error=$secret}
+foreach ($name in $names) { $record|Add-Member -NotePropertyName $name -NotePropertyValue $true }
+$record.dom_hud=$false
+$safe=Project-Readiness $record
+if (@($safe.PSObject.Properties).Count -ne 17 -or $safe.iterations -ne 512 -or $safe.dom_hud -isnot [bool] -or $safe.dom_hud) { throw 'Fixed scalar record was not preserved.' }
+foreach ($name in $names) { if ($safe.$name -isnot [bool]) { throw 'A boolean observation changed type.' } }
+foreach ($number in @(0,512,[long]5)) {
+    $record.iterations=$number
+    if ((Project-Readiness $record).iterations -ne $number) { throw 'Valid bounded iteration count was lost.' }
+}
+foreach ($number in @($true,$false,-1,513,1.5,'42',[pscustomobject]@{private=$secret},@(1,2),$null)) {
+    $record.iterations=$number
+    if ($null -ne (Project-Readiness $record).iterations) { throw 'Invalid diagnostic count was accepted.' }
+}
+$record.view_present=1
+$record.owner_same='true'
+$record.snapshot_observed=[pscustomobject]@{private=$secret}
+$record.native_observed=$null
+$safe=Project-Readiness $record
+foreach ($name in @('view_present','owner_same','snapshot_observed','native_observed')) {
+    if ($null -ne $safe.$name) { throw 'A nonboolean observation was coerced.' }
+}
+if ($safe.owner_visible -isnot [bool] -or $safe.owner_visible -ne $true) { throw 'One invalid value erased other fixed observations.' }
+Write-Output 'fixed-readiness-projection-passed'
+""", encoding='utf-8')
+    result = subprocess.run([shell, '-NoProfile', '-File', str(probe)], capture_output=True, text=True,
+        timeout=30, env={**os.environ, 'FORGE_READINESS_TEST_SCRIPT': str(script),
+            'FORGE_READINESS_TEST_ROOT': str(tmp_path)}, creationflags=subprocess.CREATE_NO_WINDOW)
+    assert result.returncode == 0, 'PowerShell fixed readiness projection failed.'
+    assert result.stdout.strip().endswith('fixed-readiness-projection-passed')
+    assert 'synthetic-private-path-key-opaque-value' not in result.stdout
 
 
 def test_powershell_reads_bounded_reports_and_redacts_before_persistence(tmp_path):

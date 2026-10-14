@@ -40,6 +40,23 @@ def finished(svc,run):
         time.sleep(.02)
     raise AssertionError('Run did not finish')
 
+def _wait_for_run_approval(svc,run,deadline):
+    committed=threading.Event()
+    def observe(event):
+        if event.get('run_id')==run['id'] and event.get('type')=='approval': committed.set()
+    svc.store.subscribe_events(observe)
+    try:
+        # Subscribe before reading: earlier commits are durable, later ones latch.
+        snapshot=svc.jobs.poll(run['id'])
+        pending=next((e for e in snapshot['events'] if e['type']=='approval'),None)
+        if pending is None:
+            committed.wait(max(0,deadline-time.monotonic()))
+            snapshot=svc.jobs.poll(run['id'])
+            pending=next((e for e in snapshot['events'] if e['type']=='approval'),None)
+        return pending,snapshot
+    finally:
+        svc.store.unsubscribe_events(observe)
+
 def test_journal_replays_without_consuming_and_usage_deduplicates(tmp_path):
     svc=service(tmp_path); run=svc.jobs.start({'text':'Hello 🌍'})
     result=finished(svc,run); assert result['status']=='completed'
@@ -56,21 +73,39 @@ def test_journal_replays_without_consuming_and_usage_deduplicates(tmp_path):
 def test_always_ask_binds_exact_file_action_then_no_replay_on_resume(tmp_path):
     project=tmp_path/'project'; project.mkdir()
     engine=Engine([{'tool_calls':[call('write_file',{'path':'hello.txt','content':'hello'})]}, {'content':'Done.'}])
-    svc=service(tmp_path,engine); registered=svc.create_project({'name':'Project','path':str(project)})
-    run=svc.jobs.start({'text':'Write hello','project_id':registered['id']})
-    deadline=time.monotonic()+10; pending=None
-    while time.monotonic()<deadline:
-        pending=next((e for e in svc.jobs.poll(run['id'])['events'] if e['type']=='approval'),None)
-        if pending: break
-        time.sleep(.02)
-    assert pending and not (project/'hello.txt').exists()
-    assert pending['arguments']=={'path':'hello.txt','content':'hello'} and pending['target']==str(project)
-    with pytest.raises(ValueError): svc.jobs.approve(run['id'],'wrong',True)
-    svc.jobs.approve(run['id'],pending['id'],True)
-    assert finished(svc,run)['status']=='completed'
-    assert (project/'hello.txt').read_text()=='hello'
-    with svc.store._connection() as db: assert db.execute("SELECT COUNT(*) FROM invocations WHERE status='completed'").fetchone()[0]==1
-    svc.shutdown()
+    svc=service(tmp_path,engine)
+    try:
+        registered=svc.create_project({'name':'Project','path':str(project)})
+        run=svc.jobs.start({'text':'Write hello','project_id':registered['id']})
+        deadline=time.monotonic()+10
+        pending,snapshot=_wait_for_run_approval(svc,run,deadline)
+        no_write=not (project/'hello.txt').exists()
+        diagnostics=None
+        if pending is None or not no_write:
+            state=svc.store.run(run['id']); settings=state.get('settings',{})
+            status=snapshot.get('status'); phase=state.get('phase')
+            diagnostics={
+                'status':status if status in {'queued','running','awaiting_approval','waiting_question','completed','cancelled','failed','paused','interrupted'} else 'unknown',
+                'phase':phase if phase in {'ready','generating','tools','round_complete','waiting_question','compacting','checkpoint'} else 'unknown',
+                'stop_category':('write_before_approval' if not no_write else
+                    'approval_missing_recovery' if snapshot.get('recovery') else
+                    'approval_missing_terminal' if snapshot.get('finished') else 'approval_wait_deadline'),
+                'event_types':[e['type'] if e['type'] in {'status','round','context','usage','generation','approval','done','tool','error','question','compacted'} else 'other' for e in snapshot['events']],
+                'hello_exists':not no_write,
+                'offered_tools':[[s.get('function',{}).get('name') for s in request.get('tools',[])] for request in engine.requests],
+                'effective_settings':{key:settings.get(key) for key in ('provider_id','model','context','tokens','thinking','performance',
+                    'adaptive_enabled','adaptive_model_locked','adaptive_context_locked','adaptive_profile_ids','adaptive_applied_profile',
+                    'permission_profile','allow_edits','guided_execution','auto_compact','auto_delegate')},
+            }
+        assert pending and no_write,json.dumps(diagnostics,sort_keys=True)
+        assert pending['arguments']=={'path':'hello.txt','content':'hello'} and pending['target']==str(project)
+        with pytest.raises(ValueError): svc.jobs.approve(run['id'],'wrong',True)
+        svc.jobs.approve(run['id'],pending['id'],True)
+        assert finished(svc,run)['status']=='completed'
+        assert (project/'hello.txt').read_text()=='hello'
+        with svc.store._connection() as db: assert db.execute("SELECT COUNT(*) FROM invocations WHERE status='completed'").fetchone()[0]==1
+    finally:
+        svc.shutdown()
 
 def test_deny_access_and_plan_never_expose_mutation_tools(tmp_path):
     engine=Engine(); svc=service(tmp_path,engine)
