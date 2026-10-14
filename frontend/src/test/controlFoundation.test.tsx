@@ -9,6 +9,12 @@ import { DEFAULT_SETTINGS } from '../types';
 import { DEFAULT_LAYOUT } from '../workspaceLayout';
 
 const label = () => document.querySelector<HTMLSpanElement>('.control-label');
+function focusFrames() {
+  const callbacks=new Map<number,FrameRequestCallback>();let id=0;
+  vi.spyOn(window,'requestAnimationFrame').mockImplementation(callback=>{callbacks.set(++id,callback);return id;});
+  vi.spyOn(window,'cancelAnimationFrame').mockImplementation(frame=>{callbacks.delete(frame);});
+  return {callbacks,finish:()=>act(()=>{const queued=[...callbacks.values()];callbacks.clear();queued.forEach(callback=>callback(0));})};
+}
 const chat = {id:'control-chat',title:'Control fixture',project_id:null,model:'fixture',messages:[{id:1,role:'user',content:'Synthetic question'},{id:2,role:'assistant',content:'Synthetic saved answer'}]};
 function bridge() {
   const responses: Record<string, unknown> = {
@@ -78,6 +84,41 @@ describe('everyday icon control labels', () => {
     act(()=>button.blur());act(()=>button.focus());const state=vi.spyOn(document,'visibilityState','get').mockReturnValue('hidden');fireEvent(document,new Event('visibilitychange'));expect(label()).toBeNull();
     state.mockReturnValue('visible');fireEvent(document,new Event('visibilitychange'));expect(label()).toBeNull();
     act(()=>button.blur());act(()=>button.focus());fireEvent(window,new Event('blur'));expect(label()).toBeNull();
+  });
+});
+
+describe('focus-owned browser scroll admission',()=>{
+  it('keeps and repositions only the newly focused label during its ancestor scroll',()=>{
+    const frames=focusFrames(),action=vi.fn();
+    render(<div data-testid="scroll-owner"><IconButton label="Clear search" showLabel onClick={action}>×</IconButton></div>);
+    const button=screen.getByRole('button',{name:'Clear search'});let top=100;
+    vi.spyOn(button,'getBoundingClientRect').mockImplementation(()=>({x:20,y:top,left:20,top,right:60,bottom:top+40,width:40,height:40,toJSON:()=>({})}));
+    act(()=>button.focus());const hint=label()!;
+    vi.spyOn(hint,'getBoundingClientRect').mockReturnValue({x:0,y:0,left:0,top:0,right:100,bottom:20,width:100,height:20,toJSON:()=>({})});
+    top=4;fireEvent.scroll(screen.getByTestId('scroll-owner'));expect(label()).toBe(hint);expect(hint.getAttribute('data-side')).toBe('below');expect(document.activeElement).toBe(button);expect(action).not.toHaveBeenCalled();
+    frames.finish();fireEvent.scroll(screen.getByTestId('scroll-owner'));expect(label()).toBeNull();expect(document.activeElement).toBe(button);
+  });
+  for(const input of ['wheel','touchmove','pointerdown','keydown'])it(`cancels the focus scroll window on explicit ${input} input`,()=>{
+    const frames=focusFrames();render(<div data-testid="scroll-owner"><IconButton label="Clear search" showLabel>×</IconButton></div>);
+    const button=screen.getByRole('button',{name:'Clear search'});act(()=>button.focus());expect(frames.callbacks.size).toBe(1);
+    if(input==='keydown')fireEvent.keyDown(button,{key:'ArrowDown'});else fireEvent(window,new Event(input,{bubbles:true}));
+    expect(frames.callbacks.size).toBe(0);fireEvent.scroll(screen.getByTestId('scroll-owner'));expect(label()).toBeNull();frames.finish();expect(label()).toBeNull();expect(document.activeElement).toBe(button);
+  });
+  it('dismisses unrelated scrolling even during a new focused owner window',()=>{
+    focusFrames();render(<><div data-testid="scroll-owner"><IconButton label="Owner" showLabel>+</IconButton></div><div data-testid="other-scroll"/></>);
+    act(()=>screen.getByRole('button',{name:'Owner'}).focus());fireEvent.scroll(screen.getByTestId('other-scroll'));expect(label()).toBeNull();
+  });
+  for(const cancellation of ['blur','hidden','disabled','unmount'])it(`never replays a cancelled focus window after ${cancellation}`,()=>{
+    const frames=focusFrames(),view=render(<><IconButton label="Owner" showLabel>+</IconButton><button>Other</button></>);
+    const button=screen.getByRole('button',{name:'Owner'});act(()=>button.focus());const queued=[...frames.callbacks.values()];expect(queued).toHaveLength(1);
+    if(cancellation==='blur')act(()=>screen.getByRole('button',{name:'Other'}).focus());
+    else if(cancellation==='hidden')fireEvent(window,new CustomEvent('forge:visibility',{detail:{visible:false}}));
+    else if(cancellation==='disabled')view.rerender(<IconButton label="Owner" showLabel disabled>+</IconButton>);
+    else view.unmount();
+    expect(frames.callbacks.size).toBe(0);act(()=>queued.forEach(callback=>callback(0)));fireEvent(window,new CustomEvent('forge:visibility',{detail:{visible:true}}));expect(label()).toBeNull();
+  });
+  it('does not admit any frame for an unopted control',()=>{
+    const frames=focusFrames();render(<IconButton label="Plain action">+</IconButton>);act(()=>screen.getByRole('button',{name:'Plain action'}).focus());expect(frames.callbacks.size).toBe(0);expect(label()).toBeNull();
   });
 });
 

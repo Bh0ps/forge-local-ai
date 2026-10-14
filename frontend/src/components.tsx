@@ -12,10 +12,30 @@ import './composerModes.css';
 export function useControlLabel(text: string, enabled = true) {
   const target = useRef<HTMLElement | null>(null), label = useRef<HTMLSpanElement>(null);
   const hovered = useRef(false), focused = useRef(false);
+  const focusScroll = useRef<{owner: HTMLElement; frame: number | null} | null>(null);
   const [shown, setShown] = useState(false), [dismissed, setDismissed] = useState(false);
   const [placement, setPlacement] = useState({shift: 0, below: false, ready: false});
   const visible = enabled && shown && !dismissed;
-  const dismiss = () => { if (enabled) setDismissed(true); };
+  const retireFocusScroll = () => {
+    const request = focusScroll.current; focusScroll.current = null;
+    if (request?.frame !== null && request?.frame !== undefined) window.cancelAnimationFrame(request.frame);
+  };
+  const dismiss = () => { retireFocusScroll(); if (enabled) setDismissed(true); };
+  const place = () => {
+    if (!target.current || !label.current) return;
+    const anchor = target.current.getBoundingClientRect(), size = label.current.getBoundingClientRect();
+    const left = anchor.left + (anchor.width - size.width) / 2;
+    const bounded = Math.max(8, Math.min(left, window.innerWidth - size.width - 8));
+    setPlacement({shift: bounded - left, below: anchor.top - size.height - 8 < 8, ready: true});
+  };
+  const admitFocusScroll = (owner: HTMLElement) => {
+    retireFocusScroll();
+    if (typeof window.requestAnimationFrame !== 'function') return;
+    const request = {owner, frame: null as number | null}; focusScroll.current = request;
+    request.frame = window.requestAnimationFrame(() => {
+      if (focusScroll.current === request) focusScroll.current = null;
+    });
+  };
   const reveal = (element: HTMLElement) => {
     if (!enabled) return;
     target.current = element;
@@ -23,14 +43,12 @@ export function useControlLabel(text: string, enabled = true) {
     setShown(true);
   };
   useLayoutEffect(() => {
-    if (!visible || !target.current || !label.current) return;
-    const anchor = target.current.getBoundingClientRect(), size = label.current.getBoundingClientRect();
-    const left = anchor.left + (anchor.width - size.width) / 2;
-    const bounded = Math.max(8, Math.min(left, window.innerWidth - size.width - 8));
-    setPlacement({shift: bounded - left, below: anchor.top - size.height - 8 < 8, ready: true});
+    if (visible) place();
   }, [visible, text]);
+  useEffect(() => () => retireFocusScroll(), []);
   useEffect(() => {
     if (enabled) return;
+    retireFocusScroll();
     hovered.current = focused.current = false;
     setShown(false); setDismissed(false);
   }, [enabled]);
@@ -38,12 +56,25 @@ export function useControlLabel(text: string, enabled = true) {
     if (!visible) return;
     const hidden = () => { if (document.visibilityState === 'hidden') dismiss(); };
     const hostHidden = (event: Event) => { if ((event as CustomEvent).detail?.visible === false) dismiss(); };
+    const scroll = (event: Event) => {
+      const request = focusScroll.current, owner = target.current;
+      const ancestor = event.target === document || event.target === window || event.target instanceof Element && Boolean(owner && event.target.contains(owner));
+      // Browser focus can scroll its newly focused owner before the next frame.
+      // Explicit input and every later scroll retain the normal dismissal path.
+      if (request && request.owner === owner && owner?.isConnected && focused.current && document.activeElement === owner
+        && !owner.matches(':disabled') && !owner.closest('[inert], [data-visibility="hidden"]') && document.visibilityState !== 'hidden' && ancestor) place();
+      else dismiss();
+    };
     window.addEventListener('blur', dismiss); window.addEventListener('resize', dismiss);
-    window.addEventListener('scroll', dismiss, true); window.addEventListener('forge:visibility', hostHidden);
+    window.addEventListener('scroll', scroll, true); window.addEventListener('forge:visibility', hostHidden);
+    window.addEventListener('wheel', dismiss, {capture:true,passive:true}); window.addEventListener('touchmove', dismiss, {capture:true,passive:true});
+    window.addEventListener('pointerdown', retireFocusScroll, true); window.addEventListener('keydown', retireFocusScroll, true);
     document.addEventListener('visibilitychange', hidden);
     return () => {
       window.removeEventListener('blur', dismiss); window.removeEventListener('resize', dismiss);
-      window.removeEventListener('scroll', dismiss, true); window.removeEventListener('forge:visibility', hostHidden);
+      window.removeEventListener('scroll', scroll, true); window.removeEventListener('forge:visibility', hostHidden);
+      window.removeEventListener('wheel', dismiss, true); window.removeEventListener('touchmove', dismiss, true);
+      window.removeEventListener('pointerdown', retireFocusScroll, true); window.removeEventListener('keydown', retireFocusScroll, true);
       document.removeEventListener('visibilitychange', hidden);
     };
   }, [visible]);
@@ -51,8 +82,8 @@ export function useControlLabel(text: string, enabled = true) {
     events: {
       onMouseEnter: (event: React.MouseEvent<HTMLElement>) => { if (!enabled) return; hovered.current = true; reveal(event.currentTarget); },
       onMouseLeave: () => { if (!enabled) return; hovered.current = false; if (!focused.current) { setShown(false); setDismissed(false); } },
-      onFocus: (event: React.FocusEvent<HTMLElement>) => { if (!enabled) return; focused.current = true; reveal(event.currentTarget); },
-      onBlur: () => { if (!enabled) return; focused.current = false; if (!hovered.current) { setShown(false); setDismissed(false); } },
+      onFocus: (event: React.FocusEvent<HTMLElement>) => { if (!enabled) return; focused.current = true; admitFocusScroll(event.currentTarget); reveal(event.currentTarget); },
+      onBlur: () => { if (!enabled) return; retireFocusScroll(); focused.current = false; if (!hovered.current) { setShown(false); setDismissed(false); } },
       onKeyDown: (event: React.KeyboardEvent<HTMLElement>) => {
         if (visible && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); dismiss(); }
       },

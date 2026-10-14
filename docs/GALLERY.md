@@ -2,6 +2,14 @@
 
 These images and animations use an isolated demo workspace with synthetic data.
 
+## Forge 5.1.21 chat foundation
+
+![Outlined chat controls and grouped composer in the dark workspace](../assets/demos/forge-5.1.21-composer-dark.png)
+
+![Grouped composer in a narrow light workspace with text enlarged to 150%](../assets/demos/forge-5.1.21-composer-narrow-light.png)
+
+## Earlier screenshots and walkthroughs
+
 ![Compact recorded desktop operation in the dark workspace, using synthetic data](../assets/demos/forge-5.1.19-desktop-operation-dark.png)
 
 ![Queued desktop operation in a narrow light workspace, using synthetic data](../assets/demos/forge-5.1.19-desktop-operation-light.png)
