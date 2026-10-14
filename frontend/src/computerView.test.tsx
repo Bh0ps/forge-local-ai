@@ -38,7 +38,7 @@ describe('desktop evidence view ownership and native surface release', () => {
     expect(screen.getByRole('region', {name: 'Desktop activity'})).toBeTruthy();
     expect(call.mock.calls.map(([name]) => name)).toEqual(['browser_native_status', 'browser_native_show', 'browser_native_hide', 'browser_native_hide', 'computer_view_state']);
     expect(screen.getByText(/Earlier snapshot/)).toBeTruthy();
-    expect(screen.getByText('Set field value')).toBeTruthy();
+    expect(screen.getByText('Field value update')).toBeTruthy();
   });
 
   it('also drains an admitted navigation before final Hide and never exposes a failed hide as success', async () => {
@@ -137,5 +137,45 @@ describe('desktop evidence view ownership and native surface release', () => {
     fireEvent.click(screen.getByRole('button', {name: 'Stop all agents'})); await tick();
     expect(screen.getByText(/Stop could not be confirmed/)).toBeTruthy(); expect(screen.queryByText(/synthetic-private/)).toBeNull();
     expect(screen.queryByText(/Stop requested/)).toBeNull();
+  });
+});
+
+describe('recorded desktop operations without an outcome claim', () => {
+  it('shows a refused-click projection as an operation and opens Activity by keyboard', async () => {
+    vi.useRealTimers();
+    const projection: ComputerViewState = {...evidence('first', 'own-run'), tool: 'computer_click', status: 'queued',
+      action_count: 1, evidence_mode: 'none', snapshot: null};
+    const {call} = bridge({computer_view_state: projection});
+    const onActivity = vi.fn(); render(<ComputerView chatId="first" runId="own-run" onActivity={onActivity}/>);
+    await screen.findByText('Target click');
+    expect(screen.getByText('Queued')).toBeTruthy(); expect(screen.getByText('1 recorded step')).toBeTruthy();
+    expect(screen.queryByText('Clicked target')).toBeNull(); expect(screen.queryByRole('img')).toBeNull();
+    const activity = screen.getByRole('button', {name: 'Activity'}); activity.focus();
+    await userEvent.setup().keyboard('{Enter}');
+    expect(onActivity).toHaveBeenCalledOnce(); expect(document.activeElement).toBe(activity);
+    expect(call.mock.calls.map(([name]) => name)).toEqual(['computer_view_state']);
+  });
+
+  it('keeps completed request state separate from a refused text operation', async () => {
+    const {call} = bridge({computer_view_state: {...evidence(), tool: 'computer_type', status: 'completed',
+      action_count: 1, evidence_mode: 'none', snapshot: null}});
+    render(<ComputerView chatId="first" onActivity={() => {}}/>); await tick();
+    expect(screen.getByText('Request completed')).toBeTruthy(); expect(screen.getByText('Text entry')).toBeTruthy();
+    expect(screen.getByText('1 recorded step')).toBeTruthy(); expect(screen.queryByText('Entered text')).toBeNull();
+    expect(screen.queryByText(/Text entry (?:succeeded|completed|performed)/)).toBeNull();
+    expect(call.mock.calls.map(([name]) => name)).toEqual(['computer_view_state']);
+  });
+
+  it('does not publish an old operation after changing runs within the same chat', async () => {
+    const pending = deferred<ComputerViewState>();
+    const current: ComputerViewState = {...evidence('first', 'current-run'), tool: 'computer_type',
+      run_id: 'current-run', invocation_id: 'current-run:0', action_count: 1, evidence_mode: 'none', snapshot: null};
+    const {call} = bridge({computer_view_state: (data: Record<string, unknown>) => data.run_id === 'old-run' ? pending.promise : current});
+    const view = render(<ComputerView chatId="first" runId="old-run" onActivity={() => {}}/>); await tick();
+    view.rerender(<ComputerView chatId="first" runId="current-run" onActivity={() => {}}/>); await tick();
+    await act(async () => pending.resolve({...evidence('first', 'old-run'), tool: 'computer_click', status: 'completed'}));
+    expect(screen.getByText('Text entry')).toBeTruthy(); expect(screen.getByText('Working')).toBeTruthy();
+    expect(screen.queryByText('Target click')).toBeNull(); expect(screen.queryByText('Request completed')).toBeNull();
+    expect(call.mock.calls.filter(([name]) => name === 'computer_view_state').map(([,data]) => data)).toEqual([{chat_id:'first',run_id:'old-run'},{chat_id:'first',run_id:'current-run'}]);
   });
 });

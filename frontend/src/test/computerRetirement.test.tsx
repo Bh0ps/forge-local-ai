@@ -54,7 +54,7 @@ describe('retired helper desktop activity', () => {
     render(<ComputerView chatId="synthetic-chat" onActivity={onActivity}/>);
     await screen.findByText('3 recorded steps');
     expect(screen.getByText('Earlier helper activity · 2 steps')).toBeTruthy();
-    expect(screen.getByText('Listed apps')).toBeTruthy();
+    expect(screen.getByText('App listing')).toBeTruthy();
     const button = screen.getByRole('button', {name: 'Activity'}); button.focus();
     await userEvent.setup().keyboard('{Enter}');
     expect(onActivity).toHaveBeenCalledTimes(1);
@@ -92,6 +92,16 @@ describe('retired helper desktop activity', () => {
     expect(screen.getByText('No desktop snapshot yet.')).toBeTruthy();
     expect(screen.queryByText(/Earlier helper activity/)).toBeNull();
     expect(screen.queryByRole('button', {name: 'Activity'})).toBeNull();
+  });
+
+  it('retains legacy helper provenance without inventing a native outcome for an unknown operation', async () => {
+    const onActivity = vi.fn(), call = bridge(() => ({...retained(), tool: null}));
+    render(<ComputerView chatId="synthetic-chat" onActivity={onActivity}/>); await tick();
+    expect(screen.getByText('Desktop operation')).toBeTruthy(); expect(screen.getByText('2 recorded helper steps')).toBeTruthy();
+    expect(screen.queryByText('Desktop step recorded')).toBeNull(); expect(screen.queryByRole('img')).toBeNull();
+    expect(screen.queryByText('Earlier helper activity · 2 steps')).toBeNull();
+    fireEvent.click(screen.getByRole('button', {name: 'Activity'})); expect(onActivity).toHaveBeenCalledOnce();
+    expect(call.mock.calls.map(([action]) => action)).toEqual(['computer_view_state']);
   });
 
   it('ignores a delayed retired response from the previous chat and reuses only the current owner', async () => {
