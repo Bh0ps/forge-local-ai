@@ -345,6 +345,10 @@ def _smoke_handoff_floor(api):
         raise ValueError('Native handoff trust-floor smoke failed.') from None
 
 
+class _WindowUnavailable(RuntimeError):
+    """The owned primary form has disappeared, rather than merely being hidden."""
+
+
 class Bridge:
     def __init__(self, service=None, pairing=None):
         self._service = service
@@ -356,11 +360,21 @@ class Bridge:
         self._pin = False
         self._closing = False
         self._quit_complete = None
+        self._quit_done = threading.Event()
+        self._quit_owner = None
+        self._window_closed = False
+        self._tray_actions_lock = threading.Lock()
+        self._tray_actions = set()
         self._owned_teardown = threading.local()
         self._capture_lock = threading.Lock()
         self._pairing = pairing or PairingAuthority()
         self._lifecycle = None
         self._tray = None
+        self._tray_started = False
+        self._tray_ready = None
+        self._tray_startup_done = None
+        self._tray_thread = None
+        self._tray_failure = False
         self._hotkey = None
         self._server_url = None
         self._navigation_guard = None
@@ -670,6 +684,8 @@ class Bridge:
                 return False
             self._update_authority.pipe_admission(grant, transport)
             self._closing = True
+            self._quit_owner = threading.get_ident()
+            self._quit_done.clear()
         if self._quit_owned() is not True:
             from forge_native_handoff import HandoffRejected
             raise HandoffRejected('helper_failed')
@@ -790,10 +806,10 @@ class Bridge:
         from webview.platforms.winforms import BrowserView
         from System import Action
         if self._window is None:
-            raise RuntimeError('Window is unavailable.')
+            raise _WindowUnavailable('Window is unavailable.')
         form = BrowserView.instances.get(self._window.uid)
         if form is None:
-            raise RuntimeError('Window is unavailable.')
+            raise _WindowUnavailable('Window is unavailable.')
         result, done = {}, threading.Event()
         # Only the owned quit thread may marshal its synchronous stop/dispose
         # calls after admission closes. Other workers and already queued input
@@ -951,18 +967,93 @@ class Bridge:
 
     def show(self):
         try:
-            self._window.show()
             def focus(form):
                 from System.Windows.Forms import FormWindowState
+                if self._closing or self._window_closed:
+                    return
                 if form.WindowState == FormWindowState.Minimized:
                     form.WindowState = (FormWindowState.Maximized
                                         if self._mode == 'full' and self._full_maximized
                                         else FormWindowState.Normal)
+                form.Show()
                 form.Activate()
+                self._publish_visibility(bool(form.Visible and str(form.WindowState) != 'Minimized'))
             self._native(focus, _update_safe=True)
-            self._refresh_visibility()
+        except _WindowUnavailable:
+            # A stale pywebview window silently ignores show(uid) when its form
+            # is gone. Do not keep a headless coordinator and an inert tray.
+            self._on_window_closed()
+            log.warning('Workspace is unavailable; stopping the owned coordinator')
         except Exception:
-            log.exception('Could not show Forge')
+            log.warning('Could not show Forge', exc_info=True)
+
+    def _tray_action(self, action):
+        """Keep pystray's message pump free, with at most one worker per action."""
+        callbacks = {'open': self.show, 'stop': self._emergency_stop,
+                     'quit': self.quit, 'closed': self._quit_closed_window}
+        if action not in callbacks:
+            return False
+        with self._tray_actions_lock:
+            if action in self._tray_actions or self._closing:
+                return False
+            self._tray_actions.add(action)
+        def run():
+            try:
+                if action in ('open', 'stop') and self._closing:
+                    return
+                result = callbacks[action]()
+                if (action == 'quit' and isinstance(result, dict) and
+                        result.get('error') == 'Cancel the restart and confirm cancellation before quitting Forge.'):
+                    if self._tray is not None:
+                        try:
+                            self._tray.notify('Cancel the pending restart in Forge before quitting.', 'Forge')
+                        except Exception as exc:
+                            log.warning('Tray restart notice failed: %s', type(exc).__name__)
+                    self._tray_action('open')
+            except Exception as exc:
+                log.warning('Tray action %s failed: %s', action, type(exc).__name__)
+            finally:
+                with self._tray_actions_lock:
+                    self._tray_actions.discard(action)
+        try:
+            threading.Thread(target=run, name='Forge-tray-' + action, daemon=True).start()
+        except Exception:
+            with self._tray_actions_lock:
+                self._tray_actions.discard(action)
+            raise
+        return True
+
+    def _on_window_closed(self):
+        # pywebview's closed event runs after the primary form is removed from
+        # BrowserView.instances. No shutdown or native wait belongs in this
+        # callback; an independent worker removes the tray and owned services.
+        with self._native_admission:
+            self._window_closed = True
+            if not self._closing:
+                self._trusted_loaded = False
+                self._update_authority.update_binding(None)
+        try:
+            return self._tray_action('closed')
+        except Exception as exc:
+            log.warning('Closed workspace cleanup worker failed: %s', type(exc).__name__)
+            return False
+
+    def _quit_closed_window(self):
+        # There is no document left to confirm an update cancellation. Revoke
+        # the owned attempt and close the orphan host without reusing its bridge.
+        with self._native_admission:
+            if self._closing:
+                return
+            self._closing = True
+            self._quit_owner = threading.get_ident()
+            self._quit_done.clear()
+            self._update_authority.update_binding(None)
+        if self._update_controller is not None:
+            try:
+                self._update_controller.invalidate()
+            except Exception as exc:
+                log.warning('Closed workspace update cancellation failed: %s', type(exc).__name__)
+        self._quit_owned()
 
     def restrict_navigation(self):
         """Never expose the authenticated native bridge to a third-party page."""
@@ -1010,7 +1101,7 @@ class Bridge:
 
     def _send_visibility(self, payload):
         try:
-            if self._window is not None and not self._closing:
+            if self._window is not None and not self._closing and not self._window_closed:
                 self._window.evaluate_js("window.dispatchEvent(new CustomEvent('forge:visibility',{detail:" + json.dumps(payload) + "}));true")
         except Exception:
             # The loaded callback republishes the current snapshot if startup
@@ -1033,17 +1124,47 @@ class Bridge:
         # Publish inside the marshaled operation so a stale native read cannot
         # overwrite a later hide/restore transition with a newer sequence.
         try:
-            return self._native(lambda form: self._publish_visibility(
-                bool(form.Visible and str(form.WindowState) != 'Minimized'), snapshot=snapshot), _update_safe=True)
+            if self._closing or self._window_closed:
+                return
+            def snapshot_visibility(form):
+                if self._closing or self._window_closed:
+                    return
+                return self._publish_visibility(
+                    bool(form.Visible and str(form.WindowState) != 'Minimized'), snapshot=snapshot)
+            return self._native(snapshot_visibility, _update_safe=True)
         except Exception:
             log.debug('Native visibility snapshot unavailable', exc_info=True)
 
     def _on_loaded(self):
+        with self._native_admission:
+            if self._closing or self._window_closed:
+                return
         self.restrict_navigation()
         with self._native_admission:
+            if self._closing or self._window_closed:
+                return
             self._trusted_loaded = True
-        self._update_authority.update_binding(self._native_binding())
+        binding = self._native_binding()
+        with self._native_admission:
+            if self._closing or self._window_closed:
+                return
+            self._update_authority.update_binding(binding)
         self._refresh_visibility(snapshot=True)
+
+    def _on_shown(self):
+        with self._native_admission:
+            if self._closing or self._window_closed or self._tray_started:
+                return
+        self.restrict_navigation()
+        # pystray must not expose Open/Quit before pywebview has created its
+        # primary form. Hidden Windows startup still fires shown (Show→Hide).
+        # Serialize registration against Quit so a late shown callback cannot
+        # create an icon after owned cleanup has already removed it.
+        with self._native_admission:
+            if self._closing or self._window_closed or self._tray_started:
+                return
+            self._tray_started = True
+            _tray(self)
 
     def _on_visibility_event(self):
         self._refresh_visibility()
@@ -1051,14 +1172,20 @@ class Bridge:
     def _on_closing(self):
         if self._closing:
             return True
-        if self._update_controller is not None and self._update_locked():
-            self._update_controller.invalidate()
-        if self._tray is not None:
-            self._window.hide()
-            self._publish_visibility(False)
-            log.info('Workspace hidden; coordinator remains active')
-        else:
-            log.warning('Tray is unavailable; use Quit Forge to stop the coordinator')
+        try:
+            if self._update_controller is not None and self._update_locked():
+                self._update_controller.invalidate()
+            if self._tray is not None:
+                self._window.hide()
+                self._publish_visibility(False)
+                log.info('Workspace hidden; coordinator remains active')
+            else:
+                log.warning('Tray is unavailable; use Quit Forge to stop the coordinator')
+        except Exception as exc:
+            # pywebview swallows exceptions from this native event. An escaping
+            # hide/cancellation error would remove our explicit False veto and
+            # permit disposal of the primary form while its coordinator lives.
+            log.warning('Close-to-tray failed: %s', type(exc).__name__)
         return False
 
     def _close(self):
@@ -1066,15 +1193,20 @@ class Bridge:
         return self._on_closing()
 
     def quit(self):
-        if self._closing:
-            return ({'ok': True} if self._quit_complete is True else
-                {'ok': False, 'error': 'Forge could not complete owned cleanup.'})
-        if self._update_locked():
-            if self._update_controller is not None:
-                self._update_controller.invalidate()
-            return {'ok': False, 'error': 'Cancel the restart and confirm cancellation before quitting Forge.'}
-        self._closing = True
-        self._update_authority.update_binding(None)
+        # Share the admission lock with native update departure. Only one
+        # caller may claim cleanup; never hold it while waiting on native UI.
+        with self._native_admission:
+            if self._closing:
+                return ({'ok': True} if self._quit_complete is True else
+                    {'ok': False, 'error': 'Forge could not complete owned cleanup.'})
+            if self._update_locked():
+                if self._update_controller is not None:
+                    self._update_controller.invalidate()
+                return {'ok': False, 'error': 'Cancel the restart and confirm cancellation before quitting Forge.'}
+            self._closing = True
+            self._quit_owner = threading.get_ident()
+            self._quit_done.clear()
+            self._update_authority.update_binding(None)
         complete = self._quit_owned()
         return ({'ok': True} if complete else
             {'ok': False, 'error': 'Forge could not complete owned cleanup.'})
@@ -1091,6 +1223,25 @@ class Bridge:
                 complete = False
                 log.warning('Owned cleanup %s failed: %s', name, type(exc).__name__)
         try:
+            # Remove the icon before slow model/service cleanup. Tray callbacks
+            # are workers, so this cannot strand the notification message pump.
+            tray = self._tray
+            if tray:
+                def stop_tray():
+                    # run_detached returns before pystray is running; its stop
+                    # method otherwise silently ignores this startup race.
+                    startup = self._tray_startup_done or self._tray_ready
+                    if startup is not None and not startup.wait(5):
+                        raise TimeoutError('Tray startup did not finish.')
+                    if self._tray_ready is not None and not self._tray_ready.is_set():
+                        raise RuntimeError('Tray startup failed.')
+                    tray.stop()
+                    loop = self._tray_thread
+                    if loop is not None and loop is not threading.current_thread():
+                        loop.join(timeout=5)
+                        if loop.is_alive():
+                            raise TimeoutError('Tray shutdown did not finish.')
+                cleanup('tray', stop_tray)
             if self._service and getattr(self._service, 'host_dictation', None):
                 cleanup('dictation', self._service.host_dictation.cancel)
             if self._lifecycle:
@@ -1109,14 +1260,36 @@ class Bridge:
                     cleanup('lifecycle', self._lifecycle.quit)
             if self._hotkey:
                 cleanup('hotkey', self._hotkey.stop)
-            if self._tray:
-                cleanup('tray', self._tray.stop)
-            if self._window:
+            if self._window and not self._window_closed:
                 cleanup('window', self._window.destroy)
-            self._quit_complete = complete
-            return complete
+            self._quit_complete = complete and not self._tray_failure
+            return self._quit_complete
         finally:
             self._owned_teardown.active = previous
+            if self._quit_complete is None:
+                self._quit_complete = False
+            self._quit_owner = None
+            self._quit_done.set()
+
+    def _await_owned_cleanup(self, timeout=30):
+        # webview.start returns as soon as the last form closes. Its worker can
+        # still be unwinding synchronous pythonnet calls; the main thread must
+        # not finalize the interpreter before that owner has finished cleanup.
+        if self._quit_owner == threading.get_ident():
+            return self._quit_done.is_set() and self._quit_complete is True
+        return self._quit_done.wait(timeout) and self._quit_complete is True
+
+    def _finish_native_host(self, timeout=30):
+        # Called only after the GUI loop has returned or startup has failed.
+        # A live-window restart refusal must not leave a headless tray behind
+        # once there is no renderer available to confirm its cancellation.
+        scheduled = self._on_window_closed()
+        if not scheduled and not self._closing:
+            # Thread creation failed, and the GUI loop has already ended. The
+            # main thread may finish the orphan cleanup without dispatching to
+            # the missing primary form. Owned child/service cleanup still runs.
+            self._quit_closed_window()
+        return self._await_owned_cleanup(timeout)
 
 
 def setup_logging():
@@ -1142,21 +1315,57 @@ def _tray(api):
         else:
             picture = Image.new('RGBA', (64, 64), '#171717')
             ImageDraw.Draw(picture).polygon([(32, 7), (55, 32), (32, 57), (9, 32)], fill='#ed813b')
-        menu = pystray.Menu(pystray.MenuItem('Open Forge', lambda icon, item: api.show(), default=True),
-                            pystray.MenuItem('Stop all agents', lambda icon, item: api._emergency_stop()),
-                            pystray.MenuItem('Quit Forge', lambda icon, item: api.quit()))
+        menu = pystray.Menu(pystray.MenuItem('Open Forge', lambda icon, item: api._tray_action('open'), default=True),
+                            pystray.MenuItem('Stop all agents', lambda icon, item: api._tray_action('stop')),
+                            pystray.MenuItem('Quit Forge', lambda icon, item: api._tray_action('quit')))
         api._tray = pystray.Icon('Forge', picture, 'Forge — local AI workspace', menu)
-        api._tray.run_detached()
+        icon = api._tray
+        ready = api._tray_ready = threading.Event()
+        startup = api._tray_startup_done = threading.Event()
+        def setup(icon):
+            # pystray invokes setup only after _mark_ready sets _running. A
+            # delayed startup can now be stopped even after Quit was admitted.
+            ready.set()
+            startup.set()
+            with api._native_admission:
+                retiring = api._closing or api._window_closed or api._tray is not icon
+                if not retiring:
+                    icon.visible = True
+            if retiring:
+                icon.stop()
+        if os.name == 'nt':
+            def run_tray():
+                try:
+                    icon.run(setup)
+                except Exception as exc:
+                    api._tray_failure = True
+                    log.warning('Tray loop failed: %s', type(exc).__name__)
+                finally:
+                    startup.set()
+                    with api._native_admission:
+                        if api._tray is icon:
+                            if not api._closing and not api._window_closed:
+                                api._tray_failure = True
+                            api._tray = None
+            # CLR event callbacks enter Python through daemon dummy threads.
+            # Explicit ownership preserves the old non-daemon Windows pump.
+            api._tray_thread = threading.Thread(target=run_tray, name='Forge-tray-loop', daemon=False)
+            api._tray_thread.start()
+        else:
+            icon.run_detached(setup)
         def notify(kind,summary):
             if not api._tray or api._closing: return
             message={'approval':'A tool action needs your approval.','outcome_unknown':'Inspect an interrupted action in Forge.'}.get(kind,
                 'Your Forge run '+str(summary.get('status','finished'))+'.')
             try: api._tray.notify(message,'Forge')
             except Exception: pass
-        api._ensure_service().desktop_notify=notify
-    except Exception:
+        api._service.desktop_notify=notify
+    except Exception as exc:
+        api._tray_failure = True
         api._tray = None
-        log.exception('Tray startup failed')
+        if api._tray_startup_done is not None:
+            api._tray_startup_done.set()
+        log.warning('Tray startup failed: %s', type(exc).__name__)
 
 
 def main():
@@ -1231,7 +1440,6 @@ def main():
         shortcut = service.dispatch('settings', {}).get('emergency_shortcut', 'Ctrl+Alt+Shift+S')
         api._hotkey = EmergencyHotkey(api._emergency_stop, shortcut)
         api._hotkey.start()
-        _tray(api)
         from forge_update_monitor import start_native_update_monitor
         start_native_update_monitor(service)
         _smoke_checkpoint('host-hooks-ready')
@@ -1246,7 +1454,8 @@ def main():
         _smoke_checkpoint('window-created')
         api._visible = '--background' not in sys.argv
         api._window.events.closing += api._on_closing
-        api._window.events.shown += api.restrict_navigation
+        api._window.events.closed += api._on_window_closed
+        api._window.events.shown += api._on_shown
         api._window.events.loaded += api._on_loaded
         api._window.events.minimized += api._on_visibility_event
         api._window.events.restored += api._on_visibility_event
@@ -1315,9 +1524,18 @@ def main():
                     result['full_restores_maximized'] = api._native(lambda form: str(form.WindowState) == 'Maximized')
                     if not result['full_restores_maximized']:
                         raise ValueError('Expand did not restore the maximized workspace.')
-                    result['close_hides'] = api._on_closing() is False and not api._closing
+                    def close_to_tray(form):
+                        from webview.platforms.winforms import BrowserView
+                        form.Close()
+                        return (BrowserView.instances.get(api._window.uid) is form
+                            and not form.Visible and not api._closing and not api._window_closed)
+                    result['close_hides'] = api._native(close_to_tray, _update_safe=True)
                     result['background_api'] = api.call('projects')
                     api.show()
+                    result['close_hides'] = result['close_hides'] and api._native(
+                        lambda form: bool(form.Visible and not api._closing and not api._window_closed), _update_safe=True)
+                    if not result['close_hides']:
+                        raise ValueError('Native close-to-tray did not preserve and restore the primary workspace.')
                     if '--dictation-smoke' in sys.argv:
                         # SAPI makes a disposable phrase in memory. No microphone
                         # input or user's spoken audio is captured by this test.
@@ -1578,7 +1796,7 @@ def main():
                         Path(destination).write_text(json.dumps(result), encoding='utf-8')
                     if 'error' not in result:
                         _smoke_checkpoint('smoke-complete')
-                    api.quit()
+                    api._tray_action('quit')
             _smoke_checkpoint('webview-start')
             webview.start(smoke, **options)
         else:
@@ -1586,10 +1804,13 @@ def main():
         server.should_exit = True
         server_thread.join(timeout=5)
     finally:
-        api.quit()
-        if sock:
-            sock.close()
-        singleton.close()
+        try:
+            if not api._finish_native_host():
+                raise RuntimeError('Forge could not complete owned cleanup.')
+        finally:
+            if sock:
+                sock.close()
+            singleton.close()
 
 
 if __name__ == '__main__':

@@ -27,6 +27,28 @@ The current font, warm palettes, roomy composer, pane sizes and saved layout
 preferences are preserved. HUD and reduced-motion behavior remain in place. No
 new operational cards, destinations or appearance settings are introduced.
 
+## Tray and workspace lifecycle
+
+Open Forge, Stop all agents and Quit Forge use separate, coalesced workers so a
+slow window or coordinator operation cannot block the tray menu. Open restores
+and focuses the existing workspace through the bounded native dispatcher. Quit
+claims teardown once, removes the tray icon before coordinator cleanup, and
+preserves browser, service and window cleanup ordering.
+
+The tray registers after the native workspace exists. Its readiness callback
+checks shutdown again so a delayed icon cannot appear after Quit. Late window
+load and visibility callbacks leave a closed host alone. A pending restart keeps
+its existing cancellation requirement, with a fixed tray notice and Open action.
+
+Closing the workspace still hides it to the tray. If the native workspace is
+actually destroyed unexpectedly, its closed event invalidates the bridge and stops the owned
+coordinator instead of leaving an unusable tray icon. Native shutdown waits for
+the cleanup owner before the desktop process returns.
+
+Regression fixtures cover a stalled Open action followed by Quit, concurrent
+Quit requests, repeated tray clicks, close cancellation, and lost-window cleanup.
+The packaged Windows check exercises the real close event and tray shutdown.
+
 ## Native verification diagnostics
 
 The disposable Windows smoke check records a bounded final observation when

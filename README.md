@@ -2,7 +2,7 @@
 
 # Forge 5.1.23
 
-This Windows preview refines project navigation and the compact workspace pane.
+This Windows preview improves tray reliability, project navigation and the compact workspace pane.
 Chats and projects stay prominent, existing tools are grouped together, and all
 five detail tabs remain visible. It retains Forge's font, palettes and composer.
 Desktop actions share your Windows focus and pointer; this preview does not

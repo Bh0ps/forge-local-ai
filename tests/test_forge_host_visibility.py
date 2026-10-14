@@ -30,6 +30,9 @@ class Form:
         self._state = value
         self.Resize.fire(self, None)
     def Activate(self): pass
+    def Show(self):
+        self.Visible = True
+        self.VisibleChanged.fire(self, None)
 
 
 class Window:
