@@ -3,7 +3,8 @@
 # Forge 5.1.24
 
 This Windows preview keeps keyboard focus with the current conversation during
-history loading and delayed steering replies. It includes the tray reliability
+history loading and delayed steering replies, and verifies Windows callback
+completion before returning a window action. It includes the tray reliability
 fixes, compact workspace tabs, grouped navigation, searchable Settings and
 Forge's font and warm palettes.
 Desktop actions share your Windows focus and pointer; this preview does not
