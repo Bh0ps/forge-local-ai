@@ -22,6 +22,29 @@ from forge_store import ForgeStore, TERMINAL, atomic_text, encode, validate_goal
 from project_tools import ProjectTools
 from storage import _now
 
+
+def _publish_channel_goal_document(path,text):
+    """Publish a complete new TODO without replacing a concurrent editor's file."""
+    expected=text.encode('utf-8')
+    path.parent.mkdir(parents=True,exist_ok=True)
+    staged=path.with_name('.'+path.name+'.'+uuid4().hex+'.tmp')
+    try:
+        with staged.open('xb') as handle:
+            handle.write(expected)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            # A hard-link publication is exclusive: an existing destination is
+            # never replaced. Unsupported filesystems leave setup paused.
+            os.link(staged,path)
+        except FileExistsError:
+            if path.is_symlink():raise ValueError('Goal document changed during setup.') from None
+            with path.open('rb') as handle:saved=handle.read(len(expected)+1)
+            if saved!=expected:raise ValueError('Goal document changed during setup.') from None
+    finally:
+        staged.unlink(missing_ok=True)
+
+
 COMMANDS=[dict(name=name,description=description) for name,description in (
  ('builder','Develop an idea through a guided conversation'),('build','Accept the Builder brief and start implementation'),
  ('plan','Inspect and prepare a plan; Build starts implementation'),('do','Start the requested task'),('todo','Run the saved plan as a durable Markdown checklist'),
@@ -709,7 +732,7 @@ class ForgeService:
         if action in ('pull','delete') and 'name' in data and 'model' not in data: data={**data,'model':data['name']}
         return self.core.dispatch(action,data)
 
-    def channel_start(self,data,channel_id,external_id):
+    def channel_start(self,data,channel_id,external_id,*,selection=None):
         """The paired gateway binds identity and scope; commit its request once."""
         source_key='channel:'+channel_id+':'+external_id
         with self.jobs.lock:
@@ -717,8 +740,14 @@ class ForgeService:
                 row=db.execute('SELECT run_id FROM request_keys WHERE source_key=?',(source_key,)).fetchone()
             if row:
                 run=self.store.run(row[0]); return {'id':run['id'],'chat_id':run['chat_id'],'status':run['status']}
+            if selection is not None:
+                # Reject a stale selection before existing goal/worktree/model
+                # preparation. The final admission validates again atomically.
+                with self.store._connection(transaction='write') as db:
+                    selection(db)
             current=self.store.get_settings()
             profile=None
+            goal_record=document=workspace_intent=None
             if data.get('agent_profile_id'):
                 profile=self.store.entity('agents',data['agent_profile_id'])
                 if not profile.get('enabled'): raise ValueError('Enable the configured agent first.')
@@ -747,9 +776,15 @@ class ForgeService:
                     from forge_builder_guide import accepted_brief
                     if not data.get('project_id'): raise ValueError('Connect this channel to a project in Forge before building. Your discussion is saved.')
                     data.update(text=accepted_brief(self.store,data['chat_id']))
-                goal=self.goal_create({**data,'title':'Build the agreed project' if command=='build' else data['text'][:120],
-                    'tasks':[{'text':data['text'][:64000],'status':'pending','evidence':[]}]})
-                data.update(goal_id=goal['id'],mode='goal')
+                # Compile only a private intent here. The final source admission
+                # inserts the goal with its one request/run; no TODO exists yet.
+                goal_record,document=self.store._goal_record(dict(
+                    title='Build the agreed project' if command=='build' else data['text'][:120],
+                    request=data['text'],project_id=data.get('project_id'),chat_id=data.get('chat_id'),
+                    tasks=[{'text':data['text'][:64000],'status':'pending','evidence':[]}],
+                    status='ready',checkpoint='Checklist created. Execution has not started.',
+                    next_action='Review tasks, then start the goal.'),uuid4().hex,{})
+                data.update(mode='goal')
             if profile:
                 data.update(agent_id=profile['id'],instructions=profile.get('instructions',''),
                     agent_tools=profile.get('tools',[]),skills=profile.get('skills',[]),
@@ -766,13 +801,9 @@ class ForgeService:
                             self.store.get_project(workspace['workspace_project_id'])
                             data.update(workspace_project_id=workspace['workspace_project_id'],worktree_id=workspace['worktree_id'])
                         else:
-                            project=self.store.get_project(data['project_id'])
-                            if self._git(Path(project['path']),['rev-parse','--is-inside-work-tree'],check=False).returncode==0:
-                                worktree=self.worktree_create({'project_id':project['id']})
-                                workspace=self.store.save_entity('channel_workspaces',dict(id=key,channel_id=channel_id,
-                                    chat_id=data['chat_id'],workspace_project_id=worktree['project']['id'],worktree_id=worktree['worktree']['id']))
-                                data.update(workspace_project_id=workspace['workspace_project_id'],worktree_id=workspace['worktree_id'])
-                            # Non-Git projects retain the coordinator's writer lock.
+                            self.store.get_project(data['project_id'])
+                            workspace_intent=dict(id=key,channel_id=channel_id,chat_id=data['chat_id'],
+                                project_id=data['project_id'],agent_id=profile['id'])
             if channel_settings:
                 # Paired per-chat choices override profile defaults within the
                 # configured provider; profile permissions and workspaces remain.
@@ -782,7 +813,111 @@ class ForgeService:
                     # A calibration may otherwise replace even an explicit value
                     # when it happens to equal the inherited desktop preference.
                     data.update(thinking=channel_settings['thinking'],adaptive_enabled=False)
-            return self.jobs.start(data,channel=(channel_id,external_id))
+            if selection is not None or goal_record is not None or workspace_intent is not None:
+                from forge_channel_queue import ChannelAdmission
+                from forge_channel_queue import QueueDeferred
+                config_snapshot=self.store.entity('channels',channel_id)
+                provider_id=data.get('provider_id',current['provider_id'])
+                provider_snapshot=None if provider_id=='ollama' else self.store.entity('providers',provider_id)
+                if provider_id=='openrouter' and goal_record is not None:
+                    data['cloud_scope']={**(data.get('cloud_scope') or {}),'goal_id':goal_record['id']}
+                def authorize(db):
+                    checker=getattr(selection,'current_admission',None)
+                    if checker is not None:checker(db)
+                    if getattr(getattr(self,'update_manager',None),'applying',False):raise QueueDeferred()
+                    for kind,identifier,snapshot in (('channels',channel_id,config_snapshot),
+                            ('agents',(profile or {}).get('id'),profile),('providers',provider_id,provider_snapshot)):
+                        if snapshot is None:continue
+                        row=db.execute('SELECT data FROM entities WHERE kind=? AND id=?',(kind,identifier)).fetchone()
+                        if row is None or json.loads(row[0])!=snapshot:raise QueueDeferred()
+                    saved=db.execute("SELECT value FROM forge_settings WHERE key='permission_profile'").fetchone()
+                    if (json.loads(saved[0]) if saved else 'always_ask')!=current['permission_profile']:raise QueueDeferred()
+                def validate(db):
+                    if selection is not None:selection(db)
+                    authorize(db)
+                intent=dict(schema=1,state='pending',source_key=source_key,
+                    channel_id=channel_id,external_id=external_id,chat_id=data.get('chat_id'),
+                    project_id=data.get('project_id'),provider_id=provider_id,model=data.get('model'),
+                    agent_id=(profile or {}).get('id'),permission_ceiling=data['permission_ceiling'],
+                    goal_id=(goal_record or {}).get('id'),workspace=workspace_intent)
+                needs_preparation=goal_record is not None or workspace_intent is not None
+                def prepare(db,accepted,chat_id):
+                    if not needs_preparation:return
+                    if accepted['settings']['provider_id']!=provider_id:raise QueueDeferred()
+                    actual_workspace=None if accepted.get('readonly') else workspace_intent
+                    if goal_record is None and actual_workspace is None:return
+                    if goal_record is not None:
+                        goal={**goal_record,'chat_id':chat_id}
+                        self.store.save_entity('goals',goal,connection=db)
+                        accepted['goal_id']=goal['id']
+                    accepted['channel_preparation']={**intent,'chat_id':chat_id,
+                        'provider_id':accepted['settings']['provider_id'],'model':accepted['settings']['model'],
+                        'workspace':actual_workspace}
+                def complete(run):
+                    return self._complete_channel_preparation(run,goal_record,document,workspace_intent,authorize)
+                admission=ChannelAdmission(channel_id,external_id,validate,
+                    prepare=prepare if needs_preparation else None,complete=complete if needs_preparation else None)
+            else:
+                admission=(channel_id,external_id)
+            return self.jobs.start(data,channel=admission)
+
+    def _complete_channel_preparation(self,run,goal,document,workspace_intent,authorize):
+        """One accepted assignment owns setup. An uncertain attempt never replays."""
+        if not run.get('channel_preparation'):return run
+        workspace_intent=run['channel_preparation'].get('workspace')
+        try:
+            with self.store._connection(transaction='write') as db:
+                row=db.execute('SELECT data FROM runs WHERE id=?',(run['id'],)).fetchone()
+                owned=json.loads(row[0])
+                preparation=owned['channel_preparation']
+                if owned['status']!='queued' or preparation.get('state')!='pending':return owned
+                if any(preparation.get(key)!=owned.get(key) for key in ('source_key','channel_id','chat_id','project_id','goal_id')):
+                    raise ValueError()
+                if any(preparation.get(key)!=owned['settings'].get(key) for key in ('provider_id','model')):
+                    raise ValueError()
+                authorize(db)
+                preparation={**preparation,'state':'preparing'}
+                owned.update(channel_preparation=preparation)
+                db.execute('UPDATE runs SET data=? WHERE id=?',(encode(owned),run['id']))
+            # The claim transaction is closed before any file/Git operations.
+            if goal is not None:
+                with self.store._goal_lock:
+                    current_goal=self.store.entity('goals',goal['id'])
+                    if (current_goal.get('revision')!=goal['revision'] or current_goal.get('markdown_hash')!=goal['markdown_hash']
+                            or current_goal.get('project_id')!=run.get('project_id') or current_goal.get('chat_id')!=run['chat_id']):
+                        raise ValueError()
+                    path=Path(goal['path'])
+                    expected=document.encode('utf-8')
+                    try:
+                        with path.open('rb') as existing:saved=existing.read(len(expected)+1)
+                    except FileNotFoundError:
+                        _publish_channel_goal_document(path,document)
+                    else:
+                        if saved!=expected:raise ValueError()
+            workspace={}
+            if workspace_intent is not None:
+                with self.worktree_lock:
+                    saved=next((w for w in self.store.entities('channel_workspaces') if w['id']==workspace_intent['id']),None)
+                    if saved is None:
+                        project=self.store.get_project(workspace_intent['project_id'])
+                        if self._git(Path(project['path']),['rev-parse','--is-inside-work-tree'],check=False).returncode==0:
+                            worktree=self.worktree_create({'project_id':project['id']})
+                            saved=self.store.save_entity('channel_workspaces',dict(
+                                id=workspace_intent['id'],channel_id=workspace_intent['channel_id'],chat_id=run['chat_id'],
+                                workspace_project_id=worktree['project']['id'],worktree_id=worktree['worktree']['id']))
+                    if saved:
+                        self.store.get_project(saved['workspace_project_id'])
+                        workspace={key:saved[key] for key in ('workspace_project_id','worktree_id')}
+            return self.store.update_run(run['id'],**workspace,channel_preparation={**preparation,'state':'ready'})
+        except Exception:
+            # The original request identity already committed. Never manufacture
+            # another goal/worktree after a failed or partially completed setup.
+            current=self.store.run(run['id'])
+            failure=dict(channel_preparation={**current['channel_preparation'],'state':'unknown','reason':'preparation_failed'})
+            if current['status']=='queued':
+                failure.update(status='paused',phase='blocked',
+                    recovery='Channel setup did not finish. Inspect the saved goal and workspace before starting new work.')
+            return self.store.update_run(run['id'],**failure)
 
     def create_project(self,data):
         name=data.get('name','New project'); path=data.get('path')

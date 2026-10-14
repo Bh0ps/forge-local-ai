@@ -13,6 +13,8 @@ provide an isolated desktop. Read [the patch notes](docs/FORGE_5127.md),
 [the computer-tool guide](docs/FORGE_5110.md), [the chat and engine guide](docs/FORGE_514.md) and
 [5.1 recovery guidance](docs/FORGE_51.md).
 
+Delivery recovery and update checks from [5.1.26](docs/FORGE_5126.md) are retained.
+
 Your models. Your projects. Your workspace.
 
 Forge is a local AI workspace for building apps, exploring ideas and working with

@@ -160,39 +160,58 @@ def verify_tree(root, manifest):
 ROLLBACK_DATA_FOLDERS = ('config', 'attachments', 'state/goals')
 
 
-def database_guard(path, baseline=None):
-    """Hash logical user state, tolerating additive schema-only migrations.
+def database_guard(path, baseline=None, *, cancel=None, deadline=None):
+    """Hash authoritative state in one read-only snapshot; certify caches first.
 
-    Updater bookkeeping is deliberately excluded; invocation/message/run rows,
-    settings and all other user state remain covered. No row content is retained
-    in the operation journal.
+    Only a fully reconciled, publisher-known channel cache may be omitted. The
+    default ten-second limit covers its semantic audit; an explicit caller
+    deadline and cancellation also apply to all subsequent authoritative hashing.
     """
-    def quoted(value): return '"' + value.replace('"', '""') + '"'
-    tables = {}
-    with sqlite3.connect(path) as db:
-        names = sorted(row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name!='forge_migrations'"))
-        wanted = (baseline or {}).get('tables', {})
-        for name in sorted(set(names) | set(wanted)):
-            if name not in names:
-                tables[name] = {'missing': True}
-                continue
-            present = [row[1] for row in db.execute('PRAGMA table_info(' + quoted(name) + ')')]
-            columns = wanted[name]['columns'] if name in wanted else present
-            if any(column not in present for column in columns):
-                tables[name] = {'missing_columns': True}
-                continue
-            select = ','.join(quoted(column) for column in columns)
-            sql = 'SELECT ' + select + ' FROM ' + quoted(name)
-            if name == 'entities': sql += " WHERE kind NOT IN ('updates','update_trust')"
-            sql += ' ORDER BY ' + select
-            digest = sha256(); count = 0
-            for row in db.execute(sql):
-                values = [{'blob': value.hex()} if isinstance(value, bytes) else value for value in row]
-                digest.update(encode(values).encode('utf-8')); digest.update(b'\n'); count += 1
-            # A newly introduced empty table is an additive migration, not work.
-            if baseline is not None and name not in wanted and not count: continue
-            tables[name] = {'columns': columns, 'rows': count, 'sha256': digest.hexdigest()}
-    return {'version': 1, 'tables': tables}
+    from contextlib import closing
+    from forge_channel_queue_guard import GuardBudget, GuardFailure, inspect_queue, projection, quoted
+    budget = GuardBudget(cancel, deadline)
+    try:
+        budget.check()
+        # The coordinator already owns quiescence. Fail closed on contention;
+        # SQLite's default busy sleep must not extend a caller's deadline.
+        with closing(sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True, timeout=0)) as db:
+            db.set_progress_handler(budget.progress, 1000)
+            db.execute('BEGIN')
+            audit = inspect_queue(db, budget)
+            result, excluded, force_empty = projection(baseline, audit)
+            tables = {}
+            names = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*' AND name!='forge_migrations'")}
+            wanted = baseline['tables'] if baseline is not None else {}
+            for name in sorted((names | set(wanted)) - set(excluded)):
+                budget.check()
+                if name not in names:
+                    tables[name] = {'missing': True}
+                    continue
+                present = [row[1] for row in db.execute('PRAGMA table_info(' + quoted(name) + ')')]
+                columns = wanted[name].get('columns', present) if name in wanted else present
+                if any(column not in present for column in columns):
+                    tables[name] = {'missing_columns': True}
+                    continue
+                select = ','.join(quoted(column) for column in columns)
+                sql = 'SELECT ' + select + ' FROM ' + quoted(name)
+                if name == 'entities': sql += " WHERE kind NOT IN ('updates','update_trust')"
+                sql += ' ORDER BY ' + select
+                digest = sha256(); count = 0
+                for row in db.execute(sql):
+                    budget.check()
+                    values = [{'blob': value.hex()} if isinstance(value, bytes) else value for value in row]
+                    digest.update(encode(values).encode('utf-8')); digest.update(b'\n'); count += 1
+                # Unknown reserved empty tables carry schema risk, too.
+                if baseline is not None and name not in wanted and name not in force_empty and not count:
+                    continue
+                tables[name] = {'columns': columns, 'rows': count, 'sha256': digest.hexdigest()}
+            budget.check()
+            result['tables'] = tables
+            return result
+    except GuardFailure:
+        raise
+    except (sqlite3.Error, UnicodeError, ValueError, TypeError, KeyError, OSError):
+        raise GuardFailure() from None
 
 
 def retain_rollback_state(home, data):

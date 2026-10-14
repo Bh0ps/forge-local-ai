@@ -22,6 +22,7 @@ import httpx
 
 from forge_credentials import CredentialVault
 from forge_store import TERMINAL, encode
+from forge_channel_queue import InboundQueue,InboundWorkBudget,QueueUnavailable,QueueDeferred,record_insert,validate_schema
 from storage import _now
 
 
@@ -42,6 +43,8 @@ CHANNEL_SCHEMA = (
 
 MAX_BODY = 65536
 MAX_TEXT = 16000
+INBOUND_SCAN_LIMIT = 200
+INBOUND_DISPATCH_LIMIT = 50
 TELEGRAM_COMMANDS = [{'command': name, 'description': description} for name, description in (
     ('builder', 'Explore ideas and shape a project together'), ('build', 'Accept your Builder brief and build in the connected project'),
     ('plan', 'Research and prepare a plan'), ('goal', 'Start a tracked task in this chat'),
@@ -230,10 +233,17 @@ class ChannelManager:
         self.wake = threading.Event()
         self.thread = None
         self.recovered = False
+        self.inbound_queue = InboundQueue(self.store)
+        self._inbound_budget = None
+        self._selection = None
+        self._selection_config = None
+        self._selection_claimed = False
 
     def _require_admission(self):
         if getattr(getattr(self.service, 'update_manager', None), 'applying', False):
             raise ValueError('Forge is preparing an update. Connected workflows are paused until restart.')
+        if getattr(self.store,'channel_queue_reason',None):
+            raise QueueUnavailable()
 
     def _config(self, identifier):
         return self.store.entity('channels', identifier)
@@ -490,9 +500,15 @@ class ChannelManager:
         values = (identifier, str(external_id), 'pending', encode(payload), None, None, stamp, stamp)
         query = 'INSERT OR IGNORE INTO channel_inbound VALUES(?,?,?,?,?,?,?,?)'
         if db is not None:
-            return bool(db.execute(query, values).rowcount)
+            validate_schema(db)
+            fresh=bool(db.execute(query, values).rowcount)
+            if fresh:record_insert(db,identifier,str(external_id),self._inbound_budget)
+            return fresh
         with self.store._connection(transaction='write') as connection:
-            return bool(connection.execute(query, values).rowcount)
+            validate_schema(connection)
+            fresh=bool(connection.execute(query, values).rowcount)
+            if fresh:record_insert(connection,identifier,str(external_id),self._inbound_budget)
+            return fresh
 
     @_channel_admitted
     def receive_telegram(self, identifier, update):
@@ -573,18 +589,30 @@ class ChannelManager:
 
     def _inbound_status(self, identifier, external_id, status, run_id=None, error=None):
         with self.store._connection(transaction='write') as db:
+            if status=='dispatching' and self._selection is not None and not self._selection_claimed:
+                self._selection(db)
+                current=db.execute("SELECT data FROM entities WHERE kind='channels' AND id=?",(identifier,)).fetchone()
+                if current is None or json.loads(current[0])!=self._selection_config:
+                    raise QueueDeferred()
+                changed=db.execute("UPDATE channel_inbound SET status='dispatching',updated_at=? WHERE channel_id=? AND external_id=? AND status='pending'",(_now(),identifier,external_id)).rowcount
+                if changed!=1:raise QueueDeferred()
+                self._selection_claimed=True
+                return
             db.execute('UPDATE channel_inbound SET status=?,run_id=COALESCE(?,run_id),error=?,updated_at=? WHERE channel_id=? AND external_id=?',
                        (status, run_id, error, _now(), identifier, external_id))
 
     def _pair_request(self, config, sender, chat, text, external_id):
         code = text.removeprefix('/pair ').strip()
         digest = sha256(code.encode()).hexdigest()
-        if not config.get('pair_hash') or config.get('pair_expires', 0) < self.clock() or not hmac.compare_digest(digest, config['pair_hash']):
-            return False
-        identifier = sha256((config['id'] + ':' + external_id).encode()).hexdigest()[:32]
-        pairing = self.store.save_entity('channel_pairings', {'id': identifier, 'channel_id': config['id'],
-                         'sender_id': sender, 'chat_id': chat, 'status': 'pending', 'expires_at': config['pair_expires']})
-        self._notify('pair:' + identifier, None, 'pairing', {'channel_id': config['id'], 'pairing_id': pairing['id'], 'sender_id': sender, 'chat_id': chat})
+        with self.store._connection(transaction='write') as db:
+            row=db.execute("SELECT data FROM entities WHERE kind='channels' AND id=?",(config['id'],)).fetchone()
+            current=json.loads(row[0]) if row else {}
+            if not current.get('enabled') or not current.get('allow_inbound') or not current.get('pair_hash') or current.get('pair_expires',0)<self.clock() or not hmac.compare_digest(digest,current['pair_hash']):
+                return False
+            identifier = sha256((config['id'] + ':' + external_id).encode()).hexdigest()[:32]
+            pairing = self.store.save_entity('channel_pairings', {'id': identifier, 'channel_id': config['id'],
+                             'sender_id': sender, 'chat_id': chat, 'status': 'pending', 'expires_at': current['pair_expires']},connection=db)
+            self._notify('pair:' + identifier, None, 'pairing', {'channel_id': config['id'], 'pairing_id': pairing['id'], 'sender_id': sender, 'chat_id': chat},db)
         return True
 
     def _callback(self, config, callback):
@@ -595,6 +623,10 @@ class ChannelManager:
             raise ValueError('Telegram approval sender is not authorized.')
         token = raw_token.removeprefix('forge:')
         with self.store._connection(transaction='write') as db:
+            row=db.execute("SELECT data FROM entities WHERE kind='channels' AND id=?",(config['id'],)).fetchone()
+            config=json.loads(row[0]) if row else {}
+            if not config.get('enabled') or not config.get('allow_inbound') or not self._authorized(config,sender,chat,owner=True):
+                raise ValueError('Telegram approval sender is not authorized.')
             binding = db.execute('SELECT * FROM channel_callbacks WHERE token=?', (token,)).fetchone()
             if not binding or binding['channel_id'] != config['id'] or binding['recipient'] != chat or binding['sender_id'] != sender or binding['used_at'] or binding['expires_at'] < self.clock():
                 raise ValueError('Telegram approval is expired, used or belongs to another recipient.')
@@ -880,9 +912,11 @@ class ChannelManager:
         config={}; sender=recipient=''
         try:
             config = self._config(identifier)
+            self._selection_config = config
             if not config.get('enabled') or not config.get('allow_inbound'):
                 self._inbound_status(identifier, external_id, 'cancelled')
                 return
+            if self._inbound_budget is not None:self._inbound_budget.payload('dispatch_decode')
             payload = json.loads(record['data'])
             if config['kind'] == 'telegram':
                 if 'callback_query' in payload:
@@ -897,6 +931,7 @@ class ChannelManager:
                 if not isinstance(text, str) or not 1 <= len(text.strip()) <= MAX_TEXT:
                     raise ValueError('Send a text request of 1–16,000 characters.')
                 if text.startswith('/pair '):
+                    self._inbound_status(identifier,external_id,'dispatching')
                     if not self._pair_request(config, sender, recipient, text, external_id):
                         raise ValueError('Pairing code is invalid or expired.')
                     self._inbound_status(identifier, external_id, 'paired')
@@ -958,11 +993,15 @@ class ChannelManager:
             if conversation_command:
                 data.update(text=argument or 'Help me come up with a project idea. Suggest three ideas and help me choose.',channel_command=command[1:])
             if hasattr(self.service, 'channel_start'):
-                run = self.service.channel_start(data, identifier, external_id)
+                run = self.service.channel_start(data, identifier, external_id, selection=self._selection)
             else:
                 self._inbound_status(identifier, external_id, 'dispatching')
                 run = self.service.jobs.start(data)
             self._inbound_status(identifier, external_id, 'dispatched', run['id'])
+        except QueueUnavailable:
+            if self._selection_claimed:
+                self._inbound_status(identifier,external_id,'outcome_unknown',error='Channel dispatch outcome is unknown. Inspect the local run journal.')
+            raise
         except ValueError as exc:
             self._inbound_status(identifier, external_id, 'rejected', error=redact(str(exc))[:300])
             if config.get('kind')=='telegram' and config.get('allow_outbound',True) and self._authorized(config,sender,recipient):
@@ -1244,28 +1283,22 @@ class ChannelManager:
                 self._set_checkpoint(db, config['id'], 'poll_retry_at', self.clock() + min(300, 2 ** min(failures, 8)))
             self._notify('offline:' + config['id'], None, 'offline', {'channel_id': config['id'], 'message': 'Telegram is offline. Pending work is saved.'})
 
+
     def tick(self, poll=True):
         if self.stop_event.is_set():
             return
         with self.lock:
             if getattr(getattr(self.service, 'update_manager', None), 'applying', False) or self.stop_event.is_set():
                 return
+            if getattr(self.store,'channel_queue_reason',None):
+                self.inbound_queue.reason='metadata_unavailable'
+                return
             if not self.recovered:
                 self.recover()
             self._journal_events()
-            if poll:
-                for config in self.store.entities('channels'):
-                    if self.stop_event.is_set():
-                        break
-                    if config['kind'] == 'telegram' and config.get('enabled'):
-                        config = self._refresh_command_menu(config)
-                        self._poll_telegram(config)
-            with self.store._connection() as db:
-                inbound = db.execute("SELECT * FROM channel_inbound WHERE status='pending' ORDER BY created_at LIMIT 50").fetchall()
-            for record in inbound:
-                if self.stop_event.is_set():
-                    break
-                self._dispatch_inbound(record)
+            self._tick_inbound(poll)
+            if getattr(self.store,'channel_queue_reason',None):
+                return
             self._journal_events()
             remaining = 30
             while remaining and not self.stop_event.is_set():
@@ -1288,6 +1321,72 @@ class ChannelManager:
                         break
                     self._deliver(record)
                     remaining -= 1
+
+    def _tick_inbound(self, poll):
+        budget=InboundWorkBudget()
+        self._inbound_budget=budget
+        admitted=lambda:not self.stop_event.is_set() and not getattr(getattr(self.service,'update_manager',None),'applying',False)
+        def poll_channels():
+            for config in self.store.entities('channels'):
+                if not admitted():raise QueueDeferred()
+                if config['kind']=='telegram' and config.get('enabled'):
+                    self._poll_telegram(self._refresh_command_menu(config))
+        try:
+            if not self.inbound_queue.maintenance(admitted,budget):return
+            # Recovery gets the first quantum. New arrivals cannot continually
+            # consume its allowance or invalidate a just-proved prefix before
+            # existing heads dispatch. Empty normal queues still poll promptly.
+            delay_poll=budget.payloads>0
+            if poll and not delay_poll:poll_channels()
+            heads={}
+            cursor=None
+            for item in self.inbound_queue.candidates():
+                item=tuple(item)
+                if not admitted():raise QueueDeferred()
+                cursor=item
+                try:
+                    with self.store._connection() as db:
+                        if not self.inbound_queue.eligible(db,item,heads):continue
+                        record=self.inbound_queue.record(db,item,budget)
+                    if record is None:
+                        with self.store._connection(transaction='write') as db:
+                            if not admitted():raise QueueDeferred()
+                            db.execute('DELETE FROM channel_inbound_queue WHERE channel_id=? AND external_id=?',item[:2])
+                        heads.clear()
+                        continue
+                    budget.dispatch()
+                    profile=self.store.get_settings()['permission_profile']
+                    def current_admission(db):
+                        if not admitted():raise QueueDeferred()
+                        current=db.execute("SELECT value FROM forge_settings WHERE key='permission_profile'").fetchone()
+                        if (json.loads(current[0]) if current else 'always_ask')!=profile:raise QueueDeferred()
+                    def selection(db):
+                        current_admission(db)
+                        self.inbound_queue.validate_selection(db,item,budget)
+                    selection.current_admission=current_admission
+                    self._selection,self._selection_claimed=selection,False
+                    self._dispatch_inbound(record)
+                except QueueDeferred:
+                    if budget.payloads>=200 or budget.dispatches>=50:break
+                finally:
+                    self._selection=None
+                    self._selection_config=None
+                    self._selection_claimed=False
+                heads.clear()
+            if cursor is not None:
+                with self.store._connection(transaction='write') as db:
+                    if not admitted():raise QueueDeferred()
+                    self.inbound_queue.advance(db,cursor)
+            if poll and delay_poll and admitted():poll_channels()
+        except QueueDeferred:
+            self.inbound_queue.reason='rebuilding'
+        except QueueUnavailable:
+            self.store.channel_queue_reason='metadata_unavailable'
+            self.inbound_queue.reason='metadata_unavailable'
+        finally:
+            self._inbound_budget=None
+            self.inbound_queue.last_work.update(payload_work=budget.payloads,payload_classifications=budget.classifications,
+                dispatch_calls=budget.dispatches,payload_kinds=dict(budget.by_kind))
 
     def start(self):
         with self.lock:

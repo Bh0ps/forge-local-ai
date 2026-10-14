@@ -175,6 +175,7 @@ class ForgeStore(Store):
                 db.execute('INSERT INTO forge_migrations VALUES(7,?)',(_now(),))
         self._ensure_provider_bindings(backup=previous==7)
         self._ensure_provider_authorities(backup=previous==7)
+        self._ensure_channel_queue()
         if not self.entities('agents'):
             for role, instruction in (
                 ('Researcher','Research using primary sources. Cite sources and explain uncertainty. Do not edit the project.'),
@@ -182,6 +183,34 @@ class ForgeStore(Store):
                 ('Reviewer','Inspect changes and identify actionable correctness problems. Do not modify files.')):
                 self.save_entity('agents',dict(id=role.lower(),name=role,role=role.lower(),instructions=instruction,
                     model='',context=32768,tools=[],skills=[],enabled=True,tokens=25000,rounds=32))
+
+    def _ensure_channel_queue(self):
+        # Called before channel workers exist, under exclusive coordinator startup.
+        # Only private queue admission is disabled on unsupported/failed metadata.
+        from forge_channel_queue import SCHEMA,QueueUnavailable,install,reset_recovery,validate_schema
+        self.channel_queue_reason = None
+        try:
+            with self._connection() as db:
+                found={row[0] for row in db.execute('SELECT name FROM sqlite_master WHERE name IN ('+','.join('?' for _ in SCHEMA)+')',tuple(SCHEMA))}
+                if found:
+                    validate_schema(db)
+            if not found:
+                destination=self.home/'backups'/('pre-channel-queue-1-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%f'))
+                destination.mkdir()
+                with closing(sqlite3.connect(self.db_path)) as source,closing(sqlite3.connect(destination/'forge.sqlite3')) as target:
+                    source.backup(target)
+                    if target.execute('PRAGMA integrity_check').fetchone()[0]!='ok':raise QueueUnavailable()
+                with self._connection(transaction='write') as db:
+                    # Recheck under the creation transaction; never overwrite a
+                    # partial/unknown group discovered after the verified backup.
+                    if db.execute('SELECT 1 FROM sqlite_master WHERE name IN ('+','.join('?' for _ in SCHEMA)+') LIMIT 1',tuple(SCHEMA)).fetchone():
+                        raise QueueUnavailable()
+                    install(db)
+            else:
+                with self._connection(transaction='write') as db:
+                    reset_recovery(db)
+        except (QueueUnavailable,OSError,sqlite3.Error,ValueError):
+            self.channel_queue_reason='metadata_unavailable'
 
     def _ensure_provider_bindings(self, *, backup):
         # Independently versioned, additive private journal. Delivered schema7
@@ -577,6 +606,10 @@ class ForgeStore(Store):
                 if prior:
                     run=json.loads(db.execute('SELECT data FROM runs WHERE id=?',(prior[0],)).fetchone()[0])
                     return run,False
+            if channel:
+                from forge_channel_queue import ChannelAdmission
+                if isinstance(channel,ChannelAdmission):
+                    channel.validate(db)
             if chat_id:
                 chat=self._chat(db,chat_id)
                 if data.get('parent_id'):
@@ -593,6 +626,8 @@ class ForgeStore(Store):
                     data['helper_chat_owned']=True
             active=db.execute("SELECT id FROM runs WHERE chat_id=? AND status NOT IN ('completed','cancelled','failed','paused','interrupted')",(chat_id,)).fetchone()
             if active: raise ValueError('This chat already has an active run.')
+            if channel and isinstance(channel,ChannelAdmission) and channel.prepare is not None:
+                channel.prepare(db,data,chat_id)
             if data.get('goal_id') and not data.get('parent_id'):
                 row=db.execute("SELECT data FROM entities WHERE kind='goals' AND id=?",(data['goal_id'],)).fetchone()
                 if not row: raise ValueError('Goal not found.')
@@ -783,6 +818,42 @@ class ForgeStore(Store):
             result.append({**goal,'run_id':row['run_id'],'chat_id':row['chat_id'],'status':row['status'],'execution_mode':row['execution_mode']})
         return result
 
+    def _goal_record(self,data,identifier,previous):
+        merged={**previous,**deepcopy(data),'id':identifier}; merged.pop('markdown',None); merged.pop('external_edits',None)
+        tasks=deepcopy(merged.get('tasks') or [])
+        if not isinstance(tasks,list) or len(tasks)>1000: raise ValueError('Provide at most 1,000 goal tasks.')
+        old_tasks=previous.get('tasks') or []
+        by_text={}
+        for item in old_tasks: by_text.setdefault(item['text'],[]).append(item)
+        seen=set()
+        for task in tasks:
+            if not isinstance(task,dict) or not isinstance(task.get('text'),str) or not task['text'].strip(): raise ValueError('Each goal task needs non-empty text.')
+            if not task.get('id'):
+                matches=by_text.get(task['text'],[])
+                if len(matches)>1: raise ValueError('Task text is ambiguous. Preserve its existing task ID.')
+                task['id']=matches[0]['id'] if matches else uuid4().hex
+            if not isinstance(task['id'],str) or not 1<=len(task['id'])<=128 or task['id'] in seen: raise ValueError('Goal task IDs must be unique bounded strings.')
+            seen.add(task['id']); task.setdefault('status','pending')
+            if task['status'] not in ('pending','in_progress','completed'): raise ValueError('Choose pending, in_progress or completed task status.')
+            if not isinstance(task.get('evidence',[]),list) or len(task.get('evidence',[]))>100: raise ValueError('Task evidence must be a bounded list.')
+            if any(not isinstance(value,str) or len(value)>8000 for value in task.get('evidence',[])): raise ValueError('Task evidence must contain bounded text references.')
+        shape=lambda values:[(t['id'],t['text'],t.get('requirement_id')) for t in values if t.get('origin')!='review']
+        changed=shape(tasks)!=shape(old_tasks) or merged.get('request')!=previous.get('request') or merged.get('reviewed_plan')!=previous.get('reviewed_plan')
+        scope_revision=previous.get('scope_revision',1)+(int(changed) if previous else 0)
+        history=deepcopy(previous.get('requirement_history') or [])
+        if not history or changed:
+            history.append({'revision':scope_revision,'request':merged.get('request',''),'tasks':[{k:t.get(k) for k in ('id','text','requirement_id')} for t in tasks if t.get('origin')!='review'],'created_at':_now()})
+        merged.update(revision=previous.get('revision',0)+1,scope_revision=scope_revision,requirement_history=history,tasks=tasks)
+        text='# '+str(merged.get('title','Goal')).replace('\n',' ')+'\n\n'
+        for index,task in enumerate(tasks,1):
+            task.setdefault('id',uuid4().hex); task.setdefault('status','pending')
+            text+=f"{index}. [{'x' if task['status']=='completed' else ' '}] {task['text']}\n"
+            for evidence in task.get('evidence',[]): text+='   - Evidence: '+str(evidence).replace('\n',' ')+'\n'
+        text+='\n## Checkpoint\n'+str(merged.get('checkpoint','Not started.'))+'\n\n## Blockers\n'+str(merged.get('blockers','None.'))+'\n\n## Next action\n'+str(merged.get('next_action','Review the ordered tasks.'))+'\n'
+        path=self.home/'state/goals'/identifier/'TODO.md'
+        merged.update(tasks=tasks,markdown_hash=sha256(text.encode()).hexdigest(),path=str(path))
+        return merged,text
+
     def save_goal(self,data,*,reconcile=False):
         with self._goal_lock:
             identifier=data.get('id') or uuid4().hex
@@ -791,41 +862,9 @@ class ForgeStore(Store):
             try: previous=self.goal(identifier)
             except ValueError: previous={}
             if previous.get('external_edits') and not reconcile: raise ValueError('TODO.md was edited externally. Reconcile or import it before updating.')
-            merged={**previous,**deepcopy(data),'id':identifier}; merged.pop('markdown',None); merged.pop('external_edits',None)
-            tasks=deepcopy(merged.get('tasks') or [])
-            if not isinstance(tasks,list) or len(tasks)>1000: raise ValueError('Provide at most 1,000 goal tasks.')
-            old_tasks=previous.get('tasks') or []
-            by_text={}
-            for item in old_tasks: by_text.setdefault(item['text'],[]).append(item)
-            seen=set()
-            for task in tasks:
-                if not isinstance(task,dict) or not isinstance(task.get('text'),str) or not task['text'].strip(): raise ValueError('Each goal task needs non-empty text.')
-                if not task.get('id'):
-                    matches=by_text.get(task['text'],[])
-                    if len(matches)>1: raise ValueError('Task text is ambiguous. Preserve its existing task ID.')
-                    task['id']=matches[0]['id'] if matches else uuid4().hex
-                if not isinstance(task['id'],str) or not 1<=len(task['id'])<=128 or task['id'] in seen: raise ValueError('Goal task IDs must be unique bounded strings.')
-                seen.add(task['id']); task.setdefault('status','pending')
-                if task['status'] not in ('pending','in_progress','completed'): raise ValueError('Choose pending, in_progress or completed task status.')
-                if not isinstance(task.get('evidence',[]),list) or len(task.get('evidence',[]))>100: raise ValueError('Task evidence must be a bounded list.')
-                if any(not isinstance(value,str) or len(value)>8000 for value in task.get('evidence',[])): raise ValueError('Task evidence must contain bounded text references.')
-            shape=lambda values:[(t['id'],t['text'],t.get('requirement_id')) for t in values if t.get('origin')!='review']
-            changed=shape(tasks)!=shape(old_tasks) or merged.get('request')!=previous.get('request') or merged.get('reviewed_plan')!=previous.get('reviewed_plan')
-            scope_revision=previous.get('scope_revision',1)+(int(changed) if previous else 0)
-            history=deepcopy(previous.get('requirement_history') or [])
-            if not history or changed:
-                history.append({'revision':scope_revision,'request':merged.get('request',''),'tasks':[{k:t.get(k) for k in ('id','text','requirement_id')} for t in tasks if t.get('origin')!='review'],'created_at':_now()})
-            merged.update(revision=previous.get('revision',0)+1,scope_revision=scope_revision,requirement_history=history,tasks=tasks)
-            text='# '+str(merged.get('title','Goal')).replace('\n',' ')+'\n\n'
-            for index,task in enumerate(tasks,1):
-                task.setdefault('id',uuid4().hex); task.setdefault('status','pending')
-                text+=f"{index}. [{'x' if task['status']=='completed' else ' '}] {task['text']}\n"
-                for evidence in task.get('evidence',[]): text+='   - Evidence: '+str(evidence).replace('\n',' ')+'\n'
-            text+='\n## Checkpoint\n'+str(merged.get('checkpoint','Not started.'))+'\n\n## Blockers\n'+str(merged.get('blockers','None.'))+'\n\n## Next action\n'+str(merged.get('next_action','Review the ordered tasks.'))+'\n'
-            path=self.home/'state/goals'/identifier/'TODO.md'
-            merged.update(tasks=tasks,markdown_hash=sha256(text.encode()).hexdigest(),path=str(path))
+            merged,text=self._goal_record(data,identifier,previous)
             # The database journal commits first. Atomic replacement makes recovery detectable.
-            self.save_entity('goals',merged); atomic_text(path,text)
+            self.save_entity('goals',merged); atomic_text(Path(merged['path']),text)
             return self.goal(identifier)
 
     def update_goal_progress(self,identifier,data,*,expected_revision=None):

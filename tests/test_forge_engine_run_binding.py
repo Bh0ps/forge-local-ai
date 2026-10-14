@@ -246,6 +246,12 @@ def test_supplemental_creation_is_backed_up_idempotent_and_keeps_schema7(tmp_pat
         assert db.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_run_bindings'").fetchone() is None
     db.close()
+    # Store reopening deliberately closes the derived queue until real recovery.
+    from forge_channel_queue import InboundQueue, PRIVATE_TABLES
+    closed=database_guard(reopened.db_path,before)
+    assert closed!=before and 'channel_queue_protection' in closed
+    assert PRIVATE_TABLES<=closed['tables'].keys()
+    assert InboundQueue(reopened).maintenance()
     assert database_guard(reopened.db_path,before)==before
     ForgeStore(store.home)
     assert len(list((store.home/'backups').glob('pre-provider-bindings-1-*/forge.sqlite3')))==1
