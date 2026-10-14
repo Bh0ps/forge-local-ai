@@ -12,7 +12,7 @@ BUNDLES = (
 )
 
 
-LIBRARY_VERSION = "2.4.0"
+LIBRARY_VERSION = "2.4.1"
 CONTENT_FIELDS = frozenset({"steps", "example", "examples", "example_document", "verification", "recovery", "acceptance_packet"})
 
 
@@ -542,17 +542,17 @@ If the tool fails, inspect the error and state, then correct the assumption. A m
            "calls": [],
            "evidence": "Record artifact hash/size from a verified utility or manifest, compiler/target architecture, linked runtime requirements, tests and actual startup observations. Confirm required resources and runtime dependencies from the package contract. Report whether a native GUI flow was exercised; browser preview tools do not verify a C++ desktop window. Do not claim a folder-only launch is isolated or that a background process proves an interactive app works.",
            "recovery": "An uncertain launched process or write needs its owned session and durable outcome inspected; use command_stop only for an owned session when appropriate. Keep unrelated processes/user work untouched. If a missing tool prevents required UI verification, retain the concrete build/test evidence and the unresolved criterion."}]),
-    workflow("desktop-executable", "Package a desktop executable", "Verify desktop packages through the existing .NET, PyInstaller or release pipeline.",
-        "delivery", "Workflow", "delivery build test", "discover implement verify",
+    workflow("desktop-executable", "Package a desktop executable", "Verify packages through the existing .NET, PyInstaller, Tauri or release pipeline.",
+        "delivery", "Workflow", "delivery build test tauri", "discover implement verify",
         "exe|executable|pyinstaller|publish desktop|desktop installer|desktop package|package app|portable app|standalone app|self-contained|single file app",
-        ["Read existing release scripts, .spec/publish profile, entry point, locks and notices. Preserve the stack/pipeline; building is not authority to sign, publish or replace an installation.",
+        ["Read release scripts, .spec/publish profile, Cargo/Tauri config, entry point, locks and notices. Preserve the stack/pipeline; building does not authorize signing, publishing or replacing an installation.",
          "Discover runners/versions/flags, architecture/runtime/outputs. No guessed SDK paths, new trimming/AOT/single-file choices or private profile rewrites.",
          "Build intended source into fresh scoped output with actual argv/cwd. Wait/read owned sessions and terminal results; preserve earlier artifacts/user data.",
          "Verify actual executable, assets/dependencies/notices and hashes. Exclude secrets, personal state/logs, models/caches and IDE settings; existence is not verification.",
          "Check supported startup/GUI with disposable configuration and authorized tools; folders are not sandboxes. Requested upgrade/rollback preserves backups.",
          "Return artifact/runtime identity, checks and untested limits. Separate build/startup/GUI/signature evidence; follow approvals."],
         "list_files read_files read_file tools_search tools_load run_command command_start command_wait command_read artifact_read",
-        'read_file({"path":"<discovered release or packaging script>","start_line":1,"end_line":180})', version="2.2.0",
+        'read_file({"path":"<discovered release or packaging script>","start_line":1,"end_line":180})', version="2.2.1",
         verification="Verify artifact/dependency/privacy facts separately from startup/UI/signature evidence.",
         recovery="Keep completed outputs/backups. Inspect unknown effects before retry; prerequisites/consent need their own recovery.",
         acceptance_packet="Source/configuration/toolchain; sessions/results; artifact path/hash/size; dependencies/notices/privacy; disposable smoke; delivery limits.",
@@ -571,6 +571,18 @@ If the tool fails, inspect the error and state, then correct the assumption. A m
                      {"tool": "command_start", "arguments": {"argv": ["<same verified project Python interpreter>", "-m", "PyInstaller", "<actual existing .spec>", "--distpath", "<new scoped output directory>", "--workpath", "<new scoped work directory>"], "cwd": ".", "max_seconds": 600}}],
            "evidence": "Preserve the spec's entry point, data files, hidden imports, runtime hooks, one-folder/one-file and console/windowed choices. Do not mix arbitrary global Python environments or assume every CLI flag overrides a spec. Inspect the actual output inventory and checksums, notices and dependency identity. Source documentation: [PyInstaller spec files](https://pyinstaller.org/en/stable/spec-files.html). A successful --version or packaging exit does not verify startup or GUI behavior.",
            "recovery": "If the package or dependency is missing, report the exact lock/environment prerequisite and use an authorized setup path. Do not auto-upgrade it or substitute another interpreter. Keep secrets and application state out of the bundle; preserve temporary/published outputs when execution outcome is unknown."},
+          {"title": "Build an existing Tauri Windows app through its declared pipeline",
+           "scenario": "The discovered Cargo and frontend manifests confirm an existing Tauri 2 project. Read the actual release runner, Tauri config/Windows override, Cargo.lock, frontend lock and rust-toolchain/.cargo settings before choosing commands. Keep configuration, capability/CSP scopes, resources and sidecars intact; do not migrate or scaffold another app. The direct Cargo Tauri example applies only when the matching installed CLI is the repository's confirmed build contract; older projects retain their version-matched release runner.",
+           "calls": [{"tool": "read_files", "arguments": {"files": [
+                       {"path": "<discovered Cargo.toml>", "start_line": 1, "end_line": 120},
+                       {"path": "<discovered Tauri configuration>", "start_line": 1, "end_line": 160}]}},
+                     {"tool": "run_command", "arguments": {"argv": ["<verified project rustc executable>", "-vV"], "cwd": ".", "timeout": 20}},
+                     {"tool": "run_command", "arguments": {"argv": ["<verified project cargo executable>", "tauri", "--version"], "cwd": ".", "timeout": 20}},
+                     {"tool": "command_start", "arguments": {"argv": ["<same verified project cargo executable>", "tauri", "build"], "cwd": "<actual existing project cwd>", "max_seconds": 600}},
+                     {"tool": "command_wait", "arguments": {"id": "<returned Tauri build session id>", "timeout": 30}},
+                     {"tool": "command_read", "arguments": {"id": "<same Tauri build session id>", "start": 0, "limit": 6000}}],
+           "evidence": "Verify the project-selected Windows MSVC Rust target, C++ Build Tools and WebView2 requirements; Node is relevant only for a JavaScript frontend. Preserve beforeBuildCommand, frontendDist, beforeBundleCommand and merged Windows bundle/runtime choices. A plain cargo build or an existing EXE does not attest fresh frontend assets or a produced installer. Separate the real app EXE from MSI/setup output; record source/configuration/architecture, fresh frontend inventory, resources/dependencies, notices/privacy and actual hashes. Run the repository's backend/frontend tests and separate authorized disposable desktop smoke; do not claim an isolated native desktop or Visual Studio solution that Cargo did not produce. References: [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/), [CLI build contract](https://v2.tauri.app/reference/cli/), [configuration files](https://v2.tauri.app/develop/configuration-files/), [Windows bundles/runtime policy](https://v2.tauri.app/distribute/windows-installer/).",
+           "recovery": "Read the first real prerequisite/build diagnostic and the same session. Respect Cargo/frontend/bundler network approvals; do not use download-capable npx, install guessed SDKs, change rustup defaults or enable OS features automatically. Do not weaken CSP/capabilities, change bundle targets or skip WebView2 to hide a failure. Preserve locks, private .env/config and earlier outputs; inspect unknown effects before retry. Signing, installation and publication remain separately authorized actions."},
           {"title": "Verify real artifacts without using personal application state",
            "scenario": "Packaging completed with a concrete artifact inventory. Verify the actual files and perform only a documented safe startup/flow check using synthetic input and supported disposable configuration. If the app cannot direct writes away from personal state, report the test limitation.",
            "calls": [{"tool": "artifact_read", "arguments": {"id": "<returned build or verification artifact id>", "start": 0, "limit": 6000}}],

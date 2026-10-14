@@ -130,8 +130,9 @@ def test_complete_windows_primary_recipe_fits_8k_context_with_lazy_support(ident
 def test_new_guidance_is_canonical_and_examples_stay_lazy(hub, identity):
     item = BY_ID[identity]
     folder = forge_library.ASSET_ROOT / "skills" / identity
-    assert LIBRARY_VERSION == "2.4.0"
-    assert item["version"] == ("2.3.0" if identity == 'windows-computer' else "2.2.0")
+    assert LIBRARY_VERSION == "2.4.1"
+    assert item["version"] == ("2.3.0" if identity == 'windows-computer' else
+        "2.2.1" if identity == 'desktop-executable' else "2.2.0")
     for relative, expected in rendered_assets(item).items():
         assert (folder / relative).read_bytes() == expected.encode("utf-8")
     assert all(not CONTENT_FIELDS.intersection(row) for row in STARTER_SKILLS)
@@ -162,7 +163,7 @@ def test_every_windows_example_uses_actual_registered_tool_shapes():
                 assert call["tool"] in schemas
                 jsonschema.validate(call["arguments"], schemas[call["tool"]])
                 calls += 1
-    assert calls == 20
+    assert calls == 26
 
 
 @pytest.mark.parametrize('excluded,old_version,old_count', [
@@ -198,7 +199,7 @@ def test_upgrade_to_28_preserves_owned_edits_deletions_preferences_and_identity(
     monkeypatch.setattr(forge_library, "STARTER_SKILLS", STARTER_SKILLS)
     monkeypatch.setattr(forge_library, "LIBRARY_VERSION", LIBRARY_VERSION)
     assert forge_library.reconcile_starters(root, config) == (True, [])
-    assert len(config["library"]["files"]) == 28 and config["library"]["version"] == "2.4.0"
+    assert len(config["library"]["files"]) == 28 and config["library"]["version"] == "2.4.1"
     assert edited.read_text(encoding="utf-8") == "Local desktop conventions.\n"
     assert not deleted.exists() and not removed_resource.exists()
     assert resource.read_text(encoding="utf-8") == "Private reviewed examples.\n"

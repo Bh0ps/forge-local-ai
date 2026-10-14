@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "2.2.0",
+  "version": "2.2.1",
   "bundle": "delivery",
   "phases": [
     "discover",
@@ -10,7 +10,8 @@
   "intents": [
     "delivery",
     "build",
-    "test"
+    "test",
+    "tauri"
   ],
   "triggers": [
     "exe",

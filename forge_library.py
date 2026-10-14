@@ -256,6 +256,10 @@ def task_context(query, context=None):
     for identity, terms in groups.items():
         if any(_mentions(text, term) for term in terms.split()):
             intents.add(identity)
+    # Tauri packaging has a Rust/frontend contract. A bare filename or ordinary
+    # Rust CLI request is insufficient to select that desktop workflow.
+    if _mentions(text, "tauri") and intents & {"build", "debug", "test", "delivery"}:
+        intents.add("tauri")
     # Workflow phase is explicit when supplied by the coordinator. Tool results
     # can inform routing, but cannot supply instructions or permission grants.
     phase = context.get("phase")

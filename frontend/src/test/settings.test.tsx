@@ -94,7 +94,7 @@ describe('settings navigation', () => {
     expect(onChange).toHaveBeenCalledWith({ goal_limits: { minutes: 90, tokens: 17000, rounds: 41, tools: 19 } });
   });
   it('adds a separate endpoint for built-in Ollama without changing the active engine', async () => {
-    const call = bridge({ providers: { providers: [{ id: 'ollama', name: 'Ollama', kind: 'ollama', url: 'http://127.0.0.1:11434/api' }] }, provider_test: { ok: true, model_count: 1 }, provider_save: { id: 'new-endpoint' } });
+    const call = bridge({ providers: { providers: [{ id: 'ollama', name: 'Ollama', kind: 'ollama', url: 'http://127.0.0.1:11434/api' }] }, provider_test: { ok: true, model_count: 1 }, provider_save: (data: Record<string, unknown>) => ({ id: data.id }) });
     const { onChange } = workspace(DEFAULT_SETTINGS, 'models');
     await userEvent.click(await screen.findByRole('button', { name: 'Add endpoint' }));
     expect(screen.getByRole('heading', { name: 'Add local engine' })).toBeTruthy();
@@ -103,7 +103,7 @@ describe('settings navigation', () => {
     expect(call).toHaveBeenCalledWith('provider_test', { draft: { kind: 'ollama', url: 'http://127.0.0.1:11434/api' }, id: undefined, api_key: undefined });
     expect(call.mock.calls.some(([action]) => action === 'provider_save')).toBe(false);
     await userEvent.click(screen.getByRole('button', { name: 'Save engine' }));
-    await waitFor(() => expect(call).toHaveBeenCalledWith('provider_save', { kind: 'ollama', url: 'http://127.0.0.1:11434/api', name: 'Ollama endpoint', id: undefined, api_key: undefined, enabled: true }));
+    await waitFor(() => expect(call).toHaveBeenCalledWith('provider_save', { kind: 'ollama', url: 'http://127.0.0.1:11434/api', name: 'Ollama endpoint', id: expect.stringMatching(/^engine-[a-f0-9]{32}$/), api_key: undefined, enabled: true }));
     expect(onChange).not.toHaveBeenCalled();
   });
   it('opens dedicated OpenRouter settings without converting or resaving a cloud profile', async () => {

@@ -4,7 +4,7 @@ import { describe,expect,it,vi } from 'vitest';
 import { EngineEditor } from '../engineEditor';
 const provider={id:'saved',name:'My engine',type:'openai',base_url:'http://127.0.0.1:8080/v1',context_limit:8192,capabilities:['tools']};
 const preset={id:'lm-studio',name:'LM Studio',kind:'openai-compatible',url:'http://127.0.0.1:1234/v1',setup_url:'https://lmstudio.ai/docs/developer/openai-compat',description:'Start the local server.',hosting:'desktop',metadata_strategy:'lmstudio'};
-function bridge(test:unknown={ok:true,model_count:1}){const call=vi.fn(async(action:string)=>action==='provider_presets'?{presets:[preset]}:typeof test==='function'?test(action):test);window.pywebview={api:{call}};return call;}
+function bridge(test:unknown={ok:true,model_count:1}){const call=vi.fn(async(action:string,data:Record<string,unknown>={})=>action==='provider_presets'?{presets:[preset]}:action==='provider_save'?{id:data.id}:typeof test==='function'?test(action):test);window.pywebview={api:{call}};return call;}
 describe('engine presets',()=>{
   it('links Docker setup while keeping unreported serving facts separate from connection success',async()=>{
     const docker={...preset,id:'docker-model-runner',name:'Docker Model Runner',url:'http://127.0.0.1:12434/engines/llama.cpp/v1',setup_url:'https://docs.docker.com/ai/model-runner/get-started/',metadata_strategy:'dmr'};

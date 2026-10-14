@@ -1,6 +1,6 @@
 ---
 name: desktop-executable
-description: Verify desktop packages through the existing .NET, PyInstaller or release pipeline.
+description: Verify packages through the existing .NET, PyInstaller, Tauri or release pipeline.
 license: MIT
 ---
 
@@ -12,7 +12,7 @@ Use during discover, implement, verify. Skip unrelated work and respect coordina
 
 ## Workflow
 
-1. Read existing release scripts, .spec/publish profile, entry point, locks and notices. Preserve the stack/pipeline; building is not authority to sign, publish or replace an installation.
+1. Read release scripts, .spec/publish profile, Cargo/Tauri config, entry point, locks and notices. Preserve the stack/pipeline; building does not authorize signing, publishing or replacing an installation.
 2. Discover runners/versions/flags, architecture/runtime/outputs. No guessed SDK paths, new trimming/AOT/single-file choices or private profile rewrites.
 3. Build intended source into fresh scoped output with actual argv/cwd. Wait/read owned sessions and terminal results; preserve earlier artifacts/user data.
 4. Verify actual executable, assets/dependencies/notices and hashes. Exclude secrets, personal state/logs, models/caches and IDE settings; existence is not verification.

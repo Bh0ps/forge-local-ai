@@ -7,14 +7,16 @@ import './engineEditor.css';
 
 const setupHosts=new Set(['docs.ollama.com','lmstudio.ai','github.com','www.jan.ai','localai.io','docs.vllm.ai','docs.sglang.io','docs.docker.com']);
 function setupLink(value:string){try{const url=new URL(value);return url.protocol==='https:' && !url.username && !url.password && !url.search && !url.hash && setupHosts.has(url.hostname)?url.href:null;}catch{return null;}}
+function creationId(){const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);return `engine-${Array.from(bytes,value=>value.toString(16).padStart(2,'0')).join('')}`;}
 export function EngineEditor({provider,close,saved}:{provider:Provider;close:()=>void;saved:()=>Promise<void>}) {
   const [draft,setDraft]=useState({...provider}),[apiKey,setApiKey]=useState(''),[operation,setOperation]=useState<'test'|'save'|null>(null);
   const [result,setResult]=useState<{title:string;detail?:string;error?:boolean}|null>(null),[metadata,setMetadata]=useState<ProviderMetadata|null>(null);
   const [presets,setPresets]=useState<ProviderPreset[]>([]),[presetsFailed,setPresetsFailed]=useState(false),[presetRequest,setPresetRequest]=useState(0);
   const [protocolOpen,setProtocolOpen]=useState(!provider.preset_id);
   const pending=useRef(false),generation=useRef(0),providerKey=JSON.stringify(provider),previousProvider=useRef(providerKey);
+  const creation=useRef<string|null>(null);if(!provider.id && !creation.current)creation.current=creationId();
   const nameInput=useRef<HTMLInputElement>(null);
-  useLayoutEffect(()=>{if(providerKey!==previousProvider.current){previousProvider.current=providerKey;generation.current++;pending.current=false;setOperation(null);setDraft({...provider});setApiKey('');setResult(null);setMetadata(null);setProtocolOpen(!provider.preset_id);}},[providerKey]);
+  useLayoutEffect(()=>{if(providerKey!==previousProvider.current){previousProvider.current=providerKey;generation.current++;pending.current=false;creation.current=provider.id?null:creationId();setOperation(null);setDraft({...provider});setApiKey('');setResult(null);setMetadata(null);setProtocolOpen(!provider.preset_id);}},[providerKey]);
   useEffect(()=>()=>{generation.current++;},[]);
   useEffect(()=>{nameInput.current?.focus();},[providerKey]);
   useEffect(()=>{let current=true;setPresetsFailed(false);void api<{presets:ProviderPreset[]}>('provider_presets').then(value=>{if(current)setPresets(Array.isArray(value.presets)?value.presets.slice(0,24):[]);}).catch(()=>{if(current)setPresetsFailed(true);});return()=>{current=false;};},[presetRequest]);
@@ -24,13 +26,14 @@ export function EngineEditor({provider,close,saved}:{provider:Provider;close:()=
   function endpoint(){const url=(draft.base_url||draft.url||'').trim();try{const parsed=new URL(url);if(!['http:','https:'].includes(parsed.protocol)||parsed.username||parsed.password||parsed.search||parsed.hash)throw new Error();}catch{throw new Error('Enter an HTTP or HTTPS endpoint without embedded credentials, query parameters or fragments.');}return {kind:draft.type==='ollama'?'ollama':'openai-compatible',url,...(draft.preset_id!==undefined?{preset_id:draft.preset_id}:{})};}
   async function run(action:'test'|'save'){
     if(pending.current)return;const request=generation.current;pending.current=true;setOperation(action);setResult(null);setMetadata(null);
+    let saveRequested=false,saveAcknowledged=false;
     try{const profile=endpoint();if(action==='test'){
       const tested=await api<{ok?:boolean;model_count?:number;models?:unknown[];metadata?:ProviderMetadata}>('provider_test',{draft:profile,id:draft.id||undefined,api_key:apiKey||undefined,...(draft.preset_id?{metadata:true}:{})});
       if(request!==generation.current)return;if(tested.ok===false)throw new Error('This endpoint did not confirm a connection.');const count=tested.model_count??(Array.isArray(tested.models)?tested.models.length:undefined);if(typeof count!=='number'||!Number.isSafeInteger(count)||count<0)throw new Error('The endpoint replied without a model list. Check its API compatibility.');
       setResult({title:'Connection verified',detail:count?`${count} ${count===1?'model is':'models are'} available. Save this engine to use it in Forge.`:'The endpoint responded, but it does not advertise any models. Load a model in the engine before chatting.'});
       if(tested.metadata && ['available','unknown','unsupported'].includes(tested.metadata.state))setMetadata(tested.metadata);
-    }else{if(!draft.name.trim())throw new Error('Give this engine a name before saving.');await api('provider_save',{...profile,name:draft.name.trim(),id:draft.id||undefined,api_key:apiKey||undefined,...(draft.id?{}:{enabled:true})});if(request!==generation.current)return;setApiKey('');await saved();}}
-    catch(error){if(request===generation.current)setResult({title:action==='test'?'Could not verify this connection':'Could not save this engine',detail:errorText(error),error:true});}
+    }else{if(!draft.name.trim())throw new Error('Give this engine a name before saving.');const id=draft.id||creation.current!;saveRequested=true;const confirmed=await api<{id?:unknown}>('provider_save',{...profile,name:draft.name.trim(),id,api_key:apiKey||undefined,...(draft.id?{}:{enabled:true})});if(request!==generation.current)return;if(confirmed?.id!==id)throw new Error();saveAcknowledged=true;setDraft(current=>({...current,id}));setApiKey('');await saved();}}
+    catch(error){if(request===generation.current)setResult(saveRequested?{title:saveAcknowledged?'Engine saved':'Could not confirm this save',detail:saveAcknowledged?'Your connection was saved, but the engine list could not refresh.':'Check your connections before trying again. The save may have completed.',error:true}:{title:action==='test'?'Could not verify this connection':'Could not save this engine',detail:errorText(error),error:true});}
     finally{if(request===generation.current){pending.current=false;setOperation(null);}}
   }
   const preset=presets.find(item=>item.id===draft.preset_id),link=preset?setupLink(preset.setup_url):null;
