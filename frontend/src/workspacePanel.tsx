@@ -1,10 +1,11 @@
-import { useId, useLayoutEffect, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { Activity, Files, Globe, ListChecks, Sparkles, X } from 'lucide-react';
 import { Empty, IconButton } from './components';
 import { activityRunIds, ChatActivity, latestActivityAssignments, transcriptActivity, type ActivityLive } from './chatActivity';
 import { GoalReviewCard } from './goalReviewCard';
 import { RecoveryPanel, type RecoveryInspection } from './recoveryPanel';
 import { ResizeHandle } from './workspaceLayout';
+import { updateReadiness } from './updateReadiness';
 import type { ActivityGroup, Chat, Run, SavedChat } from './types';
 import './workspacePanel.css';
 
@@ -16,15 +17,68 @@ export const WORKSPACE_TABS = [
   { id: 'files', title: 'Files', description: 'Explore the current project.', icon: Files },
 ] as const;
 
-export function WorkspacePanel({ tab, select, close, width, resize, children }: {
-  tab: string; select: (tab: string) => void; close: () => void; width: number; resize: (width: number) => void; children: React.ReactNode;
+export interface WorkspacePanelFocusScope {
+  page: string; projectId: string | null; chatId: string | null; runId?: string;
+  navigation: number; transport: unknown; visible: boolean; current: () => boolean;
+}
+interface ActivityFocusOrigin { target: HTMLButtonElement; chatId: string | null; runId?: string; transport: unknown; visible: boolean; }
+const ActivityFocusContext = createContext<((origin: ActivityFocusOrigin, activate: () => void) => void) | null>(null);
+export function useWorkspaceActivityFocus() { return useContext(ActivityFocusContext); }
+function sameFocusScope(left: WorkspacePanelFocusScope, right: WorkspacePanelFocusScope) {
+  return left.page === right.page && left.projectId === right.projectId && left.chatId === right.chatId
+    && left.runId === right.runId && left.navigation === right.navigation && left.transport === right.transport;
+}
+export function WorkspacePanel({ tab, select, close, width, resize, children, focusScope }: {
+  tab: string; select: (tab: string) => void; close: () => void; width: number; resize: (width: number) => void; children: React.ReactNode; focusScope?: WorkspacePanelFocusScope;
 }) {
   const current = WORKSPACE_TABS.find(item => item.id === tab) || WORKSPACE_TABS[2];
   const id = useId(), buttons = useRef(new Map<string, HTMLButtonElement>()), keyboardFocus = useRef(false);
+  const pane = useRef<HTMLElement>(null), currentOwner = useRef({scope: focusScope, tab: current.id});
+  currentOwner.current = {scope: focusScope, tab: current.id};
+  const pendingFocus = useRef<{scope: WorkspacePanelFocusScope; trigger: HTMLButtonElement} | null>(null);
+  const [focusRevision, setFocusRevision] = useState(0);
+  const available = (scope: WorkspacePanelFocusScope) => scope.visible && document.visibilityState !== 'hidden'
+    && document.hasFocus() && updateReadiness.canEdit() && scope.current()
+    && scope.transport === (window.pywebview?.api.call || window.fetch);
+  function activateActivity(origin: ActivityFocusOrigin, activate: () => void) {
+    const scope = currentOwner.current.scope;
+    if (!scope || currentOwner.current.tab !== 'browser' || !available(scope) || !origin.visible
+      || scope.page !== 'chat' || !scope.chatId || origin.chatId !== scope.chatId || origin.runId !== scope.runId
+      || origin.transport !== scope.transport || !pane.current?.contains(origin.target)) return;
+    pendingFocus.current = null;
+    if (document.activeElement === origin.target) {
+      pendingFocus.current = {scope, trigger: origin.target};
+      setFocusRevision(value => value + 1);
+    }
+    activate();
+  }
   useLayoutEffect(() => {
     if (keyboardFocus.current) { buttons.current.get(current.id)?.focus(); keyboardFocus.current = false; }
   }, [current.id]);
-  return <aside aria-label="Workspace details" style={{ width }} className={`right-panel workspace-panel${current.id === 'browser' ? ' with-browser' : ''}`}>
+  useLayoutEffect(() => {
+    const request = pendingFocus.current; pendingFocus.current = null;
+    const scope = currentOwner.current.scope;
+    if (!request || current.id !== 'activity' || !scope || !sameFocusScope(request.scope, scope) || !available(scope)) return;
+    const active = document.activeElement;
+    if (active !== request.trigger && (active !== document.body || request.trigger.isConnected)) return;
+    buttons.current.get('activity')?.focus();
+  }, [current.id, focusRevision, focusScope]);
+  useEffect(() => {
+    const retire = () => {pendingFocus.current = null;};
+    const focus = (event: FocusEvent) => {
+      if (event.target !== document.body && event.target !== pendingFocus.current?.trigger) retire();
+    };
+    document.addEventListener('focusin', focus, true);
+    for (const name of ['pointerdown', 'keydown', 'click', 'wheel', 'visibilitychange']) document.addEventListener(name, retire, true);
+    for (const name of ['blur', 'forge:navigate', 'forge:visibility', 'pywebviewready']) window.addEventListener(name, retire);
+    const unsubscribe = updateReadiness.subscribe(() => {if (!updateReadiness.canEdit()) retire();});
+    return () => {
+      retire(); unsubscribe(); document.removeEventListener('focusin', focus, true);
+      for (const name of ['pointerdown', 'keydown', 'click', 'wheel', 'visibilitychange']) document.removeEventListener(name, retire, true);
+      for (const name of ['blur', 'forge:navigate', 'forge:visibility', 'pywebviewready']) window.removeEventListener(name, retire);
+    };
+  }, []);
+  return <ActivityFocusContext.Provider value={focusScope ? activateActivity : null}><aside ref={pane} aria-label="Workspace details" style={{ width }} className={`right-panel workspace-panel${current.id === 'browser' ? ' with-browser' : ''}`}>
     <ResizeHandle label="Resize workspace panel" value={width} min={280} max={520} change={resize} reverse />
     <header className="workspace-panel-heading"><div><h2>{current.title}</h2><p>{current.description}</p></div><IconButton label="Close detail pane" onClick={() => {close();queueMicrotask(()=>document.querySelector<HTMLButtonElement>('button[aria-label="Open workspace panel"]')?.focus());}}><X size={16} /></IconButton></header>
     <nav className="workspace-panel-tabs" role="tablist" aria-label="Detail pane views">{WORKSPACE_TABS.map((item, index) => <button
@@ -39,7 +93,7 @@ export function WorkspacePanel({ tab, select, close, width, resize, children }: 
         select(next.id); buttons.current.get(next.id)?.focus();
       }}><item.icon size={17} aria-hidden="true" /></button>)}</nav>
     <div id={`${id}-content`} role="tabpanel" aria-labelledby={`${id}-${current.id}`} className={`right-scroll${current.id === 'browser' ? ' browser-scroll' : ''}`}>{children}</div>
-  </aside>;
+  </aside></ActivityFocusContext.Provider>;
 }
 
 export interface WorkspaceActivityScope { page: string; chatId: string | null; projectId: string | null; chat: SavedChat | null; chats: Chat[]; }

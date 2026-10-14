@@ -3,6 +3,7 @@ import { Activity, Monitor, RotateCw, Square, X } from 'lucide-react';
 import { api } from './api';
 import { Empty, IconButton } from './components';
 import { updateReadiness, useDialogReadiness, useUpdateReadiness } from './updateReadiness';
+import { useWorkspaceActivityFocus } from './workspacePanel';
 import './computerView.css';
 
 export interface ComputerViewState {
@@ -59,6 +60,7 @@ export function StopComputerActivity({onStop}: {onStop?: () => void} = {}) {
 }
 
 export function ComputerView({chatId, runId, visible: hostVisible = true, onActivity}: {chatId: string | null; runId?: string; visible?: boolean; onActivity: () => void}) {
+  const activateActivity = useWorkspaceActivityFocus();
   const [state, setState] = useState<ComputerViewState | null>(null), [failed, setFailed] = useState(false), [refresh, setRefresh] = useState(0);
   const [zoom, setZoom] = useState<{snapshot:Snapshot; chatId:string; runId?:string; transport:unknown} | null>(null);
   const transport = window.pywebview?.api.call || window.fetch;
@@ -113,7 +115,7 @@ export function ComputerView({chatId, runId, visible: hostVisible = true, onActi
       <p className="computer-state" role="status">{statusLabels[visible.status] || 'Needs attention'}</p>
       {visible.snapshot && /^data:image\/(?:jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(visible.snapshot.data_url) ? <figure><button type="button" className="computer-snapshot-open" aria-label="Enlarge earlier snapshot" disabled={disabled} onClick={enlarge}><img src={visible.snapshot.data_url} alt="Earlier shared-desktop snapshot"/></button><figcaption>Earlier snapshot{age(visible.snapshot.age_seconds)}<span>May include other visible windows.</span></figcaption></figure> : <div className="computer-empty"><Monitor size={26}/><p>{visible.evidence_mode === 'accessibility_only' ? 'Accessibility evidence recorded. No image is available.' : visible.failure ? 'Saved snapshot is unavailable.' : retainedCount > 0 ? 'Earlier helper activity retained. No snapshot is available.' : 'No desktop snapshot yet.'}</p></div>}
       <p className="computer-evidence-note">Opening this view does not capture your screen or control an app.</p>
-      {visible.action_count > 0 && <div className="computer-last-step"><span>{toolLabels[visible.tool || ''] || 'Desktop operation'}<small>{visible.action_count_truncated ? 'At least ' : ''}{visible.action_count} recorded {onlyRetired ? 'helper ' : ''}{visible.action_count === 1 ? 'step' : 'steps'}</small>{retainedCount > 0 && !onlyRetired && <small>Earlier helper activity · {visible.retired_action_count_truncated === true ? 'at least ' : ''}{retainedCount} {retainedCount === 1 ? 'step' : 'steps'}</small>}</span><button className="text-button" type="button" onClick={onActivity}><Activity size={13}/>Activity</button></div>}
+      {visible.action_count > 0 && <div className="computer-last-step"><span>{toolLabels[visible.tool || ''] || 'Desktop operation'}<small>{visible.action_count_truncated ? 'At least ' : ''}{visible.action_count} recorded {onlyRetired ? 'helper ' : ''}{visible.action_count === 1 ? 'step' : 'steps'}</small>{retainedCount > 0 && !onlyRetired && <small>Earlier helper activity · {visible.retired_action_count_truncated === true ? 'at least ' : ''}{retainedCount} {retainedCount === 1 ? 'step' : 'steps'}</small>}</span><button className="text-button" type="button" onClick={event => activateActivity ? activateActivity({target:event.currentTarget,chatId,runId,transport,visible:hostVisible},onActivity) : onActivity()}><Activity size={13}/>Activity</button></div>}
     </>}{currentZoom && <SnapshotDialog snapshot={currentZoom.snapshot} close={() => setZoom(null)} owns={() => ownsZoom(currentZoom)}/>}
   </section>;
 }
