@@ -70,3 +70,12 @@ Move from the brief to the preview and checks:
 ![Forge Builder brief, preview and checks](../assets/demos/forge-5.1.2-builder.gif)
 
 </details>
+
+
+## Forge 5.1.23 navigation
+
+Retained synthetic production views. The narrow view uses text enlarged to 150%; its open Tools menu overlays the sidebar.
+
+![Project icons and compact workspace tabs in the dark workspace](../assets/demos/forge-5.1.23-navigation-dark.png)
+
+![Grouped Tools menu in a narrow light window](../assets/demos/forge-5.1.23-navigation-narrow-light.png)
