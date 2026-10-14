@@ -4,8 +4,9 @@
 
 This Windows preview makes Library items and instructions easier to read, with
 compact filters and clear loading, failure and empty states. It retains the
-chat focus and tray fixes, compact workspace tabs, grouped composer, searchable
-Settings and Forge's font and warm palettes.
+chat focus and tray fixes, verifies Windows callback completion, and preserves
+compact workspace tabs, grouped composer, searchable Settings and Forge's font
+and warm palettes.
 Desktop actions share your Windows focus and pointer; this preview does not
 provide an isolated desktop. Read [the patch notes](docs/FORGE_5125.md),
 [the computer-tool guide](docs/FORGE_5110.md), [the chat and engine guide](docs/FORGE_514.md) and

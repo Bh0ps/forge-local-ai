@@ -376,7 +376,42 @@ class _WindowUnavailable(RuntimeError):
     """The owned primary form has disappeared, rather than merely being hidden."""
 
 
+def _smoke_tray_open(api, *, clock=time.monotonic, pause=time.sleep):
+    """Exercise the real asynchronous tray action before observing its result."""
+    if api._tray_action('open') is not True:
+        raise ValueError('Native tray Open was not admitted.')
+    deadline = clock() + 5
+    while True:
+        with api._tray_actions_lock:
+            pending = 'open' in api._tray_actions
+        if not pending:
+            break
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise ValueError('Native tray Open did not finish before its deadline.')
+        pause(min(.01, remaining))
+    return api._native(lambda form: bool(form.Visible and not api._closing and not api._window_closed),
+                       _update_safe=True)
+
+
 class Bridge:
+    class _NativeCompletionError(RuntimeError):
+        """A submitted operation has no usable, confirmed completion result."""
+        def __init__(self, reason):
+            self.reason = reason if reason in ('timeout', 'protocol_error', 'completion_unknown', 'pending') else 'protocol_error'
+            super().__init__('Window update completion is unknown. Inspect the current state before taking another action.')
+
+    class _NativeCall:
+        def __init__(self, form, release, kind):
+            self.form, self.release = form, release
+            self.kind = kind
+            self.done, self.result = threading.Event(), {}
+            self.lock = threading.Lock()
+            self.async_result = None
+            self.wait_handle = None
+            self.registering = self.observing = True
+            self.ended = self.end_attempted = self.abandoned = self.started = False
+
     def __init__(self, service=None, pairing=None):
         self._service = service
         self._service_lock = threading.Lock()
@@ -416,6 +451,8 @@ class Bridge:
         self._native_input = None
         self._native_admission = threading.RLock()
         self._native_pending = 0
+        self._native_calls_lock = threading.Lock()
+        self._native_calls = []
         self._native_session = None
         self._navigation_generation = 0
         self._trusted_loaded = False
@@ -545,6 +582,8 @@ class Bridge:
 
     def _update_input_idle(self):
         try:
+            if not self._retire_native_calls():
+                return False
             with self._native_admission:
                 if self._closing or self._native_pending != 0:
                     return False
@@ -828,6 +867,105 @@ class Bridge:
             log.warning('Action %s failed: %s', action, type(exc).__name__)
             return {'error': str(exc)[:1000]}
 
+    def _end_native_call(self, call):
+        # IsCompleted has already been confirmed outside every native/admission
+        # lock. EndInvoke therefore observes this exact delegate without waiting.
+        with call.lock:
+            if call.end_attempted:
+                raise self._NativeCompletionError('completion_unknown')
+            call.end_attempted = True
+        try:
+            call.form.EndInvoke(call.async_result)
+        except Exception:
+            raise self._NativeCompletionError('completion_unknown') from None
+        with call.lock:
+            call.ended = True
+        failed = False
+        try:
+            if call.wait_handle is not None:
+                call.wait_handle.Close()
+        except Exception:
+            failed = True
+        finally:
+            call.release()
+            with self._native_calls_lock:
+                if call in self._native_calls:
+                    self._native_calls.remove(call)
+        if failed:
+            raise self._NativeCompletionError('protocol_error') from None
+
+    def _retire_native_calls(self):
+        # A later existing worker probe may observe an abandoned completion. No
+        # timer, thread, WaitOne or action retry is introduced by this cleanup.
+        with self._native_calls_lock:
+            calls = tuple(self._native_calls)
+        for call in calls:
+            with call.lock:
+                if call.registering or call.observing or call.ended or call.end_attempted:
+                    continue
+                call.observing = True
+            try:
+                if call.form.InvokeRequired is not True or call.async_result is None:
+                    continue  # Never observe a queued call from its UI thread.
+                if call.async_result.IsCompleted is not True:
+                    continue
+                self._end_native_call(call)
+            except Exception:
+                pass  # Unknown completion keeps its lease; no details escape.
+            finally:
+                with call.lock:
+                    call.observing = False
+        with self._native_calls_lock:
+            return not self._native_calls
+
+    def _wait_native_call(self, call):
+        from time import monotonic
+        deadline = monotonic() + 5
+        def remaining():
+            value = deadline - monotonic()
+            if value <= 0:
+                raise self._NativeCompletionError('timeout')
+            return value
+        try:
+            if call.async_result is None:
+                raise self._NativeCompletionError('protocol_error')
+            if call.done.wait(remaining()) is not True:
+                raise self._NativeCompletionError('timeout')
+            remaining()
+            if call.async_result is None:
+                raise self._NativeCompletionError('protocol_error')
+            try:
+                completed = call.async_result.IsCompleted
+                remaining()
+                if completed is not True:
+                    if completed is not False:
+                        raise self._NativeCompletionError('protocol_error')
+                    handle = call.async_result.AsyncWaitHandle
+                    call.wait_handle = handle
+                    milliseconds = max(0, int(remaining() * 1000))
+                    waited = handle.WaitOne(milliseconds)
+                    remaining()
+                    if waited is False:
+                        raise self._NativeCompletionError('timeout')
+                    if waited is not True:
+                        raise self._NativeCompletionError('protocol_error')
+                    completed = call.async_result.IsCompleted
+                    remaining()
+                    if completed is not True:
+                        raise self._NativeCompletionError('protocol_error')
+            except self._NativeCompletionError:
+                raise
+            except Exception:
+                raise self._NativeCompletionError('protocol_error') from None
+            remaining()
+            self._end_native_call(call)
+            remaining()  # A delayed observation never returns stale usable output.
+        finally:
+            with call.lock:
+                if not call.ended:
+                    call.abandoned = True
+                call.observing = False
+
     def _native(self, operation, *, _update_safe=False):
         """Bridge calls run on workers; marshal WinForms operations to its UI thread."""
         from webview.platforms.winforms import BrowserView
@@ -837,35 +975,67 @@ class Bridge:
         form = BrowserView.instances.get(self._window.uid)
         if form is None:
             raise _WindowUnavailable('Window is unavailable.')
-        result, done = {}, threading.Event()
+        self._retire_native_calls()
         # Only the owned quit thread may marshal its synchronous stop/dispose
         # calls after admission closes. Other workers and already queued input
         # retain their normal admission checks.
-        _update_safe = _update_safe or (self._closing and getattr(self._owned_teardown, 'active', False) is True)
+        teardown = self._closing and getattr(self._owned_teardown, 'active', False) is True
+        _update_safe = _update_safe or teardown
         release = (lambda: None) if _update_safe else self._admit_native()
+        try:
+            marshalled = bool(form.InvokeRequired)
+        except Exception:
+            release()  # No delegate was submitted.
+            raise self._NativeCompletionError('protocol_error') from None
+        kind = 'teardown' if teardown else 'control' if _update_safe else 'input'
+        call = self._NativeCall(form, release, kind)
         def run():
             try:
+                with call.lock:
+                    if call.abandoned:
+                        raise self._NativeCompletionError('timeout')
+                    call.started = True
                 if not _update_safe and (self._closing or self._update_locked()):
                     raise ValueError('Native input is paused while Forge confirms a restart.')
-                result['value'] = operation(form)
+                call.result['value'] = operation(form)
             except Exception as exc:
-                result['error'] = exc
+                call.result['error'] = exc
             finally:
+                if not marshalled:
+                    release()
+                call.done.set()
+        if marshalled:
+            with self._native_calls_lock:
+                # Separate finite slots keep Open and owned Quit cleanup usable
+                # after an unknown input result without an unbounded registry.
+                peers = [item for item in self._native_calls if item.kind == kind]
+                rejected = len(peers) >= {'input': 16, 'control': 8, 'teardown': 4}[kind]
+                if kind == 'input' and any(item.abandoned for item in peers):
+                    rejected = True
+                if not rejected:
+                    self._native_calls.append(call)
+            if rejected:
                 release()
-                done.set()
-        if form.InvokeRequired:
+                raise self._NativeCompletionError('pending')
             try:
-                form.BeginInvoke(Action(run))
+                call.async_result = form.BeginInvoke(Action(run))
             except Exception:
-                release()
-                raise
-            if not done.wait(5):
-                raise TimeoutError('Window update timed out.')
+                # A registration failure cannot establish that no callback was
+                # queued. Keep the private lease and report an unknown outcome.
+                with call.lock:
+                    call.registering = call.observing = False
+                    call.abandoned = True
+                raise self._NativeCompletionError('protocol_error') from None
+            with call.lock:
+                call.registering = False
+            self._wait_native_call(call)
         else:
             run()
-        if 'error' in result:
-            raise result['error']
-        return result.get('value')
+        if 'error' in call.result:
+            raise call.result['error']
+        if 'value' not in call.result:
+            raise self._NativeCompletionError('protocol_error')
+        return call.result['value']
 
     def pin(self, value):
         try:
@@ -1562,9 +1732,7 @@ def main():
                             and not form.Visible and not api._closing and not api._window_closed)
                     result['close_hides'] = api._native(close_to_tray, _update_safe=True)
                     result['background_api'] = api.call('projects')
-                    api.show()
-                    result['close_hides'] = result['close_hides'] and api._native(
-                        lambda form: bool(form.Visible and not api._closing and not api._window_closed), _update_safe=True)
+                    result['close_hides'] = result['close_hides'] and _smoke_tray_open(api)
                     if not result['close_hides']:
                         raise ValueError('Native close-to-tray did not preserve and restore the primary workspace.')
                     if '--dictation-smoke' in sys.argv:
