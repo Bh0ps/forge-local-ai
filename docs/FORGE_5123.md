@@ -45,6 +45,14 @@ actually destroyed unexpectedly, its closed event invalidates the bridge and sto
 coordinator instead of leaving an unusable tray icon. Native shutdown waits for
 the cleanup owner before the desktop process returns.
 
+Browser script and screenshot operations also wait for the managed callback to
+finish before returning a usable result. Both waits share the original timeout
+budget. Cancellation, failed callbacks and incomplete results retain explicit
+failure outcomes; they do not indicate that repeating a submitted action is safe.
+An unfinished capture retains its task and image stream. Further captures on
+that page wait for a known outcome, and a cancelled queued callback cannot start
+a capture after its stream has been retired.
+
 Regression fixtures cover a stalled Open action followed by Quit, concurrent
 Quit requests, repeated tray clicks, close cancellation, and lost-window cleanup.
 The packaged Windows check exercises the real close event and tray shutdown.
