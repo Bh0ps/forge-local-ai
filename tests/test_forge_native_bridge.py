@@ -52,26 +52,108 @@ def bridge(tmp_path, monkeypatch):
     return instance, service, form
 
 
+def _synthetic_queued_dispatch(bridge, monkeypatch):
+    """Keep Python callback return distinct from the managed delegate return."""
+    instance, service, form = bridge
+    queued = []
+    managed = SimpleNamespace(IsCompleted=False, python_done=False, end_calls=0,
+        before_wait=lambda: False)
+    form.InvokeRequired = True
+
+    def begin(callback):
+        queued.append(callback)
+        return managed
+
+    def end(result):
+        assert result is managed and managed.IsCompleted is True
+        assert managed.python_done and instance._native_pending == 1
+        assert form.InvokeRequired is True
+        assert not instance._native_admission._is_owned()
+        assert not service.admission_lock._is_owned()
+        managed.end_calls += 1
+
+    form.BeginInvoke, form.EndInvoke = begin, end
+    original = instance._NativeCall
+
+    class Done:
+        def wait(self, duration):
+            assert 0 < duration <= 5
+            return managed.before_wait()
+
+        def set(self):
+            managed.python_done = True
+
+    def lifetime(*args):
+        call = original(*args)
+        call.done = Done()
+        return call
+
+    monkeypatch.setattr(instance, '_NativeCall', lifetime)
+    return queued, managed
+
+
 def test_queued_native_operation_rechecks_lock_before_executing_and_retains_pending_until_done(bridge, monkeypatch):
     instance, _, form = bridge
-    queued, changes = [], []
-    form.InvokeRequired = True
-    form.BeginInvoke = queued.append
-    # Exercise the actual timeout path without waiting five seconds in a unit
-    # test. A queued operation still counts until its native callback finishes.
-    class Event:
-        def wait(self, duration): return False
-        def set(self): pass
-    monkeypatch.setattr('desktop.threading.Event', Event)
-    with pytest.raises(TimeoutError): instance._native(lambda form: changes.append('changed'))
+    queued, managed = _synthetic_queued_dispatch(bridge, monkeypatch)
+    changes = []
+    # Force the Python wait boundary without waiting five seconds. Callback
+    # return alone cannot retire the native admission lease.
+    with pytest.raises(instance._NativeCompletionError) as failure:
+        instance._native(lambda form: changes.append('changed'))
+    assert failure.value.reason == 'timeout'
     assert instance._native_pending == 1 and instance._update_input_idle() is False
     binding = NativeBinding(instance, 'a' * 64, instance._window.uid, 0, instance._server_url, 1, 1.0)
     instance._update_authority.update_binding(binding)
     first = instance._update_authority.begin(binding, object())
     queued.pop()()
-    assert changes == [] and instance._native_pending == 0
+    assert changes == [] and managed.python_done and instance._native_pending == 1
+    assert managed.end_calls == 0 and instance._update_input_idle() is False
+    managed.IsCompleted = True
+    form.InvokeRequired = False
+    assert instance._update_input_idle() is False
+    assert managed.end_calls == 0 and instance._native_pending == 1
+    form.InvokeRequired = True
+    assert instance._retire_native_calls() is True
+    assert managed.end_calls == 1 and instance._native_pending == 0
     instance._update_authority.acknowledge_abort(first['attempt_id'])
     assert instance._update_input_idle() is True
+    assert managed.end_calls == 1 and changes == []
+
+
+@pytest.mark.parametrize('transition', ['lock', 'quit'])
+def test_live_queued_native_operation_rechecks_guard_before_managed_completion(bridge, monkeypatch, transition):
+    instance, _, form = bridge
+    queued, managed = _synthetic_queued_dispatch(bridge, monkeypatch)
+    events, attempt = [], []
+    binding = NativeBinding(instance, 'a' * 64, instance._window.uid, 0, instance._server_url, 1, 1.0)
+    instance._update_authority.update_binding(binding)
+    instance._lifecycle = SimpleNamespace(quit=lambda: events.append('owned-cleanup'))
+    instance._window.destroy = lambda: events.append('window-destroy')
+
+    def changed_before_callback():
+        if transition == 'lock':
+            attempt.append(instance._update_authority.begin(binding, object()))
+        else:
+            assert instance.quit() == {'ok': True}
+        queued.pop()()
+        assert instance._native_pending == 1 and managed.python_done
+        assert not managed.IsCompleted and managed.end_calls == 0
+        managed.IsCompleted = True
+        return True
+
+    managed.before_wait = changed_before_callback
+    with pytest.raises(ValueError, match='Native input is paused'):
+        instance._native(lambda form: events.append('unrelated-input'))
+    assert managed.end_calls == 1 and instance._native_pending == 0
+    assert instance._native_calls == [] and 'unrelated-input' not in events
+    if transition == 'lock':
+        assert events == [] and instance._update_locked()
+        instance._update_authority.acknowledge_abort(attempt[0]['attempt_id'])
+        assert instance._update_input_idle() is True
+    else:
+        assert events == ['owned-cleanup', 'window-destroy'] and instance._closing
+        assert instance._update_input_idle() is False
+    assert managed.end_calls == 1
 
 
 def test_only_actual_frozen_main_root_document_can_bind_native_authority(bridge, monkeypatch):
@@ -201,21 +283,26 @@ def test_owned_quit_does_not_admit_concurrent_native_input(bridge, tmp_path):
 
 def test_native_callback_queued_before_quit_cannot_execute_during_teardown(bridge, monkeypatch):
     instance, _, form = bridge
-    queued, events = [], []
-    form.InvokeRequired = True
-    form.BeginInvoke = queued.append
-    class Event:
-        def wait(self, duration): return False
-        def set(self): pass
-    monkeypatch.setattr('desktop.threading.Event', Event)
-    with pytest.raises(TimeoutError):
+    queued, managed = _synthetic_queued_dispatch(bridge, monkeypatch)
+    events = []
+    with pytest.raises(instance._NativeCompletionError) as failure:
         instance._native(lambda form: events.append('queued-input'))
+    assert failure.value.reason == 'timeout'
     assert instance._native_pending == 1
     form.InvokeRequired = False
     instance._lifecycle = SimpleNamespace(quit=lambda: queued.pop()())
     instance._window.destroy = lambda: events.append('window-destroy')
     assert instance.quit() == {'ok': True}
-    assert events == ['window-destroy'] and instance._native_pending == 0
+    assert events == ['window-destroy'] and managed.python_done
+    assert instance._native_pending == 1 and managed.end_calls == 0
+    managed.IsCompleted = True
+    assert instance._update_input_idle() is False
+    assert instance._native_pending == 1 and managed.end_calls == 0
+    form.InvokeRequired = True
+    assert instance._update_input_idle() is False
+    assert instance._native_pending == 0 and managed.end_calls == 1
+    assert instance._native_calls == [] and events == ['window-destroy']
+    assert instance._update_input_idle() is False and managed.end_calls == 1
 
 
 def test_owned_teardown_scope_clears_when_custom_lifecycle_cleanup_raises(bridge):
