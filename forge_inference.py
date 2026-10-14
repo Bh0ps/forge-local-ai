@@ -185,6 +185,10 @@ class CompatibleProvider:
                 category='authentication' if status in (401,403) else 'metadata',http_status=status) from None
         except (ValueError,TypeError,KeyError):
             raise ProviderStreamFailure('The engine returned invalid model metadata.',category='metadata') from None
+        except OSError:
+            if self.config.get('preset_id')=='docker-model-runner':
+                raise ProviderStreamFailure(str(DockerModelRunnerMetadataInvalid()),category='metadata') from None
+            raise ProviderStreamFailure('The engine model catalog is unavailable. Check the connection and saved credentials.',category='metadata') from None
         except Exception:
             if self.config.get('preset_id')=='docker-model-runner':
                 raise ProviderStreamFailure(str(DockerModelRunnerMetadataInvalid()),category='metadata') from None
@@ -493,7 +497,9 @@ class ProviderPool:
             if not owner:
                 if not pending['event'].wait(self.metadata_wait_seconds):
                     raise ValueError('Model metadata took too long. Retry after checking the engine.')
-                current=self.provider(identifier)
+                try:current=self.provider(identifier)
+                except Exception:
+                    raise ValueError('Provider configuration changed during metadata loading. Retry with the current engine.') from None
                 with self.lock:
                     if current is not provider or generation!=(self.metadata_epoch,self.metadata_revisions.get(identifier,0)):
                         continue
@@ -503,7 +509,9 @@ class ProviderPool:
             try:
                 result=provider.models() if model is None else provider.capabilities(model)
                 result=json.loads(json.dumps(result))
-                current=self.provider(identifier)
+                try:current=self.provider(identifier)
+                except Exception:
+                    raise ValueError('Provider configuration changed during metadata loading. Retry with the current engine.') from None
                 with self.lock:
                     if current is not provider or generation!=(self.metadata_epoch,self.metadata_revisions.get(identifier,0)):
                         raise ValueError('Provider configuration changed during metadata loading. Retry with the current engine.')
