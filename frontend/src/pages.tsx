@@ -12,6 +12,7 @@ import { GoalTaskEvidence } from './goalTaskEvidence';
 import { GoalGuidanceActions } from './goalGuidanceActions';
 import { ProjectActions } from './projectActions';
 import { ProjectIcon } from './appearance';
+import './usage.css';
 
 type Notify = (message: string) => void;
 function Loading() { return <div className="loading"><LoaderCircle size={17} className="spin" />Loading…</div>; }
@@ -62,16 +63,57 @@ export function AgentsPage({ models, projects, projectId, settings, notify, onRu
 
 interface UsageResponse { totals: UsageCount & { estimated_requests?: number }; daily: { date: string; input_tokens: number; output_tokens: number }[]; by_model?: (UsageCount & { model: string })[]; average_tps?: number; tracked_since?: string; timezone?: string; }
 export function UsagePage({ projects, models, timezone }: { projects: Project[]; models: Model[]; timezone: string }) {
-  const [period, setPeriod] = useState('month'); const [model, setModel] = useState(''); const [project, setProject] = useState(''); const [result, setResult] = useState<UsageResponse | null>(null); const [totals, setTotals] = useState<Record<string, UsageCount>>({}); const [error, setError] = useState(''); const [loading, setLoading] = useState(true);
+  const [period, setPeriod] = useState('month'); const [model, setModel] = useState(''); const [project, setProject] = useState('');
+  const bridge = window.pywebview?.api, bridgeCall = bridge?.call, transport = bridgeCall || window.fetch;
+  const key = JSON.stringify([period, model, project, timezone]);
+  const owner = useRef({ key, bridge, bridgeCall, transport });
+  if (owner.current.key !== key || owner.current.bridge !== bridge || owner.current.bridgeCall !== bridgeCall || owner.current.transport !== transport) owner.current = { key, bridge, bridgeCall, transport };
+  const scope = owner.current, mounted = useRef(false), request = useRef(0);
+  const [read, setRead] = useState<{ owner: typeof scope; result: UsageResponse | null; totals: Record<string, UsageCount>; error: string; loading: boolean }>({ owner: scope, result: null, totals: {}, error: '', loading: true });
   async function refresh() {
-    setLoading(true); setError(''); try {
+    const ticket = ++request.current;
+    const accepted = () => mounted.current && owner.current === scope && ticket === request.current
+      && window.pywebview?.api === scope.bridge && window.pywebview?.api?.call === scope.bridgeCall
+      && (window.pywebview?.api?.call || window.fetch) === scope.transport;
+    if (!accepted()) return;
+    setRead(current => accepted() ? { owner: scope, result: current.owner === scope ? current.result : null, totals: current.owner === scope ? current.totals : {}, error: '', loading: true } : current);
+    try {
       const [selected, ...cards] = await Promise.all([api<UsageResponse>('usage', { period, timezone, model, project_id: project || undefined }), ...['day', 'month', 'all'].map(p => api<UsageResponse>('usage', { period: p, timezone, model, project_id: project || undefined }))]);
-      setResult(selected); setTotals({ day: cards[0].totals, month: cards[1].totals, all: cards[2].totals });
-    } catch (e) { setError(errorText(e)); } finally { setLoading(false); }
+      if (!accepted()) return;
+      setRead(current => accepted() ? { owner: scope, result: selected, totals: { day: cards[0].totals, month: cards[1].totals, all: cards[2].totals }, error: '', loading: true } : current);
+    } catch (e) {
+      if (!accepted()) return;
+      setRead(current => accepted() ? { ...current, error: errorText(e) } : current);
+    } finally {
+      if (accepted()) setRead(current => accepted() ? { ...current, loading: false } : current);
+    }
   }
-  useEffect(() => { void refresh(); }, [period, model, project, timezone]);
+  useEffect(() => {
+    mounted.current = true;
+    void refresh();
+    return () => { mounted.current = false; request.current++; };
+  }, [period, model, project, timezone, bridge, bridgeCall, transport]);
+  const result = read.owner === scope ? read.result : null, totals = read.owner === scope ? read.totals : {};
+  const error = read.owner === scope ? read.error : '', loading = read.owner !== scope || read.loading;
   const daily = result?.daily || []; const max = Math.max(1, ...daily.map(d => d.input_tokens + d.output_tokens));
-  return <><PageHeader title="Usage" subtitle="Local token accounting across every agent and inference request."><IconButton label="Refresh usage" onClick={() => void refresh()}><RefreshCw size={16} /></IconButton></PageHeader>{error && <ErrorNotice error={error} retry={() => void refresh()} />}<div className="usage-cards">{[['day', 'Today'], ['month', 'This month'], ['all', 'All time']].map(([key, label]) => <article key={key}><span>{label}</span><strong>{compactNumber((totals[key]?.input_tokens || 0) + (totals[key]?.output_tokens || 0))}</strong><small>{compactNumber(totals[key]?.output_tokens || 0)} output · {totals[key]?.requests || 0} requests</small></article>)}</div><div className="usage-chart-card"><div className="usage-toolbar"><div className="segmented">{[['day', 'Day'], ['month', 'Month'], ['all', 'All time']].map(([value, label]) => <button key={value} className={period === value ? 'active' : ''} onClick={() => setPeriod(value)}>{label}</button>)}</div><div><select aria-label="Filter usage by model" value={model} onChange={e => setModel(e.target.value)}><option value="">All models</option>{models.map(m => <option key={m.name}>{m.name}</option>)}</select><select aria-label="Filter usage by project" value={project} onChange={e => setProject(e.target.value)}><option value="">All projects</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></div></div>{loading ? <Loading /> : daily.length ? <div className="usage-chart" role="img" aria-label="Daily input and output token usage"><div className="chart-bars">{daily.slice(-31).map(d => <div className="chart-column" key={d.date} title={`${d.date}: ${d.input_tokens.toLocaleString()} input, ${d.output_tokens.toLocaleString()} output`}><div className="bar-stack" style={{ height: `${Math.max(2, (d.input_tokens + d.output_tokens) / max * 100)}%` }}><div className="output-bar" style={{ flex: d.output_tokens || 0 }} /><div className="input-bar" style={{ flex: d.input_tokens || 0 }} /></div><span>{d.date.slice(-2)}</span></div>)}</div><div className="chart-legend"><span><i className="input-legend" />Input</span><span><i className="output-legend" />Output</span></div></div> : <Empty icon={<Activity size={27} />} title="No usage yet" text="Send a message to begin tracking tokens and model throughput." />}<div className="usage-breakdown"><div><span>Input tokens</span><strong>{(result?.totals.input_tokens || 0).toLocaleString()}</strong></div><div><span>Output tokens</span><strong>{(result?.totals.output_tokens || 0).toLocaleString()}</strong></div><div><span>Cached input</span><strong>{(result?.totals.cached_input_tokens || 0).toLocaleString()}</strong></div><div><span>Generation speed</span><strong>{result?.average_tps ? `${result.average_tps.toFixed(1)} tok/s` : '—'}</strong></div></div></div><p className="page-footnote">Calendar periods use {timezone}. {result?.totals.estimated_requests ? `${result.totals.estimated_requests} requests use estimated counts. ` : ''}{result?.tracked_since ? `Tracking since ${new Date(result.tracked_since).toLocaleDateString()}.` : 'Usage begins with Forge 4.0.'}</p>{result?.by_model?.length ? <div className="table-card"><table><thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Requests</th></tr></thead><tbody>{result.by_model.map(m => <tr key={m.model}><td>{m.model}</td><td>{m.input_tokens.toLocaleString()}</td><td>{m.output_tokens.toLocaleString()}</td><td>{m.requests}</td></tr>)}</tbody></table></div> : null}</>;
+  const recorded = Boolean(result && (result.totals.input_tokens || result.totals.output_tokens || result.totals.cached_input_tokens || result.totals.requests));
+  return <section className="usage-page" aria-label="Usage accounting" aria-busy={loading}>
+    <PageHeader title="Usage" subtitle="Local token accounting across every agent and inference request."><IconButton label="Refresh usage" showLabel onClick={() => void refresh()}><RefreshCw size={16} /></IconButton></PageHeader>
+    {error && <ErrorNotice error={error} retry={() => void refresh()} />}
+    {loading && result && <p className="usage-read-status" role="status">Refreshing usage… Previously loaded totals remain below.</p>}
+    {error && result && <p className="usage-read-status">Showing previously loaded totals. Refresh did not finish.</p>}
+    <div className="usage-cards">{[['day', 'Today'], ['month', 'This month'], ['all', 'All time']].map(([value, label]) => <article key={value} aria-label={label}><span>{label}</span><strong>{result ? compactNumber((totals[value]?.input_tokens || 0) + (totals[value]?.output_tokens || 0)) : '—'}</strong><small>{result ? <>{compactNumber(totals[value]?.output_tokens || 0)} output · {totals[value]?.requests || 0} requests</> : loading ? 'Loading totals…' : 'Totals unavailable'}</small></article>)}</div>
+    <div className="usage-chart-card">
+      <div className="usage-toolbar">
+        <div className="segmented" role="group" aria-label="Usage period">{[['day', 'Day'], ['month', 'Month'], ['all', 'All time']].map(([value, label]) => <button key={value} aria-pressed={period === value} className={period === value ? 'active' : ''} onClick={() => setPeriod(value)}>{label}</button>)}</div>
+        <div className="usage-filters"><label><span>Model</span><select aria-label="Filter usage by model" value={model} onChange={e => setModel(e.target.value)}><option value="">All models</option>{models.map(m => <option key={m.name}>{m.name}</option>)}</select></label><label><span>Project</span><select aria-label="Filter usage by project" value={project} onChange={e => setProject(e.target.value)}><option value="">All projects</option>{projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label></div>
+      </div>
+      {!result && loading ? <div role="status"><Loading /></div> : !result ? <Empty icon={<Activity size={27} />} title="Usage unavailable" text="Retry to load accounting for the current filters." /> : daily.length ? <div className="usage-chart" role="img" aria-label="Daily input and output token usage"><div className="chart-bars">{daily.slice(-31).map(d => <div className="chart-column" key={d.date} title={`${d.date}: ${d.input_tokens.toLocaleString()} input, ${d.output_tokens.toLocaleString()} output`}><div className="bar-stack" style={{ height: `${Math.max(2, (d.input_tokens + d.output_tokens) / max * 100)}%` }}><div className="output-bar" style={{ flex: d.output_tokens || 0 }} /><div className="input-bar" style={{ flex: d.input_tokens || 0 }} /></div><span>{d.date.slice(-2)}</span></div>)}</div><div className="chart-legend"><span><i className="input-legend" />Input</span><span><i className="output-legend" />Output</span></div></div> : <Empty icon={<Activity size={27} />} title={recorded ? 'No daily breakdown' : 'No usage in this period'} text={recorded ? 'Recorded totals are shown below. No daily entries are available for this period and these filters.' : 'There are no recorded requests for this period and the selected filters.'} />}
+      <div className="usage-breakdown"><div><span>Input tokens</span><strong>{result ? (result.totals.input_tokens || 0).toLocaleString() : '—'}</strong></div><div><span>Output tokens</span><strong>{result ? (result.totals.output_tokens || 0).toLocaleString() : '—'}</strong></div><div><span>Cached input</span><strong>{result ? (result.totals.cached_input_tokens || 0).toLocaleString() : '—'}</strong></div><div><span>Generation speed</span><strong>{result?.average_tps ? `${result.average_tps.toFixed(1)} tok/s` : '—'}</strong></div></div>
+    </div>
+    <p className="page-footnote">Calendar periods use {timezone}. {result ? <>{result.totals.estimated_requests ? `${result.totals.estimated_requests} requests use estimated counts. ` : ''}{result.tracked_since ? `Tracking since ${new Date(result.tracked_since).toLocaleDateString()}.` : 'Usage begins with Forge 4.0.'}</> : loading ? 'Loading usage details…' : 'Usage details are unavailable.'}</p>
+    {result?.by_model?.length ? <div className="table-card usage-model-table"><table><thead><tr><th>Model</th><th>Input</th><th>Output</th><th>Requests</th></tr></thead><tbody>{result.by_model.map(m => <tr key={m.model}><td>{m.model}</td><td>{m.input_tokens.toLocaleString()}</td><td>{m.output_tokens.toLocaleString()}</td><td>{m.requests}</td></tr>)}</tbody></table></div> : null}
+  </section>;
 }
 
 export function activeGoals(goals: Goal[], chats: Chat[]) {

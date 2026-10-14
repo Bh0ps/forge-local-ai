@@ -1,0 +1,41 @@
+/* Usage-only overrides retain the shared chart and control foundations. */
+.usage-page { min-width: 0; }
+.usage-page .usage-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 20px; }
+.usage-page .usage-cards > article { min-width: 0; padding: 17px 18px; }
+.usage-page .usage-cards span { font-size: 12px; }
+.usage-page .usage-cards strong { overflow-wrap: anywhere; }
+.usage-page .usage-cards small { display: block; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.usage-page .usage-toolbar { flex-wrap: wrap; align-items: flex-end; padding: 14px 18px; gap: 14px; }
+.usage-page .segmented { flex-wrap: wrap; border: 1px solid var(--border); padding: 3px; }
+.usage-page .segmented button { border: 1px solid transparent; padding: 6px 10px; font-size: 12px; }
+.usage-page .segmented button.active { border-color: var(--accent-border); background: var(--accent-soft); color: var(--text); box-shadow: none; }
+.usage-page .usage-filters { flex-wrap: wrap; min-width: 0; gap: 12px; }
+.usage-page .usage-filters label { display: grid; gap: 5px; min-width: 0; }
+.usage-page .usage-filters label > span { color: var(--muted); font-size: 12px; }
+.usage-page .usage-toolbar select { width: 100%; max-width: 210px; min-width: 0; font-size: 12px; padding: 6px 8px; }
+.usage-page .usage-read-status { font-size: 12px; color: var(--muted); line-height: 1.7; margin: 0 0 14px; }
+.usage-page .usage-chart { padding: 20px 20px 16px; }
+.usage-page .chart-legend { gap: 18px; font-size: 12px; }
+.usage-page .usage-breakdown { gap: 14px; padding: 17px 18px; }
+.usage-page .usage-breakdown > div { min-width: 0; }
+.usage-page .usage-breakdown span { font-size: 12px; line-height: 1.6; }
+.usage-page .usage-breakdown strong { font-size: 15px; overflow-wrap: anywhere; }
+.usage-page .page-footnote { font-size: 12px; overflow-wrap: anywhere; }
+.usage-page .usage-model-table table { font-size: 12px; }
+.usage-page .usage-model-table th { font-size: 12px; }
+.usage-page .usage-model-table td:first-child { overflow-wrap: anywhere; }
+@media (max-width: 720px) {
+  .usage-page .usage-cards { gap: 9px; }
+  .usage-page .usage-cards > article { padding: 13px 12px; }
+  .usage-page .usage-cards strong { font-size: 25px; }
+  .usage-page .usage-toolbar { padding: 13px 12px; }
+  .usage-page .usage-toolbar > .usage-filters { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .usage-page .usage-toolbar select { max-width: none; }
+  .usage-page .usage-breakdown { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 15px 12px; }
+}
+@media (max-width: 480px) {
+  .usage-page .usage-cards { grid-template-columns: 1fr; }
+  .usage-page .usage-cards > article { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; align-items: center; }
+  .usage-page .usage-cards strong { grid-column: 2; grid-row: 1 / 3; margin: 0; }
+  .usage-page .usage-cards small { grid-column: 1; }
+}
