@@ -4,7 +4,7 @@ from types import MappingProxyType
 
 _PRESETS = tuple(MappingProxyType(dict(id=identifier, name=name, kind=kind, url=url,
     setup_url=setup, description=description, hosting=hosting,
-    metadata_strategy='lmstudio' if identifier == 'lm-studio' else None))
+    metadata_strategy={'lm-studio': 'lmstudio', 'docker-model-runner': 'dmr'}.get(identifier)))
     for identifier, name, kind, url, setup, description, hosting in (
         ('ollama', 'Ollama', 'ollama', 'http://127.0.0.1:11434/api',
          'https://docs.ollama.com/quickstart', 'Connect to your running Ollama server.', 'desktop'),
@@ -32,6 +32,10 @@ _PRESETS = tuple(MappingProxyType(dict(id=identifier, name=name, kind=kind, url=
         ('textgen', 'Textgen (Oobabooga)', 'openai-compatible', 'http://127.0.0.1:5000/v1',
          'https://github.com/oobabooga/textgen/wiki/12-%E2%80%90-OpenAI-API',
          'Start Textgen with --api and load a model in the engine. Forge uses its OpenAI-compatible API.', 'desktop'),
+        ('docker-model-runner', 'Docker Model Runner', 'openai-compatible',
+         'http://127.0.0.1:12434/engines/llama.cpp/v1',
+         'https://docs.docker.com/ai/model-runner/get-started/',
+         'Enable Docker host TCP access and prepare a local GGUF model. Use the loopback llama.cpp route; serving context and tuning are not reported.', 'desktop'),
     ))
 _BY_ID = MappingProxyType({preset['id']: preset for preset in _PRESETS})
 

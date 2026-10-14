@@ -6,6 +6,26 @@ const provider={id:'saved',name:'My engine',type:'openai',base_url:'http://127.0
 const preset={id:'lm-studio',name:'LM Studio',kind:'openai-compatible',url:'http://127.0.0.1:1234/v1',setup_url:'https://lmstudio.ai/docs/developer/openai-compat',description:'Start the local server.',hosting:'desktop',metadata_strategy:'lmstudio'};
 function bridge(test:unknown={ok:true,model_count:1}){const call=vi.fn(async(action:string)=>action==='provider_presets'?{presets:[preset]}:typeof test==='function'?test(action):test);window.pywebview={api:{call}};return call;}
 describe('engine presets',()=>{
+  it('links Docker setup while keeping unreported serving facts separate from connection success',async()=>{
+    const docker={...preset,id:'docker-model-runner',name:'Docker Model Runner',url:'http://127.0.0.1:12434/engines/llama.cpp/v1',setup_url:'https://docs.docker.com/ai/model-runner/get-started/',metadata_strategy:'dmr'};
+    const call=vi.fn(async(action:string)=>action==='provider_presets'?{presets:[docker]}:{ok:true,model_count:1,metadata:{state:'available',source:'advertised',models:[{model:'audit/local-model',max_context_length:null,loaded_context_lengths:[],loaded_instances:[],vision:null,trained_for_tool_use:null,reasoning_options:[]}]}});
+    window.pywebview={api:{call}};render(<EngineEditor provider={provider} close={()=>{}} saved={async()=>{}}/>);
+    await screen.findByRole('option',{name:'Docker Model Runner'});await userEvent.selectOptions(screen.getByLabelText('Engine preset'),'docker-model-runner');
+    const link=screen.getByRole('link',{name:'Official setup guide'});expect(link.getAttribute('href')).toBe(docker.setup_url);expect(link.getAttribute('rel')).toContain('noreferrer');
+    expect((screen.getByLabelText('Base URL') as HTMLInputElement).value).toBe(docker.url);expect(screen.getByText('Advanced').closest('details')!.open).toBe(false);
+    await userEvent.click(screen.getByRole('button',{name:'Test connection'}));await userEvent.click(await screen.findByText('Advertised model support'));
+    expect(screen.getByText('Maximum context: Not reported · Vision: Not reported')).toBeTruthy();expect(screen.getByText('Tool training: Not reported · Reasoning: Not reported')).toBeTruthy();
+    expect(call).toHaveBeenCalledWith('provider_test',expect.objectContaining({metadata:true,draft:{kind:'openai-compatible',url:docker.url,preset_id:'docker-model-runner'}}));
+    expect(call.mock.calls.some(([action])=>action==='settings'||action==='provider_save')).toBe(false);
+  });
+  it.each(['https://docs.docker.com.attacker.invalid/ai/model-runner/get-started/','http://docs.docker.com/ai/model-runner/get-started/'])('refuses an unsafe Docker setup link without blocking editable setup (%s)',async setup_url=>{
+    const docker={...preset,id:'docker-model-runner',name:'Docker Model Runner',url:'http://127.0.0.1:12434/engines/llama.cpp/v1',setup_url,metadata_strategy:'dmr'};
+    const call=vi.fn(async(_action:string)=>({presets:[docker]}));window.pywebview={api:{call}};
+    render(<EngineEditor provider={{...provider,preset_id:'docker-model-runner'}} close={()=>{}} saved={async()=>{}}/>);
+    await screen.findByRole('option',{name:'Docker Model Runner'});expect(screen.queryByRole('link',{name:'Official setup guide'})).toBeNull();
+    await userEvent.clear(screen.getByLabelText('Base URL'));await userEvent.type(screen.getByLabelText('Base URL'),docker.url);
+    expect((screen.getByLabelText('Base URL') as HTMLInputElement).value).toBe(docker.url);expect(call.mock.calls.map(([action])=>action)).toEqual(['provider_presets']);
+  });
   it('keeps preset connection fields primary and the editable protocol in a closed native disclosure',async()=>{
     const call=bridge();render(<EngineEditor provider={{...provider,preset_id:'lm-studio'}} close={()=>{}} saved={async()=>{}}/>);
     await screen.findByRole('option',{name:'LM Studio'});

@@ -163,21 +163,32 @@ class CompatibleProvider:
         if cancel is not None and cancel.is_set():raise EngineAccessFailure('cancelled',provider_id=self.config.get('kind'))
         return {'Authorization':'Bearer '+token}
     def models(self):
-        from forge_provider_metadata import fetch_json
+        from forge_provider_metadata import (fetch_json, DockerModelRunnerMetadataInvalid,
+            docker_model_runner_endpoint, docker_model_runner_catalog)
         try:
+            if self.config.get('preset_id')=='docker-model-runner':
+                docker_model_runner_endpoint(self.base)
             result=fetch_json(self.base+'/models',headers_factory=self._headers)
             if self.config.get('preset_id')=='textgen':
                 from forge_provider_metadata import textgen_catalog
                 entries=textgen_catalog(result)
+            elif self.config.get('preset_id')=='docker-model-runner':
+                entries=docker_model_runner_catalog(result)
             else:entries=result.get('data',[])
             return [{'name':m['id'],'model':m['id'],'capabilities':self.config.get('capabilities',[])} for m in entries]
         except EngineAccessFailure:raise
+        except DockerModelRunnerMetadataInvalid as exc:
+            raise ProviderStreamFailure(str(exc),category='metadata') from None
         except httpx.HTTPError as exc:
             status=exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
             raise ProviderStreamFailure('The engine model catalog is unavailable. Check the connection and saved credentials.',
                 category='authentication' if status in (401,403) else 'metadata',http_status=status) from None
         except (ValueError,TypeError,KeyError):
             raise ProviderStreamFailure('The engine returned invalid model metadata.',category='metadata') from None
+        except Exception:
+            if self.config.get('preset_id')=='docker-model-runner':
+                raise ProviderStreamFailure(str(DockerModelRunnerMetadataInvalid()),category='metadata') from None
+            raise
     def capabilities(self,model):
         limit=self.config.get('context_limit')
         configured=type(limit) is int and limit>0
@@ -205,6 +216,24 @@ class CompatibleProvider:
                     # control; never send guessed parameters or enable tools.
                     result['reasoning']={'control_supported':False, 'advertised_options':options,
                         'mandatory':'off' not in options and any(option!='off' for option in options)}
+        elif self.config.get('preset_id')=='docker-model-runner':
+            from forge_provider_metadata import (fetch_provider_metadata, ProviderProbeRevoked,
+                DockerModelRunnerMetadataInvalid)
+            try:
+                facts=fetch_provider_metadata(self.config,model=model,headers_factory=self._headers)
+            except (EngineAccessFailure,ProviderProbeRevoked):raise
+            except httpx.HTTPError as exc:
+                status=exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None
+                raise ProviderStreamFailure('Docker Model Runner model metadata is unavailable. Check the connection and saved credentials.',
+                    category='authentication' if status in (401,403) else 'metadata',http_status=status) from None
+            except Exception:
+                raise ProviderStreamFailure(str(DockerModelRunnerMetadataInvalid()),category='metadata') from None
+            result['metadata_state']=facts['state']
+            if len(facts['models'])==1:
+                result['advertised_metadata']=facts['models'][0]
+            # Forge's compatible wire has no DMR reasoning control. Neither
+            # the catalog nor a GGUF filename proves an on/off/required mode.
+            result['reasoning']={'control_supported':False}
         return result
     def estimate_tokens(self,messages,tools): return estimated_prompt_tokens(messages,tools,AGENT_SYSTEM_PROMPT)
     def prepare_body(self,data,body): return body
@@ -224,6 +253,25 @@ class CompatibleProvider:
             except (EngineAccessFailure,CloudPolicyRejected,OpenRouterFailure):raise
             except Exception:raise EngineAccessFailure('configuration',provider_id=self.config.get('kind')) from None
         exact_textgen=self.config.get('preset_id')=='textgen'
+        if self.config.get('preset_id')=='docker-model-runner':
+            from forge_provider_metadata import (fetch_json, ProviderProbeRevoked,
+                DockerModelRunnerMetadataInvalid, docker_model_runner_endpoint, docker_model_runner_catalog)
+            from forge_cloud_policy import CloudPolicyRejected
+            from forge_openrouter import OpenRouterFailure
+            try:
+                base=docker_model_runner_endpoint(self.base)
+                catalog=docker_model_runner_catalog(fetch_json(base+'/models',cancel=cancel,headers_factory=headers))
+            except (EngineAccessFailure,CloudPolicyRejected,OpenRouterFailure):raise
+            except ProviderProbeRevoked:
+                raise EngineAccessFailure('cancelled',provider_id=self.config.get('kind')) from None
+            except httpx.HTTPStatusError as exc:
+                status=exc.response.status_code
+                raise ProviderStreamFailure('Docker Model Runner model verification failed. Check the connection and saved credentials.',
+                    category='authentication' if status in (401,403) else 'metadata',http_status=status) from None
+            except Exception:
+                raise ProviderStreamFailure(str(DockerModelRunnerMetadataInvalid()),category='metadata') from None
+            if not any(entry['id']==data.get('model') for entry in catalog):
+                raise ProviderStreamFailure('The selected Docker Model Runner model is not in its local catalog. Prepare it in Docker and refresh models.',category='metadata')
         if exact_textgen:
             from forge_provider_metadata import fetch_json,textgen_catalog,ProviderProbeRevoked
             from forge_cloud_policy import CloudPolicyRejected

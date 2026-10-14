@@ -29,7 +29,9 @@ def validate_api_key(value):
 
 def probe_provider(service, data):
     from forge_engine_auth import EngineAccessFailure
-    from forge_provider_metadata import ProviderProbeRevoked, fetch_json, fetch_provider_metadata, require_current
+    from forge_provider_metadata import (ProviderProbeRevoked, fetch_json, fetch_provider_metadata, require_current,
+        DockerModelRunnerMetadataInvalid, docker_model_runner_endpoint, docker_model_runner_catalog,
+        docker_model_runner_facts)
     from forge_provider_presets import validate_preset
 
     draft = data.get('draft')
@@ -52,6 +54,8 @@ def probe_provider(service, data):
     if 'preset_id' not in draft and saved and saved.get('kind') != draft['kind']:
         preset = None
     preset = validate_preset(preset, draft['kind'])
+    if preset == 'docker-model-runner':
+        docker_model_runner_endpoint(url)
 
     def current():
         if saved is None:
@@ -96,7 +100,11 @@ def probe_provider(service, data):
         if preset == 'textgen':
             from forge_provider_metadata import textgen_catalog
             models = textgen_catalog(catalog)
+        elif preset == 'docker-model-runner':
+            models = docker_model_runner_catalog(catalog)
     except ProviderProbeRevoked:
+        raise
+    except DockerModelRunnerMetadataInvalid:
         raise
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
@@ -113,6 +121,7 @@ def probe_provider(service, data):
     # Counts are sufficient for setup. Remote responses and raw errors are not diagnostics.
     result = {'ok': True, 'model_count': len(models)}
     if data.get('metadata') is True:
-        result['metadata'] = fetch_provider_metadata(config, token=token, cancel=cancel, current=current)
+        result['metadata'] = (docker_model_runner_facts(models) if preset == 'docker-model-runner' else
+            fetch_provider_metadata(config, token=token, cancel=cancel, current=current))
     require_current(cancel, current)
     return result

@@ -5,7 +5,7 @@ import { Field,Modal } from './components';
 import type { Provider,ProviderMetadata,ProviderPreset } from './types';
 import './engineEditor.css';
 
-const setupHosts=new Set(['docs.ollama.com','lmstudio.ai','github.com','www.jan.ai','localai.io','docs.vllm.ai','docs.sglang.io']);
+const setupHosts=new Set(['docs.ollama.com','lmstudio.ai','github.com','www.jan.ai','localai.io','docs.vllm.ai','docs.sglang.io','docs.docker.com']);
 function setupLink(value:string){try{const url=new URL(value);return url.protocol==='https:' && !url.username && !url.password && !url.search && !url.hash && setupHosts.has(url.hostname)?url.href:null;}catch{return null;}}
 export function EngineEditor({provider,close,saved}:{provider:Provider;close:()=>void;saved:()=>Promise<void>}) {
   const [draft,setDraft]=useState({...provider}),[apiKey,setApiKey]=useState(''),[operation,setOperation]=useState<'test'|'save'|null>(null);

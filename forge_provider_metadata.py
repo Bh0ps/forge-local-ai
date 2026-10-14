@@ -1,5 +1,6 @@
 """Bounded read-only advertised facts; no model aliases, loads or capability grants."""
 import json
+import ipaddress
 import time
 from urllib.parse import urlsplit, urlunsplit
 
@@ -16,6 +17,74 @@ REASONING_OPTIONS = ('off', 'on', 'low', 'medium', 'high')
 
 class ProviderProbeRevoked(ValueError):
     pass
+
+
+class DockerModelRunnerMetadataInvalid(ValueError):
+    def __init__(self):
+        super().__init__('Docker Model Runner could not verify its local catalog. Check the loopback llama.cpp endpoint and local models, then refresh models.')
+
+
+def docker_model_runner_endpoint(url):
+    """An explicit local route, never a guessed cloud/default backend or alias."""
+    from forge_provider_probe import validate_endpoint
+    try:
+        url = validate_endpoint(url)
+        parsed = urlsplit(url)
+        local = parsed.hostname == 'localhost'
+        if not local:
+            local = ipaddress.ip_address(parsed.hostname).is_loopback
+        if not local or parsed.path != '/engines/llama.cpp/v1':
+            raise ValueError()
+        return url
+    except (ValueError, TypeError):
+        raise DockerModelRunnerMetadataInvalid() from None
+
+
+def docker_model_runner_catalog(value):
+    """Validate the local OpenAI list. Package hints grant no serving facts.
+
+    Docker's explicit llama.cpp route resolves GetLocal before inference. The
+    catalog is only an advertised local package list, not a served-model proof.
+    Unknown routing extensions (including cloud descriptors) are refused.
+    """
+    invalid = DockerModelRunnerMetadataInvalid
+    if (not isinstance(value, dict) or set(value) != {'object', 'data'}
+            or value.get('object') != 'list' or not isinstance(value.get('data'), list)
+            or len(value['data']) > MAX_METADATA_MODELS):
+        raise invalid()
+    models, seen = [], set()
+    for entry in value['data']:
+        if (not isinstance(entry, dict) or set(entry) - {'id', 'object', 'created', 'owned_by', 'dmr'}
+                or not {'id', 'object', 'created', 'owned_by'} <= set(entry)
+                or not _identifier(entry['id']) or any(ord(char) == 127 for char in entry['id'])
+                or entry['id'] in seen or entry['object'] != 'model' or entry['owned_by'] != 'docker'
+                or type(entry['created']) is not int or not 0 <= entry['created'] <= 2**63 - 1):
+            raise invalid()
+        if 'dmr' in entry:
+            hints = entry['dmr']
+            if (not isinstance(hints, dict)
+                    or set(hints) - {'context_window', 'architecture', 'parameters', 'quantization', 'size'}):
+                raise invalid()
+            context = hints.get('context_window')
+            if 'context_window' in hints and (type(context) is not int
+                    or not -2**31 <= context <= 2**31 - 1):
+                raise invalid()
+            for field in ('architecture', 'parameters', 'quantization', 'size'):
+                if field in hints and (not isinstance(hints[field], str) or len(hints[field]) > 512
+                        or any(ord(char) < 32 or ord(char) == 127 for char in hints[field])):
+                    raise invalid()
+        seen.add(entry['id'])
+        models.append({'id': entry['id']})
+    return models
+
+
+def docker_model_runner_facts(models, model=None):
+    # Maximum and active context are deliberately unknown: dmr.context_window
+    # is package configuration, and runtime overrides can change it.
+    return {'state': 'available', 'source': 'advertised', 'models': [
+        {'model': entry['id'], 'max_context_length': None, 'loaded_context_lengths': [],
+         'loaded_instances': [], 'vision': None, 'trained_for_tool_use': None, 'reasoning_options': []}
+        for entry in models if model is None or entry['id'] == model]}
 
 
 def require_current(cancel=None, current=None):
@@ -135,7 +204,7 @@ def _model(entry):
 
 
 def fetch_provider_metadata(config, *, token=None, model=None, cancel=None, current=None, client_factory=None,headers_factory=None):
-    """LM Studio v1 declarations only; unavailable/missing facts remain unknown.
+    """Read bounded declarations; unavailable/missing serving facts stay unknown.
 
     `model` matches an exact catalog key or loaded instance ID. Loaded context
     remains instance-specific; callers must not select an arbitrary minimum or
@@ -148,6 +217,12 @@ def fetch_provider_metadata(config, *, token=None, model=None, cancel=None, curr
     require_current(cancel, current)
     if model is not None and not _identifier(model):
         raise ValueError('Select an exact model identifier.')
+    if identifier == 'docker-model-runner':
+        url = docker_model_runner_endpoint(config.get('url'))
+        models = docker_model_runner_catalog(fetch_json(url + '/models', token=token, cancel=cancel,
+            current=current, client_factory=client_factory, headers_factory=headers_factory))
+        require_current(cancel, current)
+        return docker_model_runner_facts(models, model)
     if identifier != 'lm-studio':
         return {'state': 'unsupported', 'source': 'unknown', 'models': []}
     url = validate_endpoint(config.get('url'))

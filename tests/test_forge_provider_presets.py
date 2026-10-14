@@ -21,7 +21,7 @@ def test_readonly_presets_are_fresh_bounded_suggestions_without_capability_grant
         result = svc.dispatch('provider_presets')
         rows = result['presets']
         assert {row['id'] for row in rows} == {'ollama', 'lm-studio', 'llama-cpp',
-            'jan-desktop', 'localai', 'vllm', 'sglang', 'koboldcpp', 'textgen'}
+            'jan-desktop', 'localai', 'vllm', 'sglang', 'koboldcpp', 'textgen', 'docker-model-runner'}
         for row in rows:
             assert set(row) == {'id', 'name', 'kind', 'url', 'setup_url', 'description',
                 'hosting', 'metadata_strategy'}
@@ -31,7 +31,7 @@ def test_readonly_presets_are_fresh_bounded_suggestions_without_capability_grant
             assert row['setup_url'].startswith('https://')
             assert all(value is None or len(value) < 512 for value in row.values())
         rows[0]['name'] = 'changed'; rows.clear()
-        assert len(provider_presets()['presets']) == 9
+        assert len(provider_presets()['presets']) == 10
         assert not svc.store.entities('providers')
     finally:
         svc.shutdown()

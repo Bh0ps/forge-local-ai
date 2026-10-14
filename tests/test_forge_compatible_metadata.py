@@ -66,3 +66,15 @@ def test_loaded_instance_can_supply_exact_capacity_without_a_configured_limit(mo
 def test_positive_explicit_generic_limit_remains_configured():
     result=CompatibleProvider({'kind':'openai','url':'http://fixture.invalid/v1','context_limit':16384}).capabilities('exact/model')
     assert result['context_limit_source']=='configured' and result['model_info']['local.context_length']==16384
+
+
+def test_docker_package_metadata_does_not_supply_loaded_context_or_reasoning_options(monkeypatch):
+    from forge_provider_metadata import docker_model_runner_facts
+    facts = docker_model_runner_facts([{'id':'ai/exact:tag'}])
+    monkeypatch.setattr('forge_provider_metadata.fetch_provider_metadata', lambda *args, **kwargs:deepcopy(facts))
+    provider = CompatibleProvider({'kind':'openai-compatible', 'url':'http://127.0.0.1:12434/engines/llama.cpp/v1',
+        'preset_id':'docker-model-runner','context_limit':32768,'capabilities':[]})
+    result = provider.capabilities('ai/exact:tag')
+    assert result['model_info']=={'local.context_length':32768} and result['context_limit_source']=='configured'
+    assert result['advertised_metadata']==facts['models'][0] and result['capabilities']==[]
+    assert result['reasoning']=={'control_supported':False} and 'thinking' not in result
