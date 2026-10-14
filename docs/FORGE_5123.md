@@ -27,6 +27,19 @@ The current font, warm palettes, roomy composer, pane sizes and saved layout
 preferences are preserved. HUD and reduced-motion behavior remain in place. No
 new operational cards, destinations or appearance settings are introduced.
 
+## Native verification diagnostics
+
+The disposable Windows smoke check records a bounded final observation when
+waiting for an owned standalone preview. Diagnostics contain fixed booleans and
+an iteration count, including visibility, ownership, valid matching bounds and
+stable samples. They contain no identifiers, coordinates, paths, URLs, titles,
+chat text, credentials or raw exception messages.
+
+The existing readiness deadline, two-sample check, ownership restrictions and
+nonzero-process-exit rejection remain in force. This diagnostic addition does
+not claim to fix the underlying preview-readiness failure; fresh Windows checks
+are required to establish its cause and verify the final release.
+
 ## Validation
 
 Checks cover Tools grouping and keyboard navigation, project selection cues,

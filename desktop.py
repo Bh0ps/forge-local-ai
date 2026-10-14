@@ -34,6 +34,9 @@ SMOKE_PHASES = frozenset({'startup-imports', 'startup-imports-ready', 'logging-s
 SMOKE_ERROR_TYPES = frozenset({'ValueError', 'RuntimeError', 'TimeoutError', 'StopIteration', 'KeyError',
     'TypeError', 'AttributeError', 'OSError', 'FileNotFoundError', 'PermissionError', 'BrowserGuard',
     'JavascriptException', 'WebViewException', 'ImportError', 'ModuleNotFoundError'})
+SMOKE_STANDALONE_READINESS_FLAGS = ('view_present', 'owner_same', 'snapshot_observed', 'native_observed',
+    'owner_visible', 'view_visible', 'status_visible', 'loading_complete', 'dom_visible', 'dom_hud',
+    'dom_modal', 'layout_valid', 'native_bound_present', 'bounds_match', 'same_sample', 'deadline_expired')
 
 
 def _smoke_preview_tool(manager, run, cancel, result, name, args):
@@ -59,47 +62,88 @@ def _smoke_preview_tool(manager, run, cancel, result, name, args):
     return outcome
 
 
-def _smoke_preview_ready(manager, identifier, *, deadline, clock=time.monotonic, pause=time.sleep):
+def _smoke_preview_readiness_report(diagnostics, observation):
+    if type(diagnostics) is dict:
+        dict.__setitem__(diagnostics, 'smoke_standalone_readiness', observation.copy())
+
+
+def _smoke_preview_ready(manager, identifier, *, deadline, clock=time.monotonic, pause=time.sleep, diagnostics=None):
     """Observe stable owned bounds; never show, resize, focus or repeat an action."""
     from embedded_browser import validate_bounds
     from native_browser import BrowserGuard
     browser = manager.previews.browser
     view = browser.view
     previous = None
+    observation = dict.fromkeys(SMOKE_STANDALONE_READINESS_FLAGS, False)
+    observation.update(view_present=view is not None, iterations=0)
+
+    def before_deadline(value):
+        observation['deadline_expired'] = value is False
+        return value
+
+    def after_deadline(value):
+        observation['deadline_expired'] = value is True
+        return value
 
     def owned():
-        return (manager.previews.browser is browser and browser.view is view and view is not None
-                and manager.previews.browser_preview == identifier)
+        value = (manager.previews.browser is browser and browser.view is view and view is not None
+                 and manager.previews.browser_preview == identifier)
+        observation['owner_same'] = value is True
+        return value
 
-    while clock() < deadline:
-        if not owned():
-            break
-        state = browser.status()
-        snapshot = view._layout()
-        if not owned() or clock() >= deadline:
-            break
-        def native(owner):
-            main = owner.webview
-            return (bool(owner.Visible), bool(view.visible), view.bound,
-                    (main.Left, main.Top, main.ClientSize.Width, main.ClientSize.Height))
-        visible, bound_visible, bound, client = view.ui(native)
-        if not owned() or clock() >= deadline:
-            break
-        sample = None
+    try:
+        while before_deadline(clock() < deadline):
+            observation['iterations'] = min(512, observation['iterations'] + 1)
+            for name in SMOKE_STANDALONE_READINESS_FLAGS:
+                if name not in ('view_present', 'owner_same', 'deadline_expired'):
+                    observation[name] = False
+            if not owned():
+                break
+            state = browser.status()
+            if type(state) is dict:
+                observation['status_visible'] = dict.get(state, 'visible') is True
+                observation['loading_complete'] = dict.get(state, 'loading') is False
+            snapshot = view._layout()
+            observation['snapshot_observed'] = True
+            if type(snapshot) is dict:
+                observation['dom_visible'] = dict.get(snapshot, 'visible') is True
+                observation['dom_hud'] = dict.get(snapshot, 'hud') is True
+                observation['dom_modal'] = dict.get(snapshot, 'modal') is True
+            if not owned() or after_deadline(clock() >= deadline):
+                break
+            def native(owner):
+                main = owner.webview
+                return (bool(owner.Visible), bool(view.visible), view.bound,
+                        (main.Left, main.Top, main.ClientSize.Width, main.ClientSize.Height))
+            visible, bound_visible, bound, client = view.ui(native)
+            observation.update(native_observed=True, owner_visible=visible is True,
+                               view_visible=bound_visible is True, native_bound_present=bound is not None)
+            if not owned() or after_deadline(clock() >= deadline):
+                break
+            sample = None
+            try:
+                bounds = validate_bounds({'panel_id': 'forge-preview-panel'}, snapshot, client, 'forge-preview-panel')
+                observation['layout_valid'] = True
+                if visible and bound_visible and state.get('visible') is True and state.get('loading') is False and (bounds_match := bounds == bound):
+                    observation['bounds_match'] = bounds_match is True
+                    sample = (bounds, client, tuple(snapshot['rect'][key] for key in ('x', 'y', 'width', 'height')),
+                              tuple(snapshot['viewport'][key] for key in ('width', 'height')))
+            except (BrowserGuard, TypeError, KeyError):
+                pass
+            if sample is not None and (same_sample := sample == previous):
+                observation['same_sample'] = same_sample is True
+                if owned() and before_deadline(clock() < deadline):
+                    return True
+            previous = sample
+            remaining = deadline - clock()
+            if remaining > 0:
+                pause(min(.05, remaining))
+        raise ValueError('The standalone preview pane did not open.')
+    finally:
         try:
-            bounds = validate_bounds({'panel_id': 'forge-preview-panel'}, snapshot, client, 'forge-preview-panel')
-            if visible and bound_visible and state.get('visible') is True and state.get('loading') is False and bounds == bound:
-                sample = (bounds, client, tuple(snapshot['rect'][key] for key in ('x', 'y', 'width', 'height')),
-                          tuple(snapshot['viewport'][key] for key in ('width', 'height')))
-        except (BrowserGuard, TypeError, KeyError):
-            pass
-        if sample is not None and sample == previous and owned() and clock() < deadline:
-            return True
-        previous = sample
-        remaining = deadline - clock()
-        if remaining > 0:
-            pause(min(.05, remaining))
-    raise ValueError('The standalone preview pane did not open.')
+            _smoke_preview_readiness_report(diagnostics, observation)
+        except Exception:
+            pass  # Optional diagnostics cannot replace the original outcome.
 
 
 class _SmokeCheckpoint:
@@ -1496,7 +1540,7 @@ def main():
                             result['smoke_phase'] = 'standalone-layout'
                             _smoke_checkpoint(result['smoke_phase'])
                             deadline=time.monotonic()+10
-                            _smoke_preview_ready(manager,standalone['id'],deadline=deadline)
+                            _smoke_preview_ready(manager,standalone['id'],deadline=deadline,diagnostics=result)
                             result['smoke_phase'] = 'standalone-viewport'
                             _smoke_checkpoint(result['smoke_phase'])
                             _smoke_preview_tool(manager,standalone_run,cancel,result,'preview_viewport',{'id':standalone['id']})
