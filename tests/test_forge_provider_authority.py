@@ -383,6 +383,12 @@ def test_first_authority_table_creation_is_backed_up_and_global_schema_stays7(tm
         assert db.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='provider_authority_revisions'").fetchone() is None
     db.close()
+    # Store reopening deliberately closes the derived queue until real recovery.
+    from forge_channel_queue import InboundQueue, PRIVATE_TABLES
+    closed=database_guard(reopened.db_path,before)
+    assert closed!=before and 'channel_queue_protection' in closed
+    assert PRIVATE_TABLES<=closed['tables'].keys()
+    assert InboundQueue(reopened).maintenance()
     assert database_guard(reopened.db_path,before)==before
     with reopened._connection() as db:assert db.execute('SELECT MAX(version) FROM forge_migrations').fetchone()[0]==7
     ForgeStore(store.home);assert len(list((store.home/'backups').glob('pre-provider-authority-1-*')))==1

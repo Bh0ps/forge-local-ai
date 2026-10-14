@@ -491,9 +491,14 @@ class RunManager:
                     run=self.store.update_run(run['id'],assignment_id=run['id'])
                 from forge_builder_guide import remember
                 remember(self.store,run)
-                if data.get('goal_id') and not data.get('parent_id') and data.get('mode') not in ('goal_review','plan'):
+                if run.get('goal_id') and not data.get('parent_id') and data.get('mode') not in ('goal_review','plan'):
                     run=self.store.update_run(run['id'],execution_mode='guided' if settings.get('guided_execution',True) else 'legacy')
-                self._launch(run)
+                if channel:
+                    from forge_channel_queue import ChannelAdmission
+                    if isinstance(channel,ChannelAdmission) and channel.complete is not None:
+                        run=channel.complete(run)
+                if run['status']=='queued' and run.get('channel_preparation',{}).get('state','ready')=='ready':
+                    self._launch(run)
         return {'id':run['id'],'chat_id':run['chat_id'],'status':run['status'],'mode':run['mode'],'request':run['request'],'settings':run['settings'],
                 'request_message_id':run['request_message_id'],'goal_id':run.get('goal_id'),'project_id':run.get('project_id'),'parent_id':run.get('parent_id')}
     def _launch(self,run):
@@ -605,6 +610,8 @@ class RunManager:
             if getattr(self.service,'update_manager',None) and self.service.update_manager.applying:
                 raise ValueError('Forge is preparing an update. Restart after the update finishes.')
             run=self.store.run(identifier)
+            if run.get('channel_preparation',{}).get('state','ready')!='ready':
+                raise ValueError('Channel setup did not finish. Inspect the saved goal and workspace before starting new work.')
             chat=self.store.get_chat(run['chat_id'],limit=1)
             if chat.get('archived'): raise ValueError('Restore this archived chat before resuming.')
             if chat.get('project_id')!=run.get('project_id'): raise ValueError('The chat moved to another project. Start a new run in its current project.')

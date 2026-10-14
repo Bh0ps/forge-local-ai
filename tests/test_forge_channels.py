@@ -185,8 +185,8 @@ def test_dispatch_crash_after_commit_reconciles_source_key_without_duplicate(env
     original = getattr(env.service, 'channel_start', None)
     if original is None:
         original = lambda data, *_: env.service.jobs.start(data)
-    def crash_after(data, channel_id, external_id):
-        original(data, channel_id, external_id)
+    def crash_after(data, channel_id, external_id, **admission):
+        original(data, channel_id, external_id, **admission)
         raise RuntimeError('Simulated process crash after accepted request.')
     monkeypatch.setattr(env.service, 'channel_start', crash_after, raising=False)
     env.manager.receive_telegram(config['id'], update())
