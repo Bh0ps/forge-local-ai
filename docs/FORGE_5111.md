@@ -68,3 +68,11 @@ Desktop evidence remains an earlier snapshot. Shared Windows actions can use
 your pointer and activate applications; this preview adds no isolated desktop
 or second OS cursor. [The computer-tool guide](FORGE_5110.md) explains those
 boundaries and the original implementation.
+
+## Native verification
+
+The standalone preview smoke fixture observes matching DOM and native bounds
+before its first viewport check. Mounting can still adjust the pane after it
+becomes visible. Readiness waits within the existing deadline, and the final
+runtime layout guard remains active. Separate layout/viewport phase labels
+improve failure diagnostics; dispatched actions are never repeated.

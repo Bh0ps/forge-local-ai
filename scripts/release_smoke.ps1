@@ -119,7 +119,7 @@ function Write-ForgeSmokeDiagnostics {
         'research-load','research-input-target','research-type','research-button-target','research-click','research-verify',
         'research-screenshot','builder-start','builder-navigation','builder-input-target','builder-button-target',
         'builder:preview_inspect','builder:preview_type','builder:preview_click','builder:preview_viewport',
-        'builder:preview_diagnostics','builder:preview_screenshot','standalone-start','standalone-open',
+        'builder:preview_diagnostics','builder:preview_screenshot','standalone-start','standalone-open','standalone-layout','standalone-viewport',
         'standalone-input-target','standalone-button-target','standalone-screenshot')
     $checkpointPhases = $phases + @('startup-imports','startup-imports-ready','logging-start','logging-ready',
         'singleton-start','singleton-ready','service-start','service-ready','http-start','http-ready',

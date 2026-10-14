@@ -29,7 +29,8 @@ SMOKE_PHASES = frozenset({'startup-imports', 'startup-imports-ready', 'logging-s
     'research-verify', 'research-screenshot', 'builder-start', 'builder-navigation', 'builder-input-target',
     'builder-button-target', 'builder:preview_inspect', 'builder:preview_type', 'builder:preview_click',
     'builder:preview_viewport', 'builder:preview_diagnostics', 'builder:preview_screenshot',
-    'standalone-start', 'standalone-open', 'standalone-input-target', 'standalone-button-target', 'standalone-screenshot'})
+    'standalone-start', 'standalone-open', 'standalone-layout', 'standalone-viewport',
+    'standalone-input-target', 'standalone-button-target', 'standalone-screenshot'})
 SMOKE_ERROR_TYPES = frozenset({'ValueError', 'RuntimeError', 'TimeoutError', 'StopIteration', 'KeyError',
     'TypeError', 'AttributeError', 'OSError', 'FileNotFoundError', 'PermissionError', 'BrowserGuard',
     'JavascriptException', 'WebViewException', 'ImportError', 'ModuleNotFoundError'})
@@ -56,6 +57,49 @@ def _smoke_preview_tool(manager, run, cancel, result, name, args):
         result['tool_failure'] = category
         raise ValueError('Standalone preview tool did not complete successfully.')
     return outcome
+
+
+def _smoke_preview_ready(manager, identifier, *, deadline, clock=time.monotonic, pause=time.sleep):
+    """Observe stable owned bounds; never show, resize, focus or repeat an action."""
+    from embedded_browser import validate_bounds
+    from native_browser import BrowserGuard
+    browser = manager.previews.browser
+    view = browser.view
+    previous = None
+
+    def owned():
+        return (manager.previews.browser is browser and browser.view is view and view is not None
+                and manager.previews.browser_preview == identifier)
+
+    while clock() < deadline:
+        if not owned():
+            break
+        state = browser.status()
+        snapshot = view._layout()
+        if not owned() or clock() >= deadline:
+            break
+        def native(owner):
+            main = owner.webview
+            return (bool(owner.Visible), bool(view.visible), view.bound,
+                    (main.Left, main.Top, main.ClientSize.Width, main.ClientSize.Height))
+        visible, bound_visible, bound, client = view.ui(native)
+        if not owned() or clock() >= deadline:
+            break
+        sample = None
+        try:
+            bounds = validate_bounds({'panel_id': 'forge-preview-panel'}, snapshot, client, 'forge-preview-panel')
+            if visible and bound_visible and state.get('visible') is True and state.get('loading') is False and bounds == bound:
+                sample = (bounds, client, tuple(snapshot['rect'][key] for key in ('x', 'y', 'width', 'height')),
+                          tuple(snapshot['viewport'][key] for key in ('width', 'height')))
+        except (BrowserGuard, TypeError, KeyError):
+            pass
+        if sample is not None and sample == previous and owned() and clock() < deadline:
+            return True
+        previous = sample
+        remaining = deadline - clock()
+        if remaining > 0:
+            pause(min(.05, remaining))
+    raise ValueError('The standalone preview pane did not open.')
 
 
 class _SmokeCheckpoint:
@@ -1442,12 +1486,13 @@ def main():
                             result['smoke_phase'] = 'standalone-open'
                             _smoke_checkpoint(result['smoke_phase'])
                             manager.execute(standalone_run,'preview_open',{'id':standalone['id']},cancel)
+                            result['smoke_phase'] = 'standalone-layout'
+                            _smoke_checkpoint(result['smoke_phase'])
                             deadline=time.monotonic()+10
-                            while (not manager.previews.browser.status().get('visible') or manager.previews.browser.status().get('loading')) and time.monotonic()<deadline:
-                                time.sleep(.05)
-                            if not manager.previews.browser.status().get('visible'):
-                                raise ValueError('The standalone preview pane did not open.')
-                            manager.execute(standalone_run,'preview_viewport',{'id':standalone['id']},cancel)
+                            _smoke_preview_ready(manager,standalone['id'],deadline=deadline)
+                            result['smoke_phase'] = 'standalone-viewport'
+                            _smoke_checkpoint(result['smoke_phase'])
+                            _smoke_preview_tool(manager,standalone_run,cancel,result,'preview_viewport',{'id':standalone['id']})
                             inspected=_smoke_preview_tool(manager,standalone_run,cancel,result,'preview_inspect',{'id':standalone['id']})
                             result['smoke_phase'] = 'standalone-input-target'
                             _smoke_checkpoint(result['smoke_phase'])

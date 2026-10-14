@@ -14,6 +14,160 @@ import pytest
 import desktop
 
 
+class PreviewClock:
+    def __init__(self):
+        self.now = 0.
+
+    def __call__(self):
+        return self.now
+
+    def pause(self, seconds):
+        self.now += seconds
+
+
+def preview_readiness_fixture():
+    from embedded_browser import EmbeddedWebView2Page
+    owner = SimpleNamespace(Visible=True, webview=SimpleNamespace(Left=0, Top=0,
+        ClientSize=SimpleNamespace(Width=1000, Height=800)))
+    snapshot = {'visible': True, 'hud': False, 'modal': False,
+        'rect': {'x': 250, 'y': 150, 'width': 700, 'height': 600},
+        'viewport': {'width': 1000, 'height': 800}}
+    view = object.__new__(EmbeddedWebView2Page)
+    view.visible, view.bound, view.disposed = True, (250, 150, 700, 600), False
+    view.panel_id = 'forge-preview-panel'
+    view.container = SimpleNamespace(Visible=True)
+    view.ui = lambda operation: operation(owner)
+    view._layout = lambda: snapshot
+    browser = SimpleNamespace(view=view, status=lambda: {'visible': view.visible, 'loading': False})
+    manager = SimpleNamespace(previews=SimpleNamespace(browser=browser, browser_preview='preview'))
+    return manager, view, owner, snapshot, PreviewClock()
+
+
+def test_standalone_readiness_waits_for_real_matching_bounds_without_native_effects():
+    manager, view, _, snapshot, clock = preview_readiness_fixture()
+    calls = []
+    def layout():
+        calls.append('layout')
+        if len(calls) <= 2:
+            # A mounted pane has resized but its serialized frontend bind is pending.
+            snapshot['rect']['height'] = 560
+        else:
+            view.bound = (250, 150, 700, 560)
+        return snapshot
+    view._layout = layout
+    def forbidden(*args, **kwargs):
+        pytest.fail('A readiness observation must not dispatch a native effect.')
+    for name in ('show', 'bind', 'navigate', 'set_viewport', 'hide', 'evaluate', 'screenshot'):
+        setattr(view, name, forbidden)
+    manager.execute = forbidden
+    assert desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause) is True
+    assert len(calls) == 4 and clock.now == pytest.approx(.15)
+
+
+@pytest.mark.parametrize('condition', ['hidden', 'loading', 'modal', 'unbound', 'moving', 'invalid'])
+def test_standalone_readiness_refuses_unstable_or_hidden_pane_at_original_deadline(condition):
+    manager, view, owner, snapshot, clock = preview_readiness_fixture()
+    reads = 0
+    def layout():
+        nonlocal reads
+        reads += 1
+        if condition == 'moving':
+            snapshot['rect']['y'] = 150 + reads % 2
+            view.bound = (250, snapshot['rect']['y'], 700, 600)
+        return snapshot
+    view._layout = layout
+    if condition == 'hidden': owner.Visible = False
+    if condition == 'loading': manager.previews.browser.status = lambda: {'visible': True, 'loading': True}
+    if condition == 'modal': snapshot['modal'] = True
+    if condition == 'unbound': view.bound = (250, 150, 700, 560)
+    if condition == 'invalid': snapshot['rect']['width'] = float('nan')
+    with pytest.raises(ValueError, match='The standalone preview pane did not open'):
+        desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause)
+    assert clock.now == 10 and reads >= 2
+
+
+@pytest.mark.parametrize('change', ['view', 'browser', 'preview'])
+def test_standalone_readiness_never_adopts_replaced_owner(change):
+    manager, view, _, snapshot, clock = preview_readiness_fixture()
+    def layout():
+        if change == 'view': manager.previews.browser.view = object()
+        elif change == 'browser': manager.previews.browser = object()
+        else: manager.previews.browser_preview = 'other-preview'
+        return snapshot
+    view._layout = layout
+    with pytest.raises(ValueError, match='The standalone preview pane did not open'):
+        desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause)
+    assert clock.now == 0
+
+
+@pytest.mark.parametrize('phase', ['layout', 'native'])
+def test_standalone_readiness_late_read_cannot_confirm_after_deadline(phase):
+    manager, view, _, _, clock = preview_readiness_fixture()
+    original = view._layout if phase == 'layout' else view.ui
+    calls = 0
+    def delayed(*args):
+        nonlocal calls
+        calls += 1
+        if calls == 2: clock.now = 10.
+        return original(*args)
+    setattr(view, '_layout' if phase == 'layout' else 'ui', delayed)
+    with pytest.raises(ValueError, match='The standalone preview pane did not open'):
+        desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause)
+    assert calls == 2
+
+
+def test_standalone_ready_does_not_relax_final_guard_or_retry_viewport(tmp_path):
+    from native_browser import BrowserGuard, NativeBrowser
+    manager, view, _, snapshot, clock = preview_readiness_fixture()
+    assert desktop._smoke_preview_ready(manager, 'preview', deadline=10, clock=clock, pause=clock.pause) is True
+    # The real Embedded preflight must reject a later move before importing WinForms
+    # or setting a viewport; readiness is an observation, not an authorization.
+    snapshot['rect']['height'] = 560
+    native = NativeBrowser(tmp_path, view_factory=lambda changed: view, session_check=lambda: True)
+    native.view = view
+    calls = []
+    def execute(run, name, args, cancel):
+        calls.append(name)
+        return native.viewport(args)
+    manager.execute = execute
+    result = {}
+    try:
+        with pytest.raises(BrowserGuard, match='Browser panel changed'):
+            desktop._smoke_preview_tool(manager, {'id': 'smoke'}, threading.Event(), result,
+                'preview_viewport', {'id': 'preview'})
+        assert calls == ['preview_viewport'] and result == {'tool_failure': 'outcome-unknown'}
+        assert view.visible is False and view.bound is None and native.pending_io() == 0
+    finally:
+        native.pool.shutdown(wait=True, cancel_futures=True)
+
+
+def test_smoke_raised_browser_guard_does_not_claim_generic_action_was_unexecuted():
+    from native_browser import BrowserGuard
+    effects = []
+    def execute(*args):
+        effects.append('synthetic-action-dispatched')
+        raise BrowserGuard('Browser panel changed. Inspect again after reopening it.')
+    result = {}
+    with pytest.raises(BrowserGuard):
+        desktop._smoke_preview_tool(SimpleNamespace(execute=execute), {'id': 'smoke'},
+            threading.Event(), result, 'preview_click', {})
+    assert effects == ['synthetic-action-dispatched'] and result == {'tool_failure': 'outcome-unknown'}
+
+
+def test_standalone_viewport_phase_precedes_one_checked_call_and_both_new_phases_are_sanitized():
+    tree = ast.parse(Path(desktop.__file__).read_bytes())
+    starts = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == '_smoke_preview_ready']
+    assert len(starts) == 1
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name) and node.func.id == '_smoke_preview_tool'
+        and any(isinstance(arg, ast.Constant) and arg.value == 'preview_viewport' for arg in node.args)]
+    assert len(calls) == 1 and starts[0].lineno < calls[0].lineno
+    script = (Path(desktop.__file__).parent / 'scripts/release_smoke.ps1').read_text()
+    for phase in ('standalone-layout', 'standalone-viewport'):
+        assert phase in desktop.SMOKE_PHASES and "'" + phase + "'" in script
+
+
 def checkpoint(tmp_path):
     folder = tmp_path / 'smoke'
     folder.mkdir()
