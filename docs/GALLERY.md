@@ -2,6 +2,12 @@
 
 These images and animations use an isolated demo workspace with synthetic data.
 
+## Forge 5.1.22 Settings
+
+![Compact Settings search preserving the open Models page in the dark workspace](../assets/demos/forge-5.1.22-settings-search-dark.png)
+
+![Settings search and compact section selector in a narrow light workspace](../assets/demos/forge-5.1.22-settings-search-narrow-light.png)
+
 ## Forge 5.1.21 chat foundation
 
 ![Outlined chat controls and grouped composer in the dark workspace](../assets/demos/forge-5.1.21-composer-dark.png)

@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { Activity, Files, Globe, ListChecks, Sparkles, X } from 'lucide-react';
-import { Empty, IconButton } from './components';
+import { Empty, IconButton, useControlLabel } from './components';
 import { activityRunIds, ChatActivity, latestActivityAssignments, transcriptActivity, type ActivityLive } from './chatActivity';
 import { GoalReviewCard } from './goalReviewCard';
 import { RecoveryPanel, type RecoveryInspection } from './recoveryPanel';
@@ -16,6 +16,19 @@ export const WORKSPACE_TABS = [
   { id: 'goals', title: 'Goals', description: 'Requirements, progress and verified results.', icon: ListChecks },
   { id: 'files', title: 'Files', description: 'Explore the current project.', icon: Files },
 ] as const;
+
+function WorkspaceTab({item, id, selected, buttonRef, click, keyDown}: {
+  item: typeof WORKSPACE_TABS[number]; id: string; selected: boolean;
+  buttonRef: (element: HTMLButtonElement | null) => void; click: () => void;
+  keyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
+}) {
+  const hint = useControlLabel(`${item.title} · ${item.description}`);
+  return <button type="button" ref={buttonRef} className="workspace-tab-control" role="tab" id={`${id}-${item.id}`}
+    aria-controls={`${id}-content`} aria-selected={selected} aria-label={item.title} tabIndex={selected ? 0 : -1}
+    {...hint.events} onClick={() => {hint.dismiss();click();}} onKeyDown={event => {hint.events.onKeyDown(event);if(!event.defaultPrevented)keyDown(event);}}>
+    <item.icon size={17} aria-hidden="true"/>{hint.content}
+  </button>;
+}
 
 export interface WorkspacePanelFocusScope {
   page: string; projectId: string | null; chatId: string | null; runId?: string;
@@ -80,18 +93,17 @@ export function WorkspacePanel({ tab, select, close, width, resize, children, fo
   }, []);
   return <ActivityFocusContext.Provider value={focusScope ? activateActivity : null}><aside ref={pane} aria-label="Workspace details" style={{ width }} className={`right-panel workspace-panel${current.id === 'browser' ? ' with-browser' : ''}`}>
     <ResizeHandle label="Resize workspace panel" value={width} min={280} max={520} change={resize} reverse />
-    <header className="workspace-panel-heading"><div><h2>{current.title}</h2><p>{current.description}</p></div><IconButton label="Close detail pane" onClick={() => {close();queueMicrotask(()=>document.querySelector<HTMLButtonElement>('button[aria-label="Open workspace panel"]')?.focus());}}><X size={16} /></IconButton></header>
-    <nav className="workspace-panel-tabs" role="tablist" aria-label="Detail pane views">{WORKSPACE_TABS.map((item, index) => <button
-      type="button" key={item.id} ref={element => { if (element) buttons.current.set(item.id, element); else buttons.current.delete(item.id); }}
-      role="tab" id={`${id}-${item.id}`} aria-controls={`${id}-content`} aria-selected={current.id === item.id} aria-label={item.title} title={item.title} tabIndex={current.id === item.id ? 0 : -1}
-      onClick={() => { keyboardFocus.current = false; select(item.id); }} onKeyDown={event => {
+    <header className="workspace-panel-heading"><div><h2>{current.title}</h2><p>{current.description}</p></div><IconButton showLabel label="Close detail pane" onClick={() => {close();queueMicrotask(()=>document.querySelector<HTMLButtonElement>('button[aria-label="Open workspace panel"]')?.focus());}}><X size={16} /></IconButton></header>
+    <nav className="workspace-panel-tabs" role="tablist" aria-label="Detail pane views">{WORKSPACE_TABS.map((item, index) => <WorkspaceTab
+      key={item.id} item={item} id={id} selected={current.id === item.id} buttonRef={element => { if (element) buttons.current.set(item.id, element); else buttons.current.delete(item.id); }}
+      click={() => { keyboardFocus.current = false; select(item.id); }} keyDown={event => {
         const nextIndex = event.key === 'ArrowRight' ? (index + 1) % WORKSPACE_TABS.length : event.key === 'ArrowLeft' ? (index + WORKSPACE_TABS.length - 1) % WORKSPACE_TABS.length : event.key === 'Home' ? 0 : event.key === 'End' ? WORKSPACE_TABS.length - 1 : -1;
         if (nextIndex < 0) return;
         event.preventDefault();
         const next = WORKSPACE_TABS[nextIndex];
         keyboardFocus.current = next.id !== current.id;
         select(next.id); buttons.current.get(next.id)?.focus();
-      }}><item.icon size={17} aria-hidden="true" /></button>)}</nav>
+      }}/>)}</nav>
     <div id={`${id}-content`} role="tabpanel" aria-labelledby={`${id}-${current.id}`} className={`right-scroll${current.id === 'browser' ? ' browser-scroll' : ''}`}>{children}</div>
   </aside></ActivityFocusContext.Provider>;
 }

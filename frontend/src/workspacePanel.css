@@ -1,11 +1,11 @@
-.workspace-panel .workspace-panel-heading {display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:15px 14px 11px;flex-shrink:0;}
+.workspace-panel .workspace-panel-heading {display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:12px 12px 9px;flex-shrink:0;}
 .workspace-panel-heading>div {min-width:0;}
 .workspace-panel-heading h2 {font-size:14px;line-height:1.5;font-weight:550;margin:0;}
-.workspace-panel-heading p {font-size:12px;line-height:1.5;margin:4px 0 0;color:var(--muted);}
-.workspace-panel-heading>.icon-button {width:28px;height:28px;flex-shrink:0;margin-top:-2px;}
+.workspace-panel-heading p {font-size:12px;line-height:1.45;margin:3px 0 0;color:var(--muted);}
+.workspace-panel-heading>.icon-button {--control-size:32px;width:32px;height:32px;flex-shrink:0;}
 .right-panel.workspace-panel>nav.workspace-panel-tabs {display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px;padding:0 12px 9px;overflow:visible;flex-shrink:0;}
-.right-panel.workspace-panel>nav.workspace-panel-tabs>button {display:flex;align-items:center;justify-content:center;height:34px;padding:7px;border:1px solid transparent;border-radius:7px;color:var(--secondary);transition:background-color .15s,color .15s;}
-.right-panel.workspace-panel>nav.workspace-panel-tabs>button[aria-selected=true] {color:var(--accent);background:var(--accent-soft);border-color:var(--accent-border);}
+.right-panel.workspace-panel>nav.workspace-panel-tabs>button {position:relative;display:flex;align-items:center;justify-content:center;height:36px;padding:7px;border:1px solid var(--control-border);border-radius:var(--control-radius);background:var(--surface);color:var(--secondary);transition:background-color .15s,color .15s;}
+.right-panel.workspace-panel>nav.workspace-panel-tabs>button[aria-selected=true] {color:var(--accent);background:var(--accent-soft);border-color:var(--accent);}
 .workspace-panel-tabs>button:focus-visible {outline:2px solid var(--accent);outline-offset:2px;}
 .workspace-panel .right-scroll {padding:14px 12px;}
 .right-panel.workspace-panel.with-browser {min-width:0;max-width:calc(100vw - 30px);}
