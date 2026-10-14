@@ -27,6 +27,49 @@ The current font, warm palettes, roomy composer, pane sizes and saved layout
 preferences are preserved. HUD and reduced-motion behavior remain in place. No
 new operational cards, destinations or appearance settings are introduced.
 
+## Tray and workspace lifecycle
+
+Open Forge, Stop all agents and Quit Forge use separate, coalesced workers so a
+slow window or coordinator operation cannot block the tray menu. Open restores
+and focuses the existing workspace through the bounded native dispatcher. Quit
+claims teardown once, removes the tray icon before coordinator cleanup, and
+preserves browser, service and window cleanup ordering.
+
+The tray registers after the native workspace exists. Its readiness callback
+checks shutdown again so a delayed icon cannot appear after Quit. Late window
+load and visibility callbacks leave a closed host alone. A pending restart keeps
+its existing cancellation requirement, with a fixed tray notice and Open action.
+
+Closing the workspace still hides it to the tray. If the native workspace is
+actually destroyed unexpectedly, its closed event invalidates the bridge and stops the owned
+coordinator instead of leaving an unusable tray icon. Native shutdown waits for
+the cleanup owner before the desktop process returns.
+
+Browser script and screenshot operations also wait for the managed callback to
+finish before returning a usable result. Both waits share the original timeout
+budget. Cancellation, failed callbacks and incomplete results retain explicit
+failure outcomes; they do not indicate that repeating a submitted action is safe.
+An unfinished capture retains its task and image stream. Further captures on
+that page wait for a known outcome, and a cancelled queued callback cannot start
+a capture after its stream has been retired.
+
+Regression fixtures cover a stalled Open action followed by Quit, concurrent
+Quit requests, repeated tray clicks, close cancellation, and lost-window cleanup.
+The packaged Windows check exercises the real close event and tray shutdown.
+
+## Native verification diagnostics
+
+The disposable Windows smoke check records a bounded final observation when
+waiting for an owned standalone preview. Diagnostics contain fixed booleans and
+an iteration count, including visibility, ownership, valid matching bounds and
+stable samples. They contain no identifiers, coordinates, paths, URLs, titles,
+chat text, credentials or raw exception messages.
+
+The existing readiness deadline, two-sample check, ownership restrictions and
+nonzero-process-exit rejection remain in force. This diagnostic addition does
+not claim to fix the underlying preview-readiness failure; fresh Windows checks
+are required to establish its cause and verify the final release.
+
 ## Validation
 
 Checks cover Tools grouping and keyboard navigation, project selection cues,

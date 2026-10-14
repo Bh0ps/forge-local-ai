@@ -212,8 +212,14 @@ def test_deadline_checked_after_last_decode_and_identity_or_permission_read(tran
 
 def test_timeout_terminates_only_exact_owned_process(monkeypatch):
     native, process = FakeNative(), FakeProcess(done=False)
+    clock = [0.0]
+    monkeypatch.setattr(capture.time, 'monotonic', lambda: clock[0])
+    def launch(*args, **kwargs):
+        # Expire after the owned process exists, independently of fixture I/O.
+        clock[0] = 1.0
+        return process
     monkeypatch.setattr(capture, '_Native', lambda: native)
-    monkeypatch.setattr(capture.subprocess, 'Popen', lambda *a, **k: process)
+    monkeypatch.setattr(capture.subprocess, 'Popen', launch)
     result = capture.capture_window(1234, TARGET[0], BOUNDS, timeout=.025)
     assert result.reason == 'timeout' and result.png is None
     assert process.terminations == 1
@@ -223,10 +229,14 @@ def test_timeout_terminates_only_exact_owned_process(monkeypatch):
 
 def test_unconfirmed_owned_exit_retains_gate_and_files_until_exit(monkeypatch):
     native, process = FakeNative(), FakeProcess(done=False)
+    clock = [0.0]
+    monkeypatch.setattr(capture.time, 'monotonic', lambda: clock[0])
     paths = []
     process.terminate = lambda: setattr(process, 'terminations', process.terminations + 1)
     def launch(command, **kwargs):
-        paths.append(Path(command[-1])); return process
+        paths.append(Path(command[-1]))
+        clock[0] = 1.0
+        return process
     monkeypatch.setattr(capture, '_Native', lambda: native)
     monkeypatch.setattr(capture.subprocess, 'Popen', launch)
     result = capture.capture_window(1234, TARGET[0], BOUNDS, timeout=.02)
@@ -238,6 +248,22 @@ def test_unconfirmed_owned_exit_retains_gate_and_files_until_exit(monkeypatch):
     assert capture._GATE.acquire(timeout=2)
     capture._GATE.release()
     assert not paths[0].exists()
+
+
+def test_deadline_expiring_during_setup_never_launches_or_terminates_a_process(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(capture.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(capture, '_Native', FakeNative)
+    original_write = capture._write
+    def write(*args):
+        original_write(*args)
+        clock[0] = 1.0
+    monkeypatch.setattr(capture, '_write', write)
+    monkeypatch.setattr(capture.subprocess, 'Popen', lambda *args, **kwargs: pytest.fail('Expired setup must not launch'))
+    result = capture.capture_window(1234, TARGET[0], BOUNDS, timeout=.025)
+    assert result.reason == 'timeout' and result.png is None
+    assert capture._GATE.acquire(blocking=False)
+    capture._GATE.release()
 
 
 @pytest.mark.parametrize('mutation', [lambda d: d.update(nonce='b'*64), lambda d: d.update(pid=True),
