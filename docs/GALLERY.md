@@ -2,6 +2,12 @@
 
 These images and animations use an isolated demo workspace with synthetic data.
 
+## Forge 5.1.27 Usage
+
+![Scoped totals, a dated daily chart and readable model accounting in the dark workspace](../assets/demos/forge-5.1.27-usage-dark.png)
+
+![Usage in a narrow light workspace with text enlarged to 150%](../assets/demos/forge-5.1.27-usage-narrow-light.png)
+
 ## Forge 5.1.22 Settings
 
 ![Compact Settings search preserving the open Models page in the dark workspace](../assets/demos/forge-5.1.22-settings-search-dark.png)

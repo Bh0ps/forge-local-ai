@@ -1,14 +1,15 @@
 <p align="center"><img src="assets/forge.svg" width="88" alt="Forge"></p>
 
-# Forge 5.1.25
+# Forge 5.1.27
 
-This Windows preview makes Library items and instructions easier to read, with
-compact filters and clear loading, failure and empty states. It retains the
+This Windows preview makes Usage clearer, with readable totals, scoped refresh
+and retry states, and a daily chart that explains its date range. It retains the
+Library's compact filters and readable instructions, along with the
 chat focus and tray fixes, verifies Windows callback completion, and preserves
 compact workspace tabs, grouped composer, searchable Settings and Forge's font
 and warm palettes.
 Desktop actions share your Windows focus and pointer; this preview does not
-provide an isolated desktop. Read [the patch notes](docs/FORGE_5125.md),
+provide an isolated desktop. Read [the patch notes](docs/FORGE_5127.md),
 [the computer-tool guide](docs/FORGE_5110.md), [the chat and engine guide](docs/FORGE_514.md) and
 [5.1 recovery guidance](docs/FORGE_51.md).
 
@@ -18,18 +19,18 @@ Forge is a local AI workspace for building apps, exploring ideas and working wit
 files on your computer. It brings chat, Builder, previews and project tools into
 one Windows app. Optional OpenRouter guidance helps with planning and review.
 
-**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.25/Forge-5.1.25-Setup.exe)**
-· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.25)
-· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.25/Forge-5.1.25-Portable.zip)
-· [Publisher record](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.25/Forge-update-proof.json)
-· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.25/SHA256SUMS.txt)
+**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.27/Forge-5.1.27-Setup.exe)**
+· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.27)
+· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.27/Forge-5.1.27-Portable.zip)
+· [Publisher record](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.27/Forge-update-proof.json)
+· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.27/SHA256SUMS.txt)
 
 The [previous 5.1.24 preview](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.24) remains available.
 
 ## Install
 
 1. Install [Ollama](https://ollama.com/download/windows) and choose a local model.
-2. Download **Forge-5.1.25-Setup.exe** and run it after closing Forge.
+2. Download **Forge-5.1.27-Setup.exe** and run it after closing Forge.
 3. Open Forge and follow the setup wizard to connect your model.
 
 Windows 10/11, 64-bit, with WebView2 is required. Python, Node.js and the source
@@ -61,11 +62,11 @@ Ollama and model downloads are separate. No cloud account is required.
 
 ## A look inside
 
-These Library screenshots use an isolated workspace with synthetic data.
+These Usage screenshots use an isolated workspace with synthetic data.
 
-![Library filters, skill provenance and outlined controls in the dark workspace](assets/demos/forge-5.1.25-library-dark.png)
+![Scoped token totals and daily usage in the dark workspace](assets/demos/forge-5.1.27-usage-dark.png)
 
-![Readable skill instructions in a narrow light window with text enlarged to 150%](assets/demos/forge-5.1.25-library-instructions-narrow-light.png)
+![Usage controls in a narrow light window with text enlarged to 150%](assets/demos/forge-5.1.27-usage-narrow-light.png)
 
 ## Connect a browser or Telegram
 

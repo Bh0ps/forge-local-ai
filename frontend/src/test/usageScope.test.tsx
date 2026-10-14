@@ -48,7 +48,7 @@ describe('Usage response ownership', () => {
   it.each(['period', 'project', 'timezone'])('does not publish an earlier %s scope', async boundary => {
     const owner = heldBridge(); const view = render(<UsagePage projects={projects} models={models} timezone="UTC" />);
     const older = await batch(owner.pending);
-    if (boundary === 'period') fireEvent.click(screen.getByRole('button', { name: 'Day', exact: true }));
+    if (boundary === 'period') fireEvent.click(screen.getByRole('button', { name: 'Day' }));
     if (boundary === 'project') fireEvent.change(screen.getByRole('combobox', { name: 'Filter usage by project' }), { target: { value: 'fixture-project' } });
     if (boundary === 'timezone') view.rerender(<UsagePage projects={projects} models={models} timezone="Europe/Dublin" />);
     const current = await batch(owner.pending, 4);
@@ -152,6 +152,31 @@ describe('Usage response ownership', () => {
 });
 
 describe('Usage presentation', () => {
+  it('retains the selected filter identity when its model or project becomes unavailable', async () => {
+    const owner = heldBridge(); const view = render(<UsagePage projects={projects} models={models} timezone="UTC" />);
+    await answer(await batch(owner.pending), response());
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter usage by model' }), { target: { value: 'fixture-b' } });
+    await answer(await batch(owner.pending, 4), response(500));
+    fireEvent.change(screen.getByRole('combobox', { name: 'Filter usage by project' }), { target: { value: 'fixture-project' } });
+    await answer(await batch(owner.pending, 8), response(900));
+    view.rerender(<UsagePage projects={[]} models={[]} timezone="UTC" />);
+    expect((screen.getByRole('combobox', { name: 'Filter usage by model' }) as HTMLSelectElement).value).toBe('fixture-b');
+    expect((screen.getByRole('combobox', { name: 'Filter usage by project' }) as HTMLSelectElement).value).toBe('fixture-project');
+    expect(screen.getByRole('option', { name: 'fixture-b (unavailable)' })).toBeTruthy();
+    expect(screen.getByRole('option', { name: 'Fixture project (unavailable)' })).toBeTruthy();
+    expect(inputText()).toBe('900'); expect(owner.call).toHaveBeenCalledTimes(12);
+  });
+
+  it('scales and labels only the latest 31 recorded days while retaining full-period totals', async () => {
+    const owner = heldBridge(); render(<UsagePage projects={projects} models={models} timezone="UTC" />);
+    const daily = Array.from({ length: 32 }, (_, index) => ({ date: `2026-${index < 31 ? '08' : '09'}-${String(index < 31 ? index + 1 : 1).padStart(2, '0')}`, input_tokens: index ? 100 : 100000, output_tokens: 0 }));
+    await answer(await batch(owner.pending), response(103100, 0, 32, { daily }));
+    expect(document.querySelectorAll('.chart-column')).toHaveLength(31);
+    expect(screen.getByText('Latest 31 recorded days')).toBeTruthy();
+    expect((document.querySelector('.bar-stack') as HTMLElement).style.height).toBe('100%');
+    expect(inputText()).toBe('103,100');
+  });
+
   it('distinguishes pending and unavailable totals from an acknowledged zero result and retries', async () => {
     const owner = heldBridge(); render(<UsagePage projects={projects} models={models} timezone="UTC" />);
     const reads = await batch(owner.pending);
@@ -209,6 +234,6 @@ describe('Usage presentation', () => {
     act(() => within(group).getByRole('button', { name: 'Day' }).focus());
     await userEvent.keyboard('{Enter}'); await batch(owner.pending, 4);
     expect(within(group).getByRole('button', { name: 'Day' }).getAttribute('aria-pressed')).toBe('true');
-    expect(owner.call.mock.calls.slice(4).map(([, data]) => data.period)).toEqual(['day', 'day', 'month', 'all']);
+    expect(owner.call.mock.calls.slice(4).map(([, data]) => data?.period)).toEqual(['day', 'day', 'month', 'all']);
   });
 });
