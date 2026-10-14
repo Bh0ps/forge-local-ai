@@ -28,7 +28,7 @@ def validate_api_key(value):
 
 
 def probe_provider(service, data):
-    from forge_engine_auth import EngineAccessFailure
+    from forge_engine_auth import EngineAccessFailure, protocol_kind
     from forge_provider_metadata import (ProviderProbeRevoked, fetch_json, fetch_provider_metadata, require_current,
         DockerModelRunnerMetadataInvalid, docker_model_runner_endpoint, docker_model_runner_catalog,
         docker_model_runner_facts)
@@ -50,8 +50,10 @@ def probe_provider(service, data):
         saved = (dict(kind='ollama', url=service.providers.core.base) if identifier == 'ollama'
                  else service.store.entity('providers', identifier))
     preset = draft.get('preset_id', saved.get('preset_id') if saved else None)
+    saved_kind = saved.get('kind') if saved else None
+    saved_protocol = protocol_kind(saved_kind) if isinstance(saved_kind, str) else None
     # Old editors may change protocol without knowing about saved presets.
-    if 'preset_id' not in draft and saved and saved.get('kind') != draft['kind']:
+    if 'preset_id' not in draft and saved and saved_protocol != draft['kind']:
         preset = None
     preset = validate_preset(preset, draft['kind'])
     if preset == 'docker-model-runner':
@@ -71,7 +73,7 @@ def probe_provider(service, data):
     require_current(cancel, current)
     if not token and saved:
         # A key saved for one endpoint must never be forwarded to an edited one.
-        if (saved.get('kind') == draft['kind'] and saved.get('url', '').rstrip('/') == url
+        if (saved_protocol == draft['kind'] and saved.get('url', '').rstrip('/') == url
                 and saved.get('credential_ref')):
             if not service.vault:
                 raise EngineAccessFailure('authentication')

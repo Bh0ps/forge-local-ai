@@ -1,12 +1,12 @@
 <p align="center"><img src="assets/forge.svg" width="88" alt="Forge"></p>
 
-# Forge 5.1.15
+# Forge 5.1.16
 
-This Windows preview adds a Docker Model Runner connection preset with a verified
-local catalog and a direct setup guide. It preserves Forge's warm chat layout,
-composer modes, project snapshot reads and permission safeguards.
+This Windows preview fixes connection testing and saving for older compatible
+provider aliases, preserving saved authentication at an unchanged endpoint.
+It retains Docker Model Runner, Forge's warm chat layout and permission safeguards.
 Desktop actions share your Windows focus and pointer; this preview does not
-provide an isolated desktop. Read [the patch notes](docs/FORGE_5115.md),
+provide an isolated desktop. Read [the patch notes](docs/FORGE_5116.md),
 [the computer-tool guide](docs/FORGE_5110.md), [the chat and engine guide](docs/FORGE_514.md) and
 [5.1 recovery guidance](docs/FORGE_51.md).
 
@@ -16,18 +16,18 @@ Forge is a local AI workspace for building apps, exploring ideas and working wit
 files on your computer. It brings chat, Builder, previews and project tools into
 one Windows app. Optional OpenRouter guidance helps with planning and review.
 
-**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.15/Forge-5.1.15-Setup.exe)**
-· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.15)
-· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.15/Forge-5.1.15-Portable.zip)
-· [Publisher record](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.15/Forge-update-proof.json)
-· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.15/SHA256SUMS.txt)
+**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.16/Forge-5.1.16-Setup.exe)**
+· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.16)
+· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.16/Forge-5.1.16-Portable.zip)
+· [Publisher record](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.16/Forge-update-proof.json)
+· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.16/SHA256SUMS.txt)
 
-The [previous 5.1.14 preview](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.14) remains available.
+The [previous 5.1.15 preview](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.15) remains available.
 
 ## Install
 
 1. Install [Ollama](https://ollama.com/download/windows) and choose a local model.
-2. Download **Forge-5.1.15-Setup.exe** and run it after closing Forge.
+2. Download **Forge-5.1.16-Setup.exe** and run it after closing Forge.
 3. Open Forge and follow the setup wizard to connect your model.
 
 Windows 10/11, 64-bit, with WebView2 is required. Python, Node.js and the source

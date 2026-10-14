@@ -354,7 +354,7 @@ class ForgeService:
     def bootstrap(self):
         runs=self.store.runs(limit=200)
         from forge_workspace_ui import WorkspaceUI
-        return dict(version='5.1.15',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
+        return dict(version='5.1.16',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
                     chats=self.store.list_chats(),runs=runs,goals=[self.goal_view(goal,runs) for goal in self.store.active_goals()],
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -520,7 +520,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='5.1.15')
+                    self.update_manager=UpdateManager(self,current_version='5.1.16')
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)
@@ -1342,7 +1342,9 @@ class ForgeService:
         from forge_provider_probe import validate_api_key,validate_endpoint
         from forge_provider_presets import validate_preset
         url=validate_endpoint(data.get('url','')); data['url']=url
-        if 'preset_id' not in supplied and previous and previous.get('kind')!=data['kind']:
+        previous_kind=previous.get('kind')
+        same_protocol=isinstance(previous_kind,str) and protocol_kind(previous_kind)==protocol_kind(data['kind'])
+        if 'preset_id' not in supplied and previous and not same_protocol:
             data.pop('preset_id',None)
         if 'preset_id' in data: data['preset_id']=validate_preset(data['preset_id'],protocol_kind(data['kind']))
         for key in ('token','api_key'):
@@ -1352,7 +1354,7 @@ class ForgeService:
             raise ValueError('Use a short resource identifier.')
         if 'independent_resource' in data and type(data['independent_resource']) is not bool: raise ValueError('Independent resource must be true or false.')
         profile={k:v for k,v in data.items() if k in allowed}
-        if previous and (previous.get('kind')!=data['kind'] or previous.get('url','').rstrip('/')!=url.rstrip('/')):
+        if previous and (not same_protocol or previous.get('url','').rstrip('/')!=url.rstrip('/')):
             profile.pop('credential_ref',None)
         credential=None;before=None
         if data.get('token') or data.get('api_key'):
