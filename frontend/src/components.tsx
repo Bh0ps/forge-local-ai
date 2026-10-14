@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useEffect, useId, useRef, useState } from 'react';
+import { cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { Brain, Check, ChevronDown, Copy, Info, Search, X, Eye, Wrench, LoaderCircle, ArrowUpRight } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import { api, bytesLabel, friendlyModel, isNative, native, tokenLabel } from './api';
@@ -9,8 +9,65 @@ import { composerModes } from './composerModes';
 import type { DraftCommandMode } from './persistentDraft';
 import './composerModes.css';
 
-export function IconButton({ label, children, onClick, disabled, active, className = '' }: { label: string; children: React.ReactNode; onClick?: () => void; disabled?: boolean; active?: boolean; className?: string }) {
-  return <button type="button" className={`icon-button ${active ? 'selected' : ''} ${className}`} aria-label={label} title={label} aria-pressed={active} onClick={onClick} disabled={disabled}>{children}</button>;
+export function useControlLabel(text: string, enabled = true) {
+  const target = useRef<HTMLElement | null>(null), label = useRef<HTMLSpanElement>(null);
+  const hovered = useRef(false), focused = useRef(false);
+  const [shown, setShown] = useState(false), [dismissed, setDismissed] = useState(false);
+  const [placement, setPlacement] = useState({shift: 0, below: false, ready: false});
+  const visible = enabled && shown && !dismissed;
+  const dismiss = () => { if (enabled) setDismissed(true); };
+  const reveal = (element: HTMLElement) => {
+    if (!enabled) return;
+    target.current = element;
+    setPlacement({shift: 0, below: false, ready: false});
+    setShown(true);
+  };
+  useLayoutEffect(() => {
+    if (!visible || !target.current || !label.current) return;
+    const anchor = target.current.getBoundingClientRect(), size = label.current.getBoundingClientRect();
+    const left = anchor.left + (anchor.width - size.width) / 2;
+    const bounded = Math.max(8, Math.min(left, window.innerWidth - size.width - 8));
+    setPlacement({shift: bounded - left, below: anchor.top - size.height - 8 < 8, ready: true});
+  }, [visible, text]);
+  useEffect(() => {
+    if (enabled) return;
+    hovered.current = focused.current = false;
+    setShown(false); setDismissed(false);
+  }, [enabled]);
+  useEffect(() => {
+    if (!visible) return;
+    const hidden = () => { if (document.visibilityState === 'hidden') dismiss(); };
+    const hostHidden = (event: Event) => { if ((event as CustomEvent).detail?.visible === false) dismiss(); };
+    window.addEventListener('blur', dismiss); window.addEventListener('resize', dismiss);
+    window.addEventListener('scroll', dismiss, true); window.addEventListener('forge:visibility', hostHidden);
+    document.addEventListener('visibilitychange', hidden);
+    return () => {
+      window.removeEventListener('blur', dismiss); window.removeEventListener('resize', dismiss);
+      window.removeEventListener('scroll', dismiss, true); window.removeEventListener('forge:visibility', hostHidden);
+      document.removeEventListener('visibilitychange', hidden);
+    };
+  }, [visible]);
+  return {
+    events: {
+      onMouseEnter: (event: React.MouseEvent<HTMLElement>) => { if (!enabled) return; hovered.current = true; reveal(event.currentTarget); },
+      onMouseLeave: () => { if (!enabled) return; hovered.current = false; if (!focused.current) { setShown(false); setDismissed(false); } },
+      onFocus: (event: React.FocusEvent<HTMLElement>) => { if (!enabled) return; focused.current = true; reveal(event.currentTarget); },
+      onBlur: () => { if (!enabled) return; focused.current = false; if (!hovered.current) { setShown(false); setDismissed(false); } },
+      onKeyDown: (event: React.KeyboardEvent<HTMLElement>) => {
+        if (visible && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); dismiss(); }
+      },
+    },
+    dismiss,
+    content: visible ? <span ref={label} className="control-label" data-side={placement.below ? 'below' : 'above'} aria-hidden="true"
+      style={{'--control-label-shift': `${placement.shift}px`, visibility: placement.ready ? 'visible' : 'hidden'} as CSSProperties}
+      onPointerDown={event => { event.preventDefault(); event.stopPropagation(); }}
+      onClick={event => { event.preventDefault(); event.stopPropagation(); }}>{text}</span> : null,
+  };
+}
+export function IconButton({ label, children, onClick, disabled, active, className = '', showLabel = false, labelText }: { label: string; children: React.ReactNode; onClick?: () => void; disabled?: boolean; active?: boolean; className?: string; showLabel?: boolean; labelText?: string }) {
+  const hint = useControlLabel(labelText || label, showLabel && !disabled);
+  return <button type="button" className={`icon-button ${showLabel ? 'labeled-control' : ''} ${active ? 'selected' : ''} ${className}`} aria-label={label} title={!showLabel || disabled ? label : undefined} aria-pressed={active}
+    {...hint.events} onClick={() => { hint.dismiss(); onClick?.(); }} disabled={disabled}>{children}{hint.content}</button>;
 }
 export function Modal({ title, children, close, wide = false }: { title: string; children: React.ReactNode; close: () => void; wide?: boolean }) {
   useDialogReadiness();

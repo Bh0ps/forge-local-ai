@@ -1,12 +1,12 @@
 <p align="center"><img src="assets/forge.svg" width="88" alt="Forge"></p>
 
-# Forge 5.1.20
+# Forge 5.1.21
 
-This Windows preview keeps keyboard focus on Activity when you open it from
-Desktop evidence. It retains compact operation labels, reliable model metadata,
-connection recovery, build guidance and Forge's warm workspace styling.
+This Windows preview begins a subtle chat refinement with outlined everyday
+controls, visible hover and focus labels, and a roomier grouped composer. It keeps
+Forge's warm palettes, current font, reliable tools and project workflows.
 Desktop actions share your Windows focus and pointer; this preview does not
-provide an isolated desktop. Read [the patch notes](docs/FORGE_5120.md),
+provide an isolated desktop. Read [the patch notes](docs/FORGE_5121.md),
 [the computer-tool guide](docs/FORGE_5110.md), [the chat and engine guide](docs/FORGE_514.md) and
 [5.1 recovery guidance](docs/FORGE_51.md).
 
@@ -16,18 +16,18 @@ Forge is a local AI workspace for building apps, exploring ideas and working wit
 files on your computer. It brings chat, Builder, previews and project tools into
 one Windows app. Optional OpenRouter guidance helps with planning and review.
 
-**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.20/Forge-5.1.20-Setup.exe)**
-· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.20)
-· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.20/Forge-5.1.20-Portable.zip)
-· [Publisher record](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.20/Forge-update-proof.json)
-· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.20/SHA256SUMS.txt)
+**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.21/Forge-5.1.21-Setup.exe)**
+· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.21)
+· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.21/Forge-5.1.21-Portable.zip)
+· [Publisher record](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.21/Forge-update-proof.json)
+· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.21/SHA256SUMS.txt)
 
-The [previous 5.1.19 preview](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.19) remains available.
+The [previous 5.1.20 preview](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.20) remains available.
 
 ## Install
 
 1. Install [Ollama](https://ollama.com/download/windows) and choose a local model.
-2. Download **Forge-5.1.20-Setup.exe** and run it after closing Forge.
+2. Download **Forge-5.1.21-Setup.exe** and run it after closing Forge.
 3. Open Forge and follow the setup wizard to connect your model.
 
 Windows 10/11, 64-bit, with WebView2 is required. Python, Node.js and the source
@@ -59,62 +59,13 @@ Ollama and model downloads are separate. No cloud account is required.
 
 ## A look inside
 
-These images and animations use an isolated demo workspace with synthetic data.
+These screenshots use an isolated workspace with synthetic data.
 
-![Compact recorded desktop operation in the dark workspace, using synthetic data](assets/demos/forge-5.1.19-desktop-operation-dark.png)
+![Outlined chat controls and grouped composer in the dark workspace](assets/demos/forge-5.1.21-composer-dark.png)
 
-![Queued desktop operation in a narrow light workspace, using synthetic data](assets/demos/forge-5.1.19-desktop-operation-light.png)
+![Grouped composer in a narrow light workspace with enlarged text at 150%](assets/demos/forge-5.1.21-composer-narrow-light.png)
 
-![Docker Model Runner setup and unreported model facts in the dark editor](assets/demos/forge-5.1.15-docker-setup-dark.png)
-
-![Docker setup in the light editor at a narrow window width](assets/demos/forge-5.1.15-docker-setup-light.png)
-
-![A single exact retained-helper count in the dark workspace](assets/demos/forge-5.1.13-helper-count-dark.png)
-
-![Keyboard model selection in a narrow light workspace](assets/demos/forge-5.1.13-model-controls-light.png)
-
-![Retained helper activity in the dark workspace, using synthetic data](assets/demos/forge-5.1.12-retained-helper-dark.png)
-
-![The scoped target cue in a narrow light Browser overlay, using synthetic data](assets/demos/forge-5.1.12-browser-target-light.png)
-
-![Forge composer with a selected goal workflow and an ordinary prompt](assets/demos/forge-5.1.4-goal-mode.png)
-
-![Enlarged saved desktop evidence in the dark workspace, using synthetic data](assets/demos/forge-5.1.11-desktop-zoom-dark.png)
-
-![Textgen setup in a narrow light workspace, using synthetic data](assets/demos/forge-5.1.11-textgen-light.png)
-
-![Forge retaining an earlier reading position in a saved reasoning disclosure, using synthetic test data](assets/demos/forge-5.1.8-reasoning-dark.png)
-
-![Forge reasoning controls on a narrow light workspace with enlarged text, using synthetic test data](assets/demos/forge-5.1.8-reasoning-light.png)
-
-![Forge connection editor with primary controls and compact advanced settings](assets/demos/forge-5.1.6-engine-dark.png)
-
-![Forge connection editor in the light workspace](assets/demos/forge-5.1.6-engine-light.png)
-
-![Forge explaining a helper context pause while local work continues](assets/demos/forge-5.1.3-context-pause.png)
-
-![Forge checking saved work before a verified restart](assets/demos/forge-5.1.3-restart-check.png)
-
-![Forge chat with saved task activity, skills and reference notes](assets/demos/forge-5.1.2-workspace-dark.png)
-
-![Forge connection setup with a verified tool preview](assets/demos/forge-5.1.2-connections-dark.png)
-
-![Forge connection setup on a narrow light workspace](assets/demos/forge-5.1.2-connections-light.png)
-
-![Forge workspace details scoped to the current chat](assets/demos/forge-5.1.2-activity.png)
-
-<details>
-<summary>Watch the workspace and Builder in action</summary>
-
-Attach guidance for your next message:
-
-![Selecting skills and reference notes in Forge](assets/demos/forge-5.1.2-context.gif)
-
-Move from the brief to the preview and checks:
-
-![Forge Builder brief, preview and checks](assets/demos/forge-5.1.2-builder.gif)
-
-</details>
+[Earlier screenshots and walkthroughs](docs/GALLERY.md) retain their original revision identities.
 
 ## Connect a browser or Telegram
 
