@@ -1,5 +1,5 @@
 #define AppName "Forge"
-#define AppVersion "5.1.13"
+#define AppVersion "5.1.14"
 #ifndef StageDir
 #define StageDir "dist\Forge"
 #endif
@@ -18,7 +18,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=release
-OutputBaseFilename=Forge-5.1.13-Setup
+OutputBaseFilename=Forge-5.1.14-Setup
 SetupIconFile=assets\forge.ico
 UninstallDisplayIcon={app}\Forge.exe
 LicenseFile=LICENSE
