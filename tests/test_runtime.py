@@ -233,11 +233,12 @@ def bridge_class():
     # logging setup, WebView2 import, or native startup occurs in these tests.
     source = Path(__file__).resolve().parents[1] / 'desktop.py'
     tree = ast.parse(source.read_text(encoding='utf-8'), filename=str(source))
-    definitions = [node for node in tree.body if isinstance(node, ast.ClassDef)
-                   and node.name in ('_WindowUnavailable', 'Bridge')]
+    definitions = [node for node in tree.body
+                   if (isinstance(node, ast.ClassDef) and node.name in ('_WindowUnavailable', 'Bridge'))
+                   or (isinstance(node, ast.FunctionDef) and node.name == '_smoke_cleanup_marker')]
     namespace = {'Core': FakeCore, 'Jobs': Jobs, 'threading': threading,
                  'PairingAuthority': PairingAuthority, 'HostLifecycle': HostLifecycle, 'Path': Path,
-                 'log': logging.getLogger('forge-test')}
+                 'log': logging.getLogger('forge-test'), '_ACTIVE_SMOKE_CHECKPOINT': None}
     exec(compile(ast.Module(body=definitions, type_ignores=[]), str(source), 'exec'), namespace)
     return namespace['Bridge']
 

@@ -235,6 +235,33 @@ def _smoke_checkpoint(phase, *, error_type=None, error_category='none'):
         _ACTIVE_SMOKE_CHECKPOINT.write(phase, error_type=error_type, error_category=error_category)
 
 
+def _smoke_native_through(arguments, environment):
+    """Private isolation selector; standard smoke always exercises every stage."""
+    selected = [value for value in arguments
+                if value == '--smoke-native-through' or value.startswith('--smoke-native-through=')]
+    if not selected:
+        return 'full'
+    if (len(selected) != 1 or selected[0] not in
+            ('--smoke-native-through=research', '--smoke-native-through=builder')
+            or '--smoke-test' not in arguments or '--native-browser-smoke' not in arguments
+            or not environment.get('FORGE_DATA_DIR')):
+        raise ValueError('Native stage selection requires a disposable browser smoke.')
+    return selected[0].split('=', 1)[1]
+
+
+def _smoke_cleanup_marker(step, phase):
+    """Fixed, best-effort teardown evidence only for an active disposable smoke."""
+    if (_ACTIVE_SMOKE_CHECKPOINT is None
+            or step not in ('tray', 'dictation', 'pairing', 'emergency-stop', 'service',
+                            'server', 'lifecycle', 'hotkey', 'window', 'main-wait')
+            or phase not in ('started', 'completed')):
+        return
+    try:
+        log.info('Native smoke cleanup %s %s', step, phase)
+    except Exception:
+        pass  # Diagnostics cannot alter cleanup or its actual outcome.
+
+
 def _smoke_handoff_pristine(api):
     """Read owned disposable evidence; never changes native update authority."""
     from forge_native_controller import NativeController
@@ -1217,11 +1244,14 @@ class Bridge:
         complete = True
         def cleanup(name, callback):
             nonlocal complete
+            _smoke_cleanup_marker(name, 'started')
             try:
                 callback()
             except Exception as exc:
                 complete = False
                 log.warning('Owned cleanup %s failed: %s', name, type(exc).__name__)
+            else:
+                _smoke_cleanup_marker(name, 'completed')
         try:
             # Remove the icon before slow model/service cleanup. Tray callbacks
             # are workers, so this cannot strand the notification message pump.
@@ -1378,6 +1408,7 @@ def main():
     if '--forge-update-protocol-smoke' in sys.argv:
         from forge_native_handoff import protocol_smoke_entry
         return protocol_smoke_entry()
+    native_through = _smoke_native_through(sys.argv, os.environ)
     if '--smoke-test' in sys.argv and not os.getenv('FORGE_DATA_DIR'):
         raise ValueError('Native smoke requires an explicit disposable FORGE_DATA_DIR.')
     if '--smoke-test' in sys.argv:
@@ -1637,6 +1668,9 @@ def main():
                         finally:
                             fixture.shutdown()
                             fixture.server_close()
+                        if native_through == 'research':
+                            result['smoke_native_through'] = 'research'
+                            return
                         # Exercise the separately owned preview controller, not
                         # merely the research browser's shared DOM tools.
                         result['smoke_phase'] = 'builder-start'
@@ -1739,6 +1773,9 @@ def main():
                         finally:
                             manager.previews.stop(preview['id'])
                         result['native_preview']['stopped'] = manager.previews.status(preview['id'])['status']=='stopped' and preview['id'] not in manager.previews.active
+                        if native_through == 'builder':
+                            result['smoke_native_through'] = 'builder'
+                            return
                         # Plain plans can start previews without a Builder brief.
                         # The actual workspace must discover that identity while
                         # preview_open waits for its guarded native pane to appear.
@@ -1805,8 +1842,10 @@ def main():
         server_thread.join(timeout=5)
     finally:
         try:
+            _smoke_cleanup_marker('main-wait', 'started')
             if not api._finish_native_host():
                 raise RuntimeError('Forge could not complete owned cleanup.')
+            _smoke_cleanup_marker('main-wait', 'completed')
         finally:
             if sock:
                 sock.close()
