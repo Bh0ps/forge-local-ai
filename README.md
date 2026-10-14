@@ -3,8 +3,9 @@
 # Forge 5.1.24
 
 This Windows preview keeps keyboard focus with the current conversation during
-history loading and delayed steering replies. It retains the compact workspace
-tabs, grouped navigation, searchable Settings and Forge's font and warm palettes.
+history loading and delayed steering replies. It includes the tray reliability
+fixes, compact workspace tabs, grouped navigation, searchable Settings and
+Forge's font and warm palettes.
 Desktop actions share your Windows focus and pointer; this preview does not
 provide an isolated desktop. Read [the patch notes](docs/FORGE_5124.md),
 [the computer-tool guide](docs/FORGE_5110.md), [the chat and engine guide](docs/FORGE_514.md) and
