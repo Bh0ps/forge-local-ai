@@ -1,6 +1,6 @@
 import type { Settings } from './types';
 import { updateReadiness } from './updateReadiness';
-const readActions=new Set(('bootstrap commands projects chats get_chat attachment tasks runs poll plans plan_get unknown_actions goals goal_get spaces agents schedules usage providers provider_presets models show permission_overrides storage_info setup_status openrouter_status github_status github_repos channel_list channel_notifications memory_list memory_export update_status browser_status browser_native_status computer_view_state dictation_status runtime_status hf_status performance_status pending_questions skills skill_read skill_preview plugins catalogs catalog_discover integrations tools skills_search skills_resource_read skill_route_preview skill_versions builder_list builder_get builder_read build_brief_get builder_changes preview_status preview_logs preview_browser_status preview_browser_inspect preview_browser_capture preview_browser_diagnostics run_context_inspect usage_requests command_session_status command_session_read command_session_wait artifact_list artifact_get artifact_download document_list performance performance_benchmarks performance_calibrations draft_get submission_get builder_runtime_get ai_workflow_status ai_workflow_self_test_status ui_layout_get run_activity run_diagnostics_export host_status').split(' '));
+const readActions=new Set(('native_status native_inventory bootstrap commands projects chats get_chat attachment tasks runs poll plans plan_get unknown_actions goals goal_get spaces agents schedules usage providers provider_presets models show permission_overrides storage_info setup_status openrouter_status github_status github_repos channel_list channel_notifications memory_list memory_export update_status browser_status browser_native_status computer_view_state dictation_status runtime_status hf_status performance_status pending_questions skills skill_read skill_preview plugins catalogs catalog_discover integrations tools skills_search skills_resource_read skill_route_preview skill_versions builder_list builder_get builder_read build_brief_get builder_changes preview_status preview_logs preview_browser_status preview_browser_inspect preview_browser_capture preview_browser_diagnostics run_context_inspect usage_requests command_session_status command_session_read command_session_wait artifact_list artifact_get artifact_download document_list performance performance_benchmarks performance_calibrations draft_get submission_get builder_runtime_get ai_workflow_status ai_workflow_self_test_status ui_layout_get run_activity run_diagnostics_export host_status').split(' '));
 const persistenceActions=new Set(['draft_save','draft_confirm','ui_layout_save']);
 let pendingMutations=0;
 updateReadiness.register({kind:'requests',inspect:()=>({reasons:pendingMutations ? ['submission_pending'] : [],pending:pendingMutations,state:pendingMutations?'waiting':'ready'}),flushAndConfirm:async()=>pendingMutations ? {ok:false,reason:'submission_pending'} : {ok:true,receipts:[]}});
@@ -18,6 +18,8 @@ export interface NativeBridge {
   mode?(mode: string, expanded?: boolean): Promise<unknown>;
   pin?(value: boolean): Promise<unknown>;
   choose_project?(): Promise<unknown>;
+  choose_model_directory?(): Promise<unknown>;
+  choose_model_files?(): Promise<unknown>;
   screenshot?(): Promise<unknown>;
   copy?(text: string): Promise<unknown>;
   dictate?(data?: Record<string, unknown>): Promise<unknown>;
@@ -88,7 +90,7 @@ export async function native<T>(method: keyof NativeBridge, ...args: unknown[]):
 export async function saveSettings(delta: Partial<Settings>): Promise<Settings> { return api<Settings>('settings', delta); }
 export const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 export const listFrom = <T>(result: unknown, key: string): T[] => Array.isArray(result) ? result as T[] : ((result as Record<string, unknown> | null)?.[key] as T[] || []);
-export function friendlyModel(name: string): string { const segment = name.split('/').pop() || name; return segment.replace(/:latest$/, '').replace(/[-_]/g, ' '); }
+export function friendlyModel(name: string, displayName?: string): string { if(displayName?.trim())return displayName; const segment = name.split('/').pop() || name; return segment.replace(/:latest$/, '').replace(/[-_]/g, ' '); }
 export function tokenLabel(value: number) { return `${Math.round(value / 1024)}K`; }
 export function compactNumber(value: number) { return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(value || 0); }
 export function bytesLabel(value = 0) { return value ? `${(value / 1e9).toFixed(1)} GB` : ''; }

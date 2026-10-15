@@ -59,15 +59,21 @@ def build(args):
     if not (source / 'frontend/dist/index.html').is_file(): raise ValueError('Build the frontend before packaging.')
     shutil.copytree(source / 'frontend/dist', stage / 'frontend/dist')
     (stage / 'forge_release_policy.py').write_text('TRUSTED_PUBLISHERS = ' + repr(publisher()) + '\n', encoding='utf-8')
+    from scripts.fetch_native_runtimes import fetch as fetch_native
+    fetch_native(json.loads((stage/'native-runtime.lock.json').read_text(encoding='utf-8')),
+                 stage/'native-runtimes',work/'native-downloads')
     parts = (*version(args.version), 0)
     text = "VSVersionInfo(ffi=FixedFileInfo(filevers=%r,prodvers=%r,mask=0x3f,flags=0,OS=0x40004,fileType=0x1,subtype=0,date=(0,0)),kids=[StringFileInfo([StringTable('040904b0',[StringStruct('ProductName','Forge'),StringStruct('ProductVersion',%r),StringStruct('FileVersion',%r),StringStruct('FileDescription','Forge local AI workspace')])]),VarFileInfo([VarStruct('Translation',[1033,1200])])])" % (parts, parts, args.version, args.version)
     (stage / 'version-info.py').write_text(text, encoding='utf-8')
     common = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--noupx', '--distpath', work / 'dist',
               '--workpath', work / 'build', '--specpath', stage, '--version-file', stage / 'version-info.py']
     command = common + ['--onedir', '--windowed', '--name', 'Forge', '--icon', 'assets/forge.ico']
-    for value in ('frontend/dist;frontend/dist', 'assets;assets', 'browser-extension;browser-extension', 'LICENSE;.', 'THIRD_PARTY_NOTICES.md;.'):
+    for value in ('frontend/dist;frontend/dist', 'assets;assets', 'browser-extension;browser-extension', 'LICENSE;.', 'THIRD_PARTY_NOTICES.md;.',
+                  'native-runtimes;native-runtimes','native-models.lock.json;.',
+                  'forge_vendor/strata/LICENSE;forge_vendor/strata','forge_vendor/strata/ORIGIN.json;forge_vendor/strata',
+                  'forge_vendor/strata/expert-profile-coder.bin;forge_vendor/strata'):
         command += ['--add-data', value]
-    for module in ('ddgs', 'tzdata', 'faster_whisper', 'av', 'huggingface_hub', 'hf_xet', 'gguf', 'sounddevice', 'pystray', 'webview', 'playwright'):
+    for module in ('ddgs', 'tzdata', 'faster_whisper', 'av', 'huggingface_hub', 'hf_xet', 'gguf', 'sounddevice', 'pystray', 'webview', 'playwright','jinja2','regex'):
         command += ['--collect-all', module]
     command += ['--copy-metadata', 'huggingface-hub', '--copy-metadata', 'mcp', '--collect-submodules', 'mcp.client',
                 '--collect-submodules', 'mcp.shared', '--hidden-import', 'forge_release_policy', '--hidden-import', 'forge_updates',
@@ -216,7 +222,7 @@ def verify_downloaded(args):
             if entry.filename.casefold() in seen or (entry.external_attr >> 16) & 0o170000 == 0o120000:
                 raise ValueError('Archive contains duplicate paths or symbolic links.')
             seen.add(entry.filename.casefold()); total += entry.file_size
-            if total > 2 * 1024**3: raise ValueError('Archive expands beyond its permitted size.')
+            if total > MAX_EXPANDED_BYTES: raise ValueError('Archive expands beyond its permitted size.')
             target = destination / path
             if entry.is_dir(): target.mkdir(parents=True, exist_ok=True)
             else:

@@ -319,7 +319,7 @@ async def _get_bytes(client, url, limit, cancel=None, progress=None, consume=Non
 
 
 class UpdateManager:
-    def __init__(self, service, current_version='5.1.29', install_dir=None, trust_policy=None,
+    def __init__(self, service, current_version='5.2.0', install_dir=None, trust_policy=None,
                  client_factory=None, verifier=authenticode, *, proof_policy=None, _allow_installation=False):
         # The seed release authenticates downloads, but cannot yet acknowledge
         # every native workspace draft/attachment before shutting its host down.
@@ -841,6 +841,9 @@ class UpdateManager:
             # ModelManager.jobs is durable history; active owns its workers.
             active = getattr(manager, 'active', {}) if name == 'model_manager' else getattr(manager, 'jobs', {})
             if active: raise ValueError('Finish active model operations before updating.')
+        native_jobs=getattr(self.service,'native_jobs',None)
+        if native_jobs is not None and native_jobs.active():
+            raise ValueError('Finish the Forge model download or import before updating.')
         runtime = getattr(self.service, 'runtime', None)
         if runtime and getattr(runtime, '_validation', {}).get('state') == 'running':
             raise ValueError('Finish runtime profile validation before updating.')

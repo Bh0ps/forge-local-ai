@@ -1,0 +1,9 @@
+{
+  "llama_source": "47f5a64ae12833b9092c6c47b54aa9f310c4f6f1",
+  "cuda_compatibility": "https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html",
+  "notices": {
+    "ggml-LICENSE": "bcd8ec749126d45cb06737d0690295d73df4b6e7e194205bcf91190368f27285",
+    "llama.cpp-LICENSE": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+    "NVIDIA-CUDA-LICENSE.txt": "ad6f5853fba0ca0d159d0f58d49ae49830c2f8c93f7a92648b9ce90adb4c6ccd"
+  }
+}

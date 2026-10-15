@@ -26,6 +26,9 @@ alone are not a substitute for the full texts.
 | MCP Python SDK | MIT | https://github.com/modelcontextprotocol/python-sdk |
 | Hugging Face Hub | Apache-2.0 | https://github.com/huggingface/huggingface_hub |
 | GGUF Python / llama.cpp | MIT | https://github.com/ggml-org/llama.cpp |
+| Strata engine and selected tokenizer, template, pack and protocol support | MIT | https://github.com/mach10x/strata |
+| NVIDIA CUDA runtime and cuBLAS redistributables | NVIDIA software license | https://docs.nvidia.com/cuda/eula/ |
+
 | Playwright | Apache-2.0 | https://github.com/microsoft/playwright |
 | PyYAML | MIT | https://github.com/yaml/pyyaml |
 | pywebview | BSD-3-Clause | https://github.com/r0x0r/pywebview |
@@ -56,3 +59,10 @@ Docker engine images, system libraries and downloaded speech/model weights carry
 their own notices in their distributions. Optional runtime downloads are not
 relicensed by Forge. No model weights, third-party plugin source or personal data
 are included in this Git repository.
+
+Native Windows inference uses the exact artifacts and source identities in
+`native-runtime.lock.json`. The bundled workers share CUDA 13.4 libraries within
+the CUDA 13 major family. No system CUDA installation or driver installation is
+performed. Full native notices accompany the binaries; Strata attribution and
+the changes to its support modules are in `forge_vendor/strata/ORIGIN.json`.
+Model weights are downloaded separately and retain their own publisher licenses.

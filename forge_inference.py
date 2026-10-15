@@ -461,6 +461,18 @@ class ProviderPool:
         self.authority_epoch=0;self.authority_revisions={}
         self.metadata_wait_seconds=15
         self.stopped=stopped or (lambda: False)
+        self.native_runtime=None
+
+    def native(self):
+        with self.lock:
+            if self.native_runtime is None:
+                from forge_native import NativeRuntime
+                def busy():
+                    return any(r.get('status') not in ('completed','cancelled','failed','paused','interrupted')
+                        and r.get('settings',{}).get('provider_id','ollama') not in ('forge-native','openrouter')
+                        for r in self.store.runs())
+                self.native_runtime=NativeRuntime(self.store.home,busy=busy)
+            return self.native_runtime
 
     def models(self,identifier='ollama',refresh=False):
         return self._metadata(identifier or 'ollama', None, refresh)
@@ -572,7 +584,10 @@ class ProviderPool:
             previous=self.instances.get(identifier,{})
             if previous.get('signature')!=signature or previous.get('binding_generation',generation)!=generation:
                 base=config['url'].rstrip('/')
-                if config.get('kind')=='openrouter':
+                if config.get('kind')=='forge-native':
+                    from forge_native import NativeProvider
+                    provider=NativeProvider(self.native())
+                elif config.get('kind')=='openrouter':
                     from forge_openrouter import OpenRouterProvider
                     auth=BoundSavedProviderAuth(self.store,self.vault,identifier,config,revision=revision,
                         current_generation=lambda:self._generation_current(identifier,generation),stopped=self.stopped)
@@ -639,6 +654,8 @@ class ProviderPool:
                     cloud_guard()
                     data={**data,'_request_guard':cloud_guard}
                 if cancel.is_set(): raise ValueError('Inference cancelled before sending the request.')
+                if self.native_runtime is not None and provider_id!='forge-native' and not getattr(provider,'remote_inference',False):
+                    self.native_runtime.stop()
                 start=time.monotonic()
                 for packet in provider.generate(data,cancel):
                     message=packet.get('message',{})

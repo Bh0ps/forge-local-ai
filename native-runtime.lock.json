@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "platform": "windows-x64",
+  "strata_source": "1678de333d0e0711bc414ad992b640e1a37dd814",
+  "artifacts": [
+    {
+      "engine": "strata",
+      "version": "0.1.34",
+      "url": "https://github.com/Niko1221/Strata/releases/download/v0.1.34/strata-windows-x64.zip",
+      "size": 124412957,
+      "sha256": "20dc548a96803f025a8b12274a1a31fccb80462f47361e10f59eb972243ac523"
+    },
+    {
+      "engine": "llama-cpp",
+      "version": "b11655",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11655/llama-b11655-bin-win-cuda-13.4-x64.zip",
+      "size": 154569592,
+      "sha256": "612b1b08f41dcc17eef42525d0d3911b8ff53a3f383d2182b825754dfabc0642"
+    },
+    {
+      "engine": "llama-cpp",
+      "version": "b11655",
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b11655/cudart-llama-bin-win-cuda-13.4-x64.zip",
+      "size": 423535356,
+      "sha256": "738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668"
+    }
+  ],
+  "validation_artifacts": [
+    {
+      "engine": "strata",
+      "version": "0.1.34",
+      "url": "https://files.pythonhosted.org/packages/f3/91/bda39230b7a4c102bb724c21b50823efc63544490a885fea0b604911c0ab/nvidia_cublas-13.0.2.14-py3-none-win_amd64.whl",
+      "size": 401887280,
+      "sha256": "5f7a90456b1392db60e28719547ba6e00696bfa81304b6887cf287f9edf2c1d7"
+    },
+    {
+      "engine": "strata",
+      "version": "0.1.34",
+      "url": "https://files.pythonhosted.org/packages/b7/94/6b867483bec07da24ffa32736c79fabb94ef3a7af4d787a9d4a974868576/nvidia_cuda_runtime-13.0.96-py3-none-win_amd64.whl",
+      "size": 2927037,
+      "sha256": "f79298c8a098cec150a597c8eba58ecdab96e3bdc4b9bc4f9983635031740492"
+    }
+  ],
+  "layout": "shared-cuda13",
+  "llama_source": "47f5a64ae12833b9092c6c47b54aa9f310c4f6f1"
+}

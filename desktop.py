@@ -1146,6 +1146,25 @@ class Bridge:
         except Exception as exc:
             return {'error': str(exc)}
 
+    def choose_model_directory(self):
+        try:
+            import webview
+            with self._native_operation():
+                paths=self._window.create_file_dialog(webview.FileDialog.FOLDER)
+            return {'path':str(paths[0])} if paths else {'cancelled':True}
+        except Exception:
+            return {'error':'The model directory chooser could not open. Enter its path and retry.'}
+
+    def choose_model_files(self):
+        try:
+            import webview
+            with self._native_operation():
+                paths=self._window.create_file_dialog(webview.FileDialog.OPEN,allow_multiple=True,
+                    file_types=('GGUF models (*.gguf)',))
+            return {'paths':list(map(str,paths))} if paths else {'cancelled':True}
+        except Exception:
+            return {'error':'The model file chooser could not open. Enter the GGUF paths and retry.'}
+
     def dictation(self, action, data=None):
         return self.call('dictation_' + str(action), data)
 

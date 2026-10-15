@@ -1,0 +1,17 @@
+{
+  "repository": "https://github.com/mach10x/strata",
+  "commit": "1678de333d0e0711bc414ad992b640e1a37dd814",
+  "compatible_engine_source": "eb8bb8bcd90d5cf3930dc83782ce6001df71df67",
+  "license": "MIT",
+  "original_sha256": {
+    "tools/gguf_reader.py": "a93fd735d956dd8415314888e55f281f653573c21a5f2006f44982016f6926a2",
+    "tools/strata_tokenizer.py": "e19a8c3c0ee672e857135c277be74bdb0acf810cf7a7c763984efeda36f3ee7f",
+    "serve/frontend.py": "ade25b19515533b0755de497e911c622b6fc6a24ed049005c5cf3ea28d251394",
+    "tools/iq_pack.py": "6187d9dec255974b602cc4b4b9186799882fab366f16784293f7898e5f07e04f",
+    "LICENSE": "d287f56f89f7ca62ded62124d5741c4e858bce5ee30d45f39bb4469ea63f5188",
+    "data/expert-profile-coder.bin": "a514661124d5305effe9c1bcecff7dc069af398b2b19ff9d11628a2cad0a8915"
+  },
+  "changes": [
+    "Package-relative imports; in-process pack preparation; bounded GGUF metadata parser."
+  ]
+}

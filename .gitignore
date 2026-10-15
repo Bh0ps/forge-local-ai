@@ -3,6 +3,7 @@
 venv/
 node_modules/
 frontend/dist/
+native-runtimes/
 .forge/
 .sidekick/
 env/

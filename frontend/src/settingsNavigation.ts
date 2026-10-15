@@ -15,7 +15,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {id:'models',group:'Models & tools',label:'Models & engines',keywords:'Ollama llama.cpp LM Studio Textgen text-generation-webui Docker Model Runner Jan Desktop LocalAI vLLM SGLang KoboldCpp local',topics:[
     {label:'Engine connections',keywords:'endpoint API key local engine Ollama llama.cpp LM Studio Textgen Docker Model Runner Jan Desktop LocalAI vLLM SGLang KoboldCpp'},
     {label:'Installed models',keywords:'installed selected use model'},
-    {label:'Model downloads',keywords:'download Hugging Face Ollama'},
+    {label:'Model downloads',keywords:'download Hugging Face Ollama Forge built in GGUF Strata migration import model directory'},
   ]},
   {id:'performance',group:'Models & tools',label:'Performance',keywords:'recommendations speed',topics:[
     {label:'Selected-model tuning',keywords:'hardware CPU GPU local tuning memory'},

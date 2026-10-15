@@ -22,6 +22,7 @@ import psutil
 
 from context_window import validate_context, advertised_context_limit, require_model_context
 from forge_inference import memory_telemetry, OllamaProvider,CompatibleProvider,ENGINE_PROFILES
+from forge_native import NativeProvider
 from tool_calls import ToolCallAccumulator
 from core import Core, thinking_metadata, thinking_values
 from forge_engine_auth import EngineAccessFailure
@@ -60,11 +61,12 @@ def calibration_facts(store,providers,settings,telemetry=None):
     admitted=settings.get('_admitted_provider')
     if admitted is not None and admitted is not provider:raise EngineAccessFailure('configuration')
     signature=_provider_signature(providers,identifier)
-    if not isinstance(provider,OllamaProvider) or getattr(provider,'remote_inference',False):
+    if not isinstance(provider,(OllamaProvider,NativeProvider)) or getattr(provider,'remote_inference',False):
         raise ValueError('unsupported_engine')
-    hostname=urlsplit(provider.core.base).hostname
-    if hostname not in ('localhost','127.0.0.1','::1'):
-        raise ValueError('server_hardware_unknown')
+    if not isinstance(provider,NativeProvider):
+        hostname=urlsplit(provider.core.base).hostname
+        if hostname not in ('localhost','127.0.0.1','::1'):
+            raise ValueError('server_hardware_unknown')
     models=provider.models() if admitted is not None else providers.models(identifier,refresh=True)
     model=next((m for m in models if (m.get('name') or m.get('model'))==settings.get('model')),None)
     if model is None: raise ValueError('model_unavailable')
@@ -78,7 +80,13 @@ def calibration_facts(store,providers,settings,telemetry=None):
     values=thinking_values(settings['model'],thinking_metadata(info))
     if values is None and requested or values is not None and not any(type(value) is bool and value is requested or requested and isinstance(value,str) for value in values):
         raise ValueError('thinking_control_unsupported')
-    engine=provider.core.request('GET','/version').get('version')
+    if isinstance(provider,NativeProvider):
+        from forge_native_models import read_json,file_hash
+        manifest_path=provider.runtime.bundle/'manifest.json'
+        manifest=read_json(manifest_path)
+        record=provider.runtime.catalog.model(settings['model'])
+        engine=record['engine']+'/'+manifest['engines'][record['engine']]+':'+file_hash(manifest_path)
+    else:engine=provider.core.request('GET','/version').get('version')
     if not isinstance(engine,str) or not 0<len(engine)<=128: raise ValueError('immutable_identity_missing')
     telemetry=telemetry if telemetry is not None else hardware()
     if telemetry.get('stale') or telemetry.get('probe_state') in ('failed','unavailable','refreshing'):
@@ -207,6 +215,11 @@ class PerformanceManager:
     def engine(self,provider_id):
         try:
             provider=self.service.providers.provider(provider_id)
+            if isinstance(provider,NativeProvider):
+                status=provider.runtime.status()
+                current=status.get('model')
+                return {'online':True,'provider_id':provider_id,'residency_supported':True,
+                    'resident_models':[{'name':current[0],'context_length':current[1]}] if current and status['state'] in ('ready','generating') else []}
             if isinstance(provider,OllamaProvider) and hasattr(provider.core,'request'):
                 result=provider.core.request('GET','/ps')
                 return {'online':True,'provider_id':provider_id,'residency_supported':True,'resident_models':[
@@ -408,7 +421,7 @@ class PerformanceManager:
             raise PerformanceUnavailable(category,message) from None
         if operation=='calibrate':
             if getattr(provider,'remote_inference',False): raise ValueError('Adaptive calibration is for local engines.')
-        if operation in ('warm','release') and not isinstance(provider,OllamaProvider): raise ValueError('This engine does not expose model residency controls.')
+        if operation in ('warm','release') and not isinstance(provider,(OllamaProvider,NativeProvider)): raise ValueError('This engine does not expose model residency controls.')
         try:info=provider.capabilities(settings['model'])
         except Exception as error:
             category,message=_public_performance_failure(error,metadata=True)
@@ -436,7 +449,7 @@ class PerformanceManager:
             if automatic:automatic.changed('active_work')
             cancel=threading.Event(); self.jobs[job['id']]={'cancel':cancel,'operation':operation,'generation':self.selection_generation}
             if operation=='tune':data={**data,'tuning_contract':tuning,'initial_facts':facts,'generation':self.selection_generation}
-            if isinstance(provider,(OllamaProvider,CompatibleProvider)):
+            if isinstance(provider,(OllamaProvider,CompatibleProvider,NativeProvider)):
                 settings={**settings,'_admitted_provider':provider}
             thread=threading.Thread(target=self._worker,args=(job,settings,data,cancel),daemon=True,name='Forge-performance')
             self.jobs[job['id']]['thread']=thread; thread.start(); return job
@@ -576,11 +589,15 @@ class PerformanceManager:
                     began=time.monotonic()
                     final={}
                     try:
-                        url=provider.core.base+'/generate'
-                        headers_callback=getattr(provider.core,'_headers_callback',None)
-                        options={'headers_factory':lambda:provider.core.request_headers(url,cancel),'response_error':Core._response_json} if headers_callback is not None else {}
-                        final=self._resident_request(url,{'model':settings['model'],'keep_alive':keep,'stream':False,
-                            'options':{'num_ctx':settings['context'],'num_thread':settings['num_thread']}},cancel,**options)
+                        if isinstance(provider,NativeProvider):
+                            if job['operation']=='release': provider.runtime.stop()
+                            else: provider.runtime.warm(settings,cancel)
+                        else:
+                            url=provider.core.base+'/generate'
+                            headers_callback=getattr(provider.core,'_headers_callback',None)
+                            options={'headers_factory':lambda:provider.core.request_headers(url,cancel),'response_error':Core._response_json} if headers_callback is not None else {}
+                            final=self._resident_request(url,{'model':settings['model'],'keep_alive':keep,'stream':False,
+                                'options':{'num_ctx':settings['context'],'num_thread':settings['num_thread']}},cancel,**options)
                     finally:
                         self.store.record_usage({'id':uuid4().hex,'provider':settings['provider_id'],'model':settings['model'],'purpose':job['operation'],
                             'input_tokens':final.get('prompt_eval_count',0),'output_tokens':final.get('eval_count',0),

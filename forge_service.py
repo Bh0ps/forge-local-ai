@@ -69,6 +69,7 @@ READ_ACTIONS=READ_ACTIONS|frozenset(('skills_search','skills_resource_read','ski
     'artifact_list','artifact_get','artifact_download','document_list','performance','performance_benchmarks','performance_calibrations'))
 READ_ACTIONS=READ_ACTIONS|frozenset(('draft_get','submission_get','builder_runtime_get',
     'ai_workflow_status','ai_workflow_self_test_status','ui_layout_get','run_activity','run_diagnostics_export','computer_view_state'))
+READ_ACTIONS=READ_ACTIONS|frozenset(('native_status','native_inventory'))
 
 # These controls wait for a native worker/UI callback. Admission must remain
 # available to that callback; a pending lease instead keeps update snapshots
@@ -344,6 +345,10 @@ class ForgeService:
 
     def shutdown(self):
         self.stop_event.set(); self.emergency_stop()
+        if getattr(self,'native_jobs',None):
+            self.native_jobs.closed=True
+            self.native_jobs.cancel.set()
+        if getattr(self.providers,'native_runtime',None) is not None: self.providers.native_runtime.close()
         if self.ai_workflow_manager: self.ai_workflow_manager.shutdown()
         if self.channel_manager: self.channel_manager.shutdown()
         if self.setup_manager: self.setup_manager.shutdown()
@@ -363,6 +368,8 @@ class ForgeService:
     def emergency_stop(self):
         for run in self.store.runs():
             if run['status'] not in TERMINAL: self.jobs.cancel(run['id'],pause=True)
+        if getattr(self,'native_jobs',None): self.native_jobs.cancel.set()
+        if getattr(self.providers,'native_runtime',None) is not None: self.providers.native_runtime.stop()
         if self.computer_broker and hasattr(self.computer_broker,'stop'): self.computer_broker.stop()
         if self.integrations and hasattr(self.integrations,'stop'): self.integrations.stop()
         if self.performance_manager:
@@ -377,7 +384,7 @@ class ForgeService:
     def bootstrap(self):
         runs=self.store.runs(limit=200)
         from forge_workspace_ui import WorkspaceUI
-        return dict(version='5.1.29',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
+        return dict(version='5.2.0',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
                     chats=self.store.list_chats(),runs=runs,goals=[self.goal_view(goal,runs) for goal in self.store.active_goals()],
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -543,7 +550,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='5.1.29')
+                    self.update_manager=UpdateManager(self,current_version='5.2.0')
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)
@@ -669,6 +676,9 @@ class ForgeService:
                 return probe_provider(self,data)
             return {'models':self.providers.provider(data['id']).models(),'ok':True}
         if action=='models': return {'models':self.providers.models(data.get('provider_id',self.store.get_settings()['provider_id']),bool(data.get('refresh')))}
+        if action.startswith('native_'):
+            from forge_native_jobs import native_action
+            return native_action(self,action,data)
         if action in ('show','pull','delete'):
             identifier=data.get('provider_id',self.store.get_settings()['provider_id'])
             if action=='show': return self.providers.capabilities(identifier,data.get('model') or data['name'],refresh=True)
@@ -1461,6 +1471,8 @@ class ForgeService:
         return {'agents':self.store.entities('agents'),'settings':self.store.get_settings(),'created':created,'preserved':preserved}
 
     def provider_save(self,data):
+        if data.get('id')=='forge-native' or data.get('kind')=='forge-native':
+            raise ValueError('Configure the bundled Forge engine from Models, not an external endpoint.')
         if data.get('kind')=='openrouter': return self.dispatch('openrouter_save',data)
         previous={}
         if data.get('id'):
