@@ -259,13 +259,13 @@ class NativeRuntime:
             from forge_vendor.strata.frontend import ChatTemplate
             pack = path.parent / 'pack'
             if not (pack / 'native_experts.txt').is_file():
-                if prepare(['--gguf', str(path), '--out', str(pack)]) != 0:
+                if prepare(['--gguf', str(path), '--out', str(pack)], cancel=cancel) != 0:
                     raise NativeFailure('model', 'Strata model preparation failed. The original model files were retained.')
             if plan['mode']!='arena' and not (pack/'experts.bin').is_file():
                 if shutil.disk_usage(pack).free<plan['prepared_expert_bytes']+4*1024**3:
                     raise NativeFailure('storage','Strata memory-saving preparation needs another 28 GB of free space in the model directory.')
                 current()
-                if prepare(['--gguf',str(path),'--out',str(pack),'--experts-bin'])!=0:
+                if prepare(['--gguf',str(path),'--out',str(pack),'--experts-bin'], cancel=cancel)!=0:
                     raise NativeFailure('model','Strata memory-saving preparation failed. Model originals were retained.')
             arguments = ['--serve', '--pack', str(pack), '--native', str(path),
                 '--ple-gguf', str(self.catalog.root / model['files'][1]['path']),

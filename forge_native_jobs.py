@@ -8,6 +8,23 @@ from uuid import uuid4
 from forge_native_models import atomic_json, read_json
 
 
+def download_space_required(selected, root):
+    """Credit only this pinned download's files, never unrelated caches."""
+    present = 0
+    for item in selected['files']:
+        target = root / item['path']
+        partial = target.with_suffix(target.suffix + '.forge-partial')
+        if target.is_file() and not target.is_symlink() and target.stat().st_size == item['size']:
+            present += item['size']
+        elif partial.is_file() and not partial.is_symlink():
+            present += min(partial.stat().st_size, item['size'])
+    preparation = selected.get('preparation_bytes', 0)
+    prepared = root / 'pack' / 'experts.bin'
+    if preparation and prepared.is_file() and not prepared.is_symlink() and prepared.stat().st_size == preparation:
+        present += preparation
+    return max(0, sum(f['size'] for f in selected['files']) + preparation + 4 * 1024**3 - present)
+
+
 class NativeJobs:
     def __init__(self, service):
         self.service = service
@@ -70,11 +87,9 @@ class NativeJobs:
                     from forge_native_download import pinned_download
                     import shutil
                     download_bytes=sum(f['size'] for f in selected['files'])
-                    needed = download_bytes + selected.get('preparation_bytes',0) + 4 * 1024**3
                     root = self.runtime.catalog.root / selected['id']
                     root.mkdir(parents=True, exist_ok=True)
-                    present = sum(p.stat().st_size for p in root.rglob('*') if p.is_file())
-                    if shutil.disk_usage(root).free < max(0, needed - present):
+                    if shutil.disk_usage(root).free < download_space_required(selected, root):
                         raise ValueError('The Forge model directory needs more free disk space.')
                     sources = []
                     completed_bytes=0

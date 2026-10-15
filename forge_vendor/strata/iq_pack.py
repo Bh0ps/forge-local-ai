@@ -266,11 +266,17 @@ def convert(name: str, type_name: str, raw: np.ndarray, compat_bf16: bool):
     return "2", data, len(data), rec
 
 
-def index_standalone(src, out, model: Model, compat_bf16: bool = False) -> int:
+def _check_cancel(cancel):
+    if cancel is not None and cancel.is_set():
+        raise ValueError('Model preparation was cancelled. Original weights were retained.')
+
+
+def index_standalone(src, out, model: Model, compat_bf16: bool = False, cancel=None) -> int:
     """Every non-expert tensor of the model: the floats the engine reads from the pack into dense.bin in the form it
     reads them (FORM; converted when stored otherwise, see above), quantized ones served natively from the GGUF."""
     todo, problems = [], []
     for name, (g, t, mm, p) in model.where.items():
+        _check_cancel(cancel)
         if is_expert(t.name) or t.name in NOT_IN_PACK:
             continue
         if len(t.shape) > 2:
@@ -296,6 +302,7 @@ def index_standalone(src, out, model: Model, compat_bf16: bool = False) -> int:
     converted, records = [], []
     with open(out / "dense.bin.tmp", "wb") as fo:
         for name, g, t, mm, p, native in todo:
+            _check_cancel(cancel)
             ne0 = int(t.shape[0])
             ne1 = int(t.shape[1]) if len(t.shape) > 1 else 0
             if native:
@@ -485,7 +492,8 @@ def read_json(path: pathlib.Path):
         return None
 
 
-def main(argv=None) -> int:
+def main(argv=None, cancel=None) -> int:
+    _check_cancel(cancel)
     ap = argparse.ArgumentParser()
     ap.add_argument("--gguf", required=True, help="the model's shard 1")
     ap.add_argument("--base", help="optional: a Q2_0 canonical pack whose dense.bin holds the shared float tensors")
@@ -554,10 +562,11 @@ def main(argv=None) -> int:
         (out / "native_experts.txt").unlink(missing_ok=True)
         rc = index_from_base(a, src, base, out, g, {t.name: t for t in g.tensors}, mm)
     else:
-        rc = index_standalone(src, out, model, a.compat_bf16)
+        rc = index_standalone(src, out, model, a.compat_bf16, cancel=cancel)
     if rc:
         return rc
     if not (out / "tokenizer" / "vocab.json").exists() or not (out / "tokenizer" / "chat_template.jinja").exists():
+        _check_cancel(cancel)
         from .tokenizer import extract
         extract(src, out)   # writes <out>/tokenizer/
 
@@ -581,10 +590,12 @@ def main(argv=None) -> int:
     part = out / "experts.bin.tmp"
     with open(part, "wb") as fo:
         for l, gt, dt, off, blob, ts in layout:
+            _check_cancel(cancel)
             fo.write(layer_blobs(blob, ts).tobytes())
             if l % 8 == 0:
                 print("  layer %2d  %-8s/%-7s blob %8d  at %.2f GiB" % (l, ts[0].type_name, ts[2].type_name, blob,
                                                                         off / 2**30), flush=True)
+    _check_cancel(cancel)
     part.replace(path)
     side_tmp = out / "experts.bin.src.json.tmp"
     side_tmp.write_text(json.dumps(want, indent=2) + "\n", encoding="utf-8")

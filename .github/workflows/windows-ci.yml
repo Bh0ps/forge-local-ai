@@ -83,6 +83,10 @@ jobs:
         run: python scripts/release_build.py build --work C:/ForgeCI --version "$env:FORGE_RELEASE_VERSION"
       - name: Verify native lifecycle on disposable state
         run: ./scripts/release_smoke.ps1 -Executable C:/ForgeCI/dist/Forge/Forge.exe -Output C:/ForgeCI/native-smoke
+      - name: Fetch pinned public native model fixture outside the package
+        run: python scripts/fetch_native_smoke_model.py --destination C:/ForgeCI/native-model-fixture
+      - name: Verify frozen native model and Strata support on disposable state
+        run: python scripts/release_native_model_smoke.py --executable C:/ForgeCI/dist/Forge/Forge.exe --model C:/ForgeCI/native-model-fixture/Qwen3-0.6B-Q8_0.gguf --output C:/ForgeCI/native-model-smoke
       - name: Verify frozen windowed pipe framing and parent identity
         run: python scripts/release_protocol_smoke.py --executable C:/ForgeCI/dist/Forge/Forge.exe --output C:/ForgeCI/protocol-smoke
       - name: Install verified pinned compiler

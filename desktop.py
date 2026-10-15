@@ -30,7 +30,7 @@ SMOKE_PHASES = frozenset({'startup-imports', 'startup-imports-ready', 'logging-s
     'builder-button-target', 'builder:preview_inspect', 'builder:preview_type', 'builder:preview_click',
     'builder:preview_viewport', 'builder:preview_diagnostics', 'builder:preview_screenshot',
     'standalone-start', 'standalone-open', 'standalone-layout', 'standalone-viewport',
-    'standalone-input-target', 'standalone-button-target', 'standalone-screenshot'})
+    'standalone-input-target', 'standalone-button-target', 'standalone-screenshot', 'native-model'})
 SMOKE_ERROR_TYPES = frozenset({'ValueError', 'RuntimeError', 'TimeoutError', 'StopIteration', 'KeyError',
     'TypeError', 'AttributeError', 'OSError', 'FileNotFoundError', 'PermissionError', 'BrowserGuard',
     'JavascriptException', 'WebViewException', 'ImportError', 'ModuleNotFoundError'})
@@ -58,6 +58,18 @@ def _smoke_preview_tool(manager, run, cancel, result, name, args):
             elif outcome.get('ok') is False:
                 category = 'refused'
         result['tool_failure'] = category
+        if isinstance(outcome, dict):
+            # Fixed diagnostic labels only; never copy page/tool output into CI.
+            reasons = {
+                'Stale browser snapshot. Inspect this page again.': 'stale-snapshot',
+                'Browser page changed or snapshot expired. Inspect again.': 'snapshot-expired',
+                'Browser page is navigating or closed. Inspect again.': 'navigating',
+                'Browser target changed. Inspect again.': 'target-changed',
+                'Browser navigated. Inspect again.': 'navigated',
+                'The Builder preview is hidden. Open its pane before using preview tools.': 'preview-hidden',
+            }
+            if outcome.get('error') in reasons:
+                result['tool_refusal'] = reasons[outcome['error']]
         raise ValueError('Standalone preview tool did not complete successfully.')
     return outcome
 
@@ -1753,6 +1765,11 @@ def main():
                         result['smoke_phase'] = 'handoff-floor'
                         _smoke_checkpoint(result['smoke_phase'])
                         result['handoff_seed'] = _smoke_handoff_floor(api)
+                    if '--native-model-smoke' in sys.argv:
+                        result['smoke_phase']='native-model'
+                        _smoke_checkpoint(result['smoke_phase'])
+                        from forge_native_smoke import frozen_native_smoke
+                        result['native_model']=frozen_native_smoke(service)
                     result['smoke_phase'] = 'library'
                     _smoke_checkpoint(result['smoke_phase'])
                     starters = [skill for skill in api.call('skills')['skills'] if skill.get('builtin')]

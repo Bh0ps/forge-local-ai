@@ -12,6 +12,6 @@
     "data/expert-profile-coder.bin": "a514661124d5305effe9c1bcecff7dc069af398b2b19ff9d11628a2cad0a8915"
   },
   "changes": [
-    "Package-relative imports; in-process pack preparation; bounded GGUF metadata parser."
+    "Package-relative imports; in-process cancellable pack preparation; bounded GGUF metadata parser."
   ]
 }

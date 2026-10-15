@@ -81,3 +81,8 @@ until their users choose to migrate them.
 Source development can acquire the same pinned bundle with
 `python scripts/fetch_native_runtimes.py --destination native-runtimes --cache build/native-downloads`.
 Use a fresh destination after changing the runtime lock; mismatched existing files are retained, never silently reused.
+
+Windows release validation also loads a pinned public 0.6B GGUF through the frozen
+application on disposable state, using CPU inference for reproducible CI. This verifies
+native text, tool arguments, continuation, tokenizer/template imports and worker cleanup.
+The test weights are downloaded outside the package and are not shipped in Forge.
