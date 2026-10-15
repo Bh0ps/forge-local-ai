@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import numpy as np
 import pytest
@@ -52,5 +53,8 @@ def test_draft_sources_bind_catalog_and_reject_changed_files(tmp_path):
         'size':path.stat().st_size,'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'shape':[8]}]}
     catalog.publish(catalog.attach_support(record,support))
     assert catalog.binding()!=before
-    catalog.model('fixture');path.touch()
+    catalog.model('fixture')
+    # A same-tick touch can keep the same NTFS timestamp on Windows runners.
+    verified = path.stat()
+    os.utime(path, ns=(verified.st_atime_ns, verified.st_mtime_ns + 2_000_000_000))
     with pytest.raises(ValueError,match='changed after verification'):catalog.model('fixture')
