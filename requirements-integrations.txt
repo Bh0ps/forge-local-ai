@@ -1,5 +1,5 @@
 mcp==2.3.0
-huggingface_hub==1.33.0
+huggingface_hub==2.2.0
 gguf==0.19.0
 playwright==1.63.0
 PyYAML==6.0.3
