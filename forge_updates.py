@@ -319,7 +319,7 @@ async def _get_bytes(client, url, limit, cancel=None, progress=None, consume=Non
 
 
 class UpdateManager:
-    def __init__(self, service, current_version='5.2.1', install_dir=None, trust_policy=None,
+    def __init__(self, service, current_version='5.2.2', install_dir=None, trust_policy=None,
                  client_factory=None, verifier=authenticode, *, proof_policy=None, _allow_installation=False):
         # The seed release authenticates downloads, but cannot yet acknowledge
         # every native workspace draft/attachment before shutting its host down.
