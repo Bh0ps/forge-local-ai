@@ -1,3 +1,19 @@
 .settings-page-load {min-height:240px;padding:24px 16px;}
 .settings-page-load h2 {max-width:100%;overflow-wrap:anywhere;}
 .settings-page-load-actions {display:flex;flex-wrap:wrap;justify-content:center;gap:8px;}
+
+.modal.settings-dialog {width:min(1000px,calc(100vw - 48px));height:min(760px,calc(100dvh - 64px));max-height:calc(100dvh - 32px);padding:0;overflow:hidden;border-radius:12px;}
+.modal.settings-dialog[open] {display:flex;flex-direction:column;}
+.settings-dialog>header {margin:0;padding:16px 20px;border-bottom:1px solid var(--border);flex-shrink:0;}
+.settings-dialog>header h2 {font-size:15px;font-weight:600;letter-spacing:0;}
+.settings-dialog>header .icon-button {width:28px;height:28px;}
+.settings-dialog-notice {display:flex;align-items:center;gap:10px;flex-shrink:0;padding:9px 20px;background:var(--notice);border-bottom:1px solid var(--border);font-size:12px;line-height:1.5;overflow-wrap:anywhere;}
+.settings-dialog-notice>span {flex:1;min-width:0;}
+.settings-dialog-notice>.icon-button {width:28px;height:28px;}
+.settings-dialog-body {flex:1;min-height:0;display:flex;}
+.settings-dialog-body>div {width:100%;min-height:0;display:flex;}
+
+@media(max-width:720px) {
+  .modal.settings-dialog {width:calc(100vw - 24px);height:calc(100dvh - 24px);max-height:none;}
+  .settings-dialog>header {padding:12px 16px;}
+}

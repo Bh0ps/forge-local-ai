@@ -18,6 +18,7 @@ interface SidebarProps {
   onProjectRemoved: (id: string) => Promise<void>;
   workspaceName?:string; accent?:Accent; width?:number; onWidth?:(width:number)=>void;
   collapsedProjectIds?:string[]; onCollapsedProjects?:(ids:string[])=>void;
+  settingsOpen?: boolean;
 }
 export function WorkspaceSidebar(props: SidebarProps) {
   const [archivesOpen, setArchivesOpen] = useState(false);
@@ -35,7 +36,7 @@ export function WorkspaceSidebar(props: SidebarProps) {
   function toggleProject(id:string) {if(props.onCollapsedProjects){const ids=props.collapsedProjectIds || [];props.onCollapsedProjects(ids.includes(id)?ids.filter(value=>value!==id):[...ids,id]);}else setCollapsed(previous=>({...previous,[id]:!previous[id]}));}
   const row = (chat: Chat, recent = false) => <ChatRow key={chat.id} chat={chat} projects={projects} selected={chatId === chat.id && page === 'chat'} active={activeChatIds.includes(chat.id)} recent={recent} onSelect={props.onChat} onChanged={props.onChatChanged} />;
   function rows(scope: string, items: Chat[], defaultLimit: number, recent = false) { const limit = limits[scope] || defaultLimit; return <>{items.slice(0, limit).map(chat => row(chat, recent))}{items.length > limit && <button className="sidebar-show-more" onClick={() => setLimits(previous => ({ ...previous, [scope]: limit + 20 }))}>Show more ({items.length - limit})</button>}</>; }
-  return <aside className="sidebar" data-accent={props.accent || 'copper'} style={{width:props.width || 260}}><div className="sidebar-brand"><img src="./forge.svg" alt="" /><span title={props.workspaceName || 'Forge'}>{props.workspaceName || 'Forge'}</span><IconButton showLabel label="Collapse sidebar" onClick={props.onCollapse}><PanelLeftClose size={17} /></IconButton></div>
+  return <aside className="sidebar" data-accent={props.accent || 'copper'} style={{width:props.width || 260}}><div className="sidebar-brand"><img src="./forge.svg" alt="" /><span title={props.workspaceName || 'Forge'}>{props.workspaceName || 'Forge'}</span><IconButton showLabel label="Collapse sidebar" onClick={props.onCollapse}><PanelLeftClose size={16} /></IconButton></div>
     <button className="new-chat" onClick={props.onNew}><Plus size={17} />New chat<span>Ctrl N</span></button>
     <div className="sidebar-search"><Search size={14} /><input aria-label="Search projects and chats" placeholder="Search projects and chats" value={search} onChange={event => props.onSearch(event.target.value)} /></div>
     <div className="sidebar-project-header"><button className="sidebar-section-link" onClick={()=>props.onPage('projects')}>Projects</button><IconButton showLabel label="Connect project folder" onClick={props.onConnect}><FolderPlus size={15} /></IconButton></div>
@@ -46,8 +47,8 @@ export function WorkspaceSidebar(props: SidebarProps) {
       {(archivesOpen || search) && <div className="archived-chats">{archived.length ? archived.map(chat => row(chat, true)) : <p>No archived chats.</p>}</div>}
     </div><div className="sidebar-bottom">
       <div className="sidebar-tools" ref={toolsRoot}><button ref={toolsTrigger} className={`nav-item${currentTool ? ' active' : ''}`} aria-haspopup="menu" aria-expanded={toolsOpen} onClick={()=>setToolsOpen(!toolsOpen)}><Wrench size={16} aria-hidden="true"/>Tools<ChevronDown size={13} aria-hidden="true"/></button>
-        {toolsOpen && <div ref={toolsMenu} className="workspace-tools-menu" role="menu" aria-label="Workspace tools">{toolGroups.map(group=><div className="workspace-tools-group" role="group" aria-label={group.label} key={group.key}><span aria-hidden="true">{group.label}</span>{group.items.map((item,itemIndex)=><button role="menuitem" key={group.itemKeys[itemIndex]} aria-current={page===item.page?'page':undefined} className={page===item.page?'active':''} onClick={()=>{toolsTrigger.current?.focus();setToolsOpen(false);props.onPage(item.page);}}><item.icon size={16} aria-hidden="true"/>{item.label}{item.page==='scheduled' && Boolean(props.scheduledCount) && <span className="nav-count">{props.scheduledCount}</span>}</button>)}</div>)}</div>}
-      </div><button className={`nav-item ${page === 'settings' ? 'active' : ''}`} onClick={() => props.onPage('settings')}><Settings2 size={16} />Settings</button>
+        {toolsOpen && <div ref={toolsMenu} className="workspace-tools-menu" role="menu" aria-label="Workspace tools">{toolGroups.map(group=><div className="workspace-tools-group" role="group" aria-label={group.label} key={group.key}><span aria-hidden="true">{group.label}</span>{group.items.map((item,itemIndex)=><button role="menuitem" key={group.itemKeys[itemIndex]} aria-current={page===item.page?'page':undefined} className={page===item.page?'active':''} onClick={()=>{toolsTrigger.current?.focus();setToolsOpen(false);props.onPage(item.page);}}><item.icon size={16} aria-hidden="true" data-tool={item.page}/>{item.label}{item.page==='scheduled' && Boolean(props.scheduledCount) && <span className="nav-count">{props.scheduledCount}</span>}</button>)}</div>)}</div>}
+      </div><button className={`nav-item ${props.settingsOpen ? 'active' : ''}`} aria-haspopup="dialog" aria-expanded={Boolean(props.settingsOpen)} onClick={() => props.onPage('settings')}><Settings2 size={16} />Settings</button>
     </div>{props.onWidth && <ResizeHandle label="Resize sidebar" value={props.width || 260} min={220} max={360} change={props.onWidth}/>}
   </aside>;
 }

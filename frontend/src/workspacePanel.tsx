@@ -23,7 +23,7 @@ function WorkspaceTab({item, id, selected, buttonRef, click, keyDown}: {
   keyDown: (event: React.KeyboardEvent<HTMLButtonElement>) => void;
 }) {
   const hint = useControlLabel(`${item.title} · ${item.description}`);
-  return <button type="button" ref={buttonRef} className="workspace-tab-control" role="tab" id={`${id}-${item.id}`}
+  return <button type="button" ref={buttonRef} className={`workspace-tab-control workspace-tab-${item.id}`} role="tab" id={`${id}-${item.id}`}
     aria-controls={`${id}-content`} aria-selected={selected} aria-label={item.title} tabIndex={selected ? 0 : -1}
     {...hint.events} onClick={() => {hint.dismiss();click();}} onKeyDown={event => {hint.events.onKeyDown(event);if(!event.defaultPrevented)keyDown(event);}}>
     <item.icon size={17} aria-hidden="true"/>{hint.content}
@@ -93,8 +93,7 @@ export function WorkspacePanel({ tab, select, close, width, resize, children, fo
   }, []);
   return <ActivityFocusContext.Provider value={focusScope ? activateActivity : null}><aside ref={pane} aria-label="Workspace details" style={{ width }} className={`right-panel workspace-panel${current.id === 'browser' ? ' with-browser' : ''}`}>
     <ResizeHandle label="Resize workspace panel" value={width} min={280} max={520} change={resize} reverse />
-    <header className="workspace-panel-heading"><div><h2>{current.title}</h2><p>{current.description}</p></div><IconButton showLabel label="Close detail pane" onClick={() => {close();queueMicrotask(()=>document.querySelector<HTMLButtonElement>('button[aria-label="Open workspace panel"]')?.focus());}}><X size={16} /></IconButton></header>
-    <nav className="workspace-panel-tabs" role="tablist" aria-label="Detail pane views">{WORKSPACE_TABS.map((item, index) => <WorkspaceTab
+    <header className="workspace-panel-heading"><h2 className="sr-only">{current.title}</h2><nav className="workspace-panel-tabs" role="tablist" aria-label="Detail pane views">{WORKSPACE_TABS.map((item, index) => <WorkspaceTab
       key={item.id} item={item} id={id} selected={current.id === item.id} buttonRef={element => { if (element) buttons.current.set(item.id, element); else buttons.current.delete(item.id); }}
       click={() => { keyboardFocus.current = false; select(item.id); }} keyDown={event => {
         const nextIndex = event.key === 'ArrowRight' ? (index + 1) % WORKSPACE_TABS.length : event.key === 'ArrowLeft' ? (index + WORKSPACE_TABS.length - 1) % WORKSPACE_TABS.length : event.key === 'Home' ? 0 : event.key === 'End' ? WORKSPACE_TABS.length - 1 : -1;
@@ -103,7 +102,7 @@ export function WorkspacePanel({ tab, select, close, width, resize, children, fo
         const next = WORKSPACE_TABS[nextIndex];
         keyboardFocus.current = next.id !== current.id;
         select(next.id); buttons.current.get(next.id)?.focus();
-      }}/>)}</nav>
+      }}/>)}</nav><IconButton label="Close detail pane" onClick={() => {close();queueMicrotask(()=>document.querySelector<HTMLButtonElement>('button[aria-label="Open workspace panel"]')?.focus());}}><X size={16} /></IconButton></header>
     <div id={`${id}-content`} role="tabpanel" aria-labelledby={`${id}-${current.id}`} className={`right-scroll${current.id === 'browser' ? ' browser-scroll' : ''}`}>{children}</div>
   </aside></ActivityFocusContext.Provider>;
 }
@@ -166,7 +165,7 @@ export function WorkspaceActivity({ lives, scope, notify, resume }: { lives: Act
   const visible = groups.filter((group, index) => index < limit || needsAttention(group));
   const hiddenCount = groups.length - visible.length;
   return <section className="workspace-activity" aria-label="Workspace activity">
-    {!groups.length && <Empty icon={<Activity size={22} />} title="No activity yet" text={`Tool steps and helper results for ${scope.page === 'chat' ? 'this chat' : 'this project'} appear here.`} />}
+    {!groups.length && <Empty icon={<Activity size={22} />} title="No activity yet" />}
     {visible.map(group => <div className="workspace-activity-group" key={group.run_id}><ChatActivity group={group} lives={scoped} />{currentGroupRuns(group).map(item => {
       const live = byId.get(item.run_id), run = {...live,id:item.run_id,status:live?.status || item.status};
       return RECOVERABLE.has(item.status) || run.review && !['completed','cancelled'].includes(run.status) ? <WorkspaceRunRecovery key={`${run.id}:${run.status}`} run={run} helper={item.run_id !== group.run_id} notify={notify} resume={resume} /> : null;

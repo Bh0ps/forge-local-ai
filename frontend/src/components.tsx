@@ -39,7 +39,8 @@ export function useControlLabel(text: string, enabled = true) {
   const reveal = (element: HTMLElement) => {
     if (!enabled) return;
     target.current = element;
-    setPlacement({shift: 0, below: false, ready: false});
+    // Hover and focus can overlap without starting another visibility cycle.
+    if (!visible) setPlacement({shift: 0, below: false, ready: false});
     setShown(true);
   };
   useLayoutEffect(() => {
@@ -100,11 +101,28 @@ export function IconButton({ label, children, onClick, disabled, active, classNa
   return <button type="button" className={`icon-button ${showLabel ? 'labeled-control' : ''} ${active ? 'selected' : ''} ${className}`} aria-label={label} title={!showLabel || disabled ? label : undefined} aria-pressed={active}
     {...hint.events} onClick={() => { hint.dismiss(); onClick?.(); }} disabled={disabled}>{children}{hint.content}</button>;
 }
-export function Modal({ title, children, close, wide = false }: { title: string; children: React.ReactNode; close: () => void; wide?: boolean }) {
+export function Modal({ title, children, close, wide = false, className = '', dismissible = true, initialFocus, backgroundSelector }: { title: string; children: React.ReactNode; close: () => void; wide?: boolean; className?: string; dismissible?: boolean; initialFocus?: string; backgroundSelector?: string }) {
   useDialogReadiness();
   const ref = useRef<HTMLDialogElement>(null), titleId = useId();
-  useEffect(() => { const trigger = document.activeElement as HTMLElement | null; ref.current?.showModal(); return () => {ref.current?.close(); if (trigger?.isConnected) trigger.focus();}; }, []);
-  return <dialog ref={ref} aria-labelledby={titleId} className={`modal ${wide ? 'wide' : ''}`} onCancel={close} onClick={e => { if (e.target === e.currentTarget) close(); }}><header><h2 id={titleId}>{title}</h2><IconButton label="Close dialog" onClick={close}><X size={18} /></IconButton></header>{children}</dialog>;
+  const trigger = useRef(document.activeElement as HTMLElement | null);
+  useLayoutEffect(() => {
+    const dialog = ref.current;
+    dialog?.showModal();
+    if (initialFocus) dialog?.querySelector<HTMLElement>(initialFocus)?.focus();
+    // The native dialog handles focus/inertness. Mirror its accessibility boundary
+    // only after focus has left the background, including for delayed content.
+    const background = backgroundSelector ? Array.from(dialog?.parentElement?.children || []).filter(element=>element.matches(backgroundSelector)) : [];
+    const hidden = background.map(element=>[element,element.getAttribute('aria-hidden')] as const);
+    for(const [element] of hidden)element.setAttribute('aria-hidden','true');
+    return () => {
+      const restore = document.activeElement === document.body || Boolean(dialog?.contains(document.activeElement));
+      for(const [element,value] of hidden) {if(value===null)element.removeAttribute('aria-hidden');else element.setAttribute('aria-hidden',value);}
+      dialog?.close();
+      // Explicit navigation may already have focused the new conversation.
+      if (restore && trigger.current?.isConnected) trigger.current.focus();
+    };
+  }, []);
+  return <dialog ref={ref} aria-labelledby={titleId} className={`modal ${wide ? 'wide' : ''} ${className}`} onCancel={event => { event.preventDefault(); event.stopPropagation(); if (dismissible) close(); }} onClick={e => { if (dismissible && e.target === e.currentTarget) close(); }}><header><h2 id={titleId}>{title}</h2><IconButton label="Close dialog" disabled={!dismissible} onClick={close}><X size={16} /></IconButton></header>{children}</dialog>;
 }
 export function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
   const id = useId();
