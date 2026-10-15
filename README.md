@@ -3,7 +3,7 @@
 # Forge 5.2.1
 
 This Windows preview runs GGUF models with Forge-owned, bundled llama.cpp workers.
-Strata supports the pinned Qwen Coder model. Model files stay in your chosen Forge
+Strata supports the pinned Qwen Coder model and an explicitly selected uncensored variant. Model files stay in your chosen Forge
 directory, independently of app updates. Existing Ollama and compatible endpoints
 remain optional connections. Read [the native model guide](docs/FORGE_520.md) and [5.2.1 fixes](docs/FORGE_521.md).
 

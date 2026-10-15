@@ -18,3 +18,18 @@ this same opening path before checking stable layout and browser operations.
 An installed preview can keep running while a new release is built and published.
 Installing a downloaded update still waits for saved state and finished work.
 Model files and local settings are independent of release packages.
+
+## Optional uncensored Coder variant
+
+Model setup can explicitly select **Strata Coder Uncensored**. This community
+variant uses the same pinned Coder weights and a small, separately verified
+[runtime projection](https://huggingface.co/alesha-pro/Qwen3.8-Flash-Next-abliterated-GSQ-RCO-Coder-Strata-GGUF).
+Its fixed Strata recipe is enabled only for that model. General GGUF imports and
+the original Coder keep their existing behavior. A compatible installed weight
+or draft file is reused by a verified hard link where available; selecting the
+variant alone starts no download.
+
+The projection and draft head use Qwen Community License 1.0. The existing license
+notice remains visible before download. Community behavior and quality claims
+are not guarantees; Forge validates file compatibility, synthetic text and tool
+continuation locally.

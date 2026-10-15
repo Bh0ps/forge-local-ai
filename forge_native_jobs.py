@@ -1,17 +1,19 @@
 """Explicit model operations with durable progress and no external setup executables."""
 import json
+import os
 from pathlib import Path
 import threading
 import time
 from uuid import uuid4
 
-from forge_native_models import atomic_json, read_json
+from forge_native_models import atomic_json, read_json, file_hash
 
 
 def download_space_required(selected, root):
     """Credit only this pinned download's files, never unrelated caches."""
     present = 0
     files=selected['files']+selected.get('support',{}).get('files',[])
+    if selected.get('projection'): files = files + [selected['projection']['file']]
     for item in files:
         target = root / item['path']
         partial = target.with_suffix(target.suffix + '.forge-partial')
@@ -24,6 +26,37 @@ def download_space_required(selected, root):
     if preparation and prepared.is_file() and not prepared.is_symlink() and prepared.stat().st_size == preparation:
         present += preparation
     return max(0, sum(f['size'] for f in files) + preparation + 4 * 1024**3 - present)
+
+
+def reuse_installed_file(catalog, item, directory, cancel):
+    """Reuse exact immutable bytes without removing another installed model."""
+    from forge_updates import plain_path
+    target = plain_path(Path(directory) / item['path'])
+    if not target.is_relative_to(catalog.root):
+        raise ValueError('The model reuse target is outside Forge storage.')
+    if target.exists(): return False
+    def check():
+        if cancel.is_set(): raise ValueError('Model setup paused.')
+    check()
+    for model in catalog.public()['models']:
+        entries = model['files'] + model.get('support', {}).get('files', [])
+        if model.get('projection'): entries = entries + [model['projection']['file']]
+        for row in entries:
+            if row.get('sha256') != item['sha256'] or row.get('size') != item['size']: continue
+            source = plain_path(catalog.root / row['path'])
+            if not source.is_relative_to(catalog.root) or not source.is_file(): continue
+            before = source.stat()
+            if before.st_size != item['size'] or file_hash(source, check=check) != item['sha256']: continue
+            after = source.stat()
+            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise ValueError('A local model changed during reuse verification.')
+            check()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try: os.link(source, target)
+            except FileExistsError: return False
+            except OSError: continue  # The normal verified download remains available.
+            return True
+    return False
 
 
 class NativeJobs:
@@ -88,11 +121,18 @@ class NativeJobs:
                     from forge_native_download import pinned_download
                     import shutil
                     support=selected.get('support')
+                    projection=selected.get('projection')
                     transfers=[(selected,item,True) for item in selected['files']]
                     if support:transfers += [(support,item,False) for item in support['files']]
+                    if projection:transfers.append((projection,projection['file'],False))
                     download_bytes=sum(item['size'] for _,item,_ in transfers)
                     root = self.runtime.catalog.root / selected['id']
                     root.mkdir(parents=True, exist_ok=True)
+                    with self.lock:
+                        job.update(message='Checking reusable, verified model files.')
+                        self.save()
+                    for _, item, _ in transfers:
+                        reuse_installed_file(self.runtime.catalog,item,root,self.cancel)
                     if shutil.disk_usage(root).free < download_space_required(selected, root):
                         raise ValueError('The Forge model directory needs more free disk space.')
                     sources = []
@@ -118,6 +158,7 @@ class NativeJobs:
                         origin={'kind': 'huggingface', 'repo': selected['repo'], 'revision': selected['revision'],
                                 'license': selected['license']})
                     if support:result=self.runtime.catalog.attach_support(result,support)
+                    if projection:result=self.runtime.catalog.attach_projection(result,projection)
                     self.runtime.catalog.publish(result)
                 if self.closed:
                     raise ValueError('Model setup paused while Forge closed.')

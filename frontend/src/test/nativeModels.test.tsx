@@ -23,6 +23,28 @@ describe('Forge model management',()=>{
     await screen.findByDisplayValue('D:\\Forge\\Models');
     expect(screen.queryByText('Synthetic offline state')).toBeNull();
   });
+  it('downloads the standard Strata variant only after an explicit click',async()=>{
+    const call=bridge();render(<NativeModels changed={vi.fn(async()=>{})} useModel={vi.fn(async()=>{})}/>);
+    await screen.findByDisplayValue('D:\\Forge\\Models');
+    fireEvent.click(screen.getByText('Import or download a model'));
+    expect((screen.getByLabelText('Strata variant') as HTMLSelectElement).value).toBe('strata-coder-iq1-m');
+    expect(call.mock.calls.some(([action])=>action==='native_download')).toBe(false);
+    expect(screen.queryByText(/483 KB community projection/)).toBeNull();
+    fireEvent.click(screen.getByRole('button',{name:'Download'}));
+    await waitFor(()=>expect(call).toHaveBeenCalledWith('native_download',{id:'strata-coder-iq1-m'}));
+  });
+  it('changes the optional Strata variant without downloading or selecting a model',async()=>{
+    const call=bridge(),useModel=vi.fn(async()=>{});render(<NativeModels changed={vi.fn(async()=>{})} useModel={useModel}/>);
+    await screen.findByDisplayValue('D:\\Forge\\Models');
+    fireEvent.click(screen.getByText('Import or download a model'));
+    fireEvent.change(screen.getByLabelText('Strata variant'),{target:{value:'strata-coder-uncensored-iq1-m'}});
+    expect(screen.getByText(/483 KB community projection/)).toBeTruthy();
+    expect(call.mock.calls.every(([action])=>action==='native_status')).toBe(true);
+    expect(useModel).not.toHaveBeenCalled();
+    expect(screen.getByRole('link',{name:'Qwen Community License 1.0'})).toBeTruthy();
+    fireEvent.click(screen.getByRole('button',{name:'Download'}));
+    await waitFor(()=>expect(call).toHaveBeenCalledWith('native_download',{id:'strata-coder-uncensored-iq1-m'}));
+  });
   it('imports the selected Ollama model and retains an explicit directory',async()=>{
     const call=bridge(action=>action==='native_inventory'?{models:[{id:'synthetic',name:'Synthetic model',size:1024,has_adapter:false}]}:status);
     render(<NativeModels changed={vi.fn(async()=>{})} useModel={vi.fn(async()=>{})}/>);

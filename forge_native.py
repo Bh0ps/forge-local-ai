@@ -172,7 +172,10 @@ class NativeRuntime:
             raise NativeFailure('resource_busy', 'Existing work is using another local engine. Let it finish before starting a Forge model.')
         if threads is not None and (type(threads) is not int or not 1<=threads<=64):
             raise NativeFailure('configuration','CPU threads must be from 1 to 64.')
+        from forge_native_variants import projection_arguments, projection_binding
         binding = (model['id'], context, model['engine'],threads)
+        variant = projection_binding(model)
+        if variant is not None: binding += (variant,)
         with self.lock:
             self.generation+=1
             if self.idle_timer: self.idle_timer.cancel()
@@ -194,6 +197,7 @@ class NativeRuntime:
             except BaseException:
                 self._dispose(worker)
                 raise
+        projection_options = projection_arguments(self.catalog.root, model, check=current)
         exe = self._executable(model['engine'])
         for entry in model['files'] + model.get('auxiliary', []) + model.get('support',{}).get('files',[]):
             current()
@@ -286,6 +290,7 @@ class NativeRuntime:
                 '--expert-profile', str(Path(__file__).parent / 'forge_vendor' / 'strata' / 'expert-profile-coder.bin'),
                 '--expert-cache', 'auto', '--vram-reserve-mib', '1536', '--prefill', 'auto',
                 '--spec', '4', '--mtp', str(mtp), '--max-context', str(context)]
+            arguments += projection_options
             if plan['mode']!='arena':
                 arguments+=['--resident-experts' if plan['mode']=='resident' else '--mmap-experts']
             if context>8192: arguments+=['--kv','int8']
@@ -295,7 +300,8 @@ class NativeRuntime:
             current()
             worker = self._spawn(exe, arguments, stdin=True)
             adopt(worker)
-            worker.update(tokenizer=Tokenizer.from_gguf(path), template=ChatTemplate(pack / 'tokenizer' / 'chat_template.jinja'))
+            worker.update(tokenizer=Tokenizer.from_gguf(path), template=ChatTemplate(pack / 'tokenizer' / 'chat_template.jinja'),
+                          projection_enabled=bool(projection_options))
             deadline = time.monotonic() + 600
             while True:
                 current()
@@ -395,7 +401,8 @@ class NativeRuntime:
             raise NativeFailure('context', 'The tokenized request exceeds the selected context. Compact the conversation or increase Context.')
         parser = OutputParser(thinking=bool(data.get('thinking', False)), tools=tools)
         decoder = codecs.getincrementaldecoder('utf-8')('replace')
-        worker['process'].stdin.write(f'GEN {limit} temperature={float(data.get("temperature", .3))} ' + ','.join(map(str, ids)) + '\n')
+        projection = 'cvec=1 ' if worker.get('projection_enabled') else ''
+        worker['process'].stdin.write(f'GEN {limit} temperature={float(data.get("temperature", .3))} ' + projection + ','.join(map(str, ids)) + '\n')
         worker['process'].stdin.flush()
         characters = 0
         def emit(events):

@@ -79,7 +79,8 @@ def build(args):
         command += ['--collect-all', module]
     command += ['--copy-metadata', 'huggingface-hub', '--copy-metadata', 'mcp', '--collect-submodules', 'mcp.client',
                 '--collect-submodules', 'mcp.shared', '--hidden-import', 'forge_release_policy', '--hidden-import', 'forge_updates',
-                '--hidden-import', 'webview.platforms.edgechromium', '--hidden-import', 'pywinauto', '--hidden-import', 'forge_service', 'desktop.py']
+                '--hidden-import', 'webview.platforms.edgechromium', '--hidden-import', 'pywinauto', '--hidden-import', 'forge_service',
+                '--hidden-import', 'forge_native_variants', 'desktop.py']
     run(command, stage)
     run(common + ['--onefile', '--console', '--name', 'ForgeBrowserHost', '--exclude-module', 'playwright', 'browser_tools.py'], stage)
     app = work / 'dist/Forge'

@@ -89,7 +89,9 @@ class NativeCatalog:
             if found is None:
                 raise ValueError('Choose an installed Forge model.')
             result = json.loads(json.dumps(found))
-        for entry in result['files'] + result.get('auxiliary', []) + result.get('support',{}).get('files',[]):
+        entries = result['files'] + result.get('auxiliary', []) + result.get('support',{}).get('files',[])
+        if result.get('projection'): entries = entries + [result['projection']['file']]
+        for entry in entries:
             path = self.root / entry['path']
             if not path.resolve().is_relative_to(self.root) or not path.is_file():
                 raise ValueError('A Forge model file is missing or outside its model directory.')
@@ -101,7 +103,8 @@ class NativeCatalog:
     def binding(self):
         with self.lock:
             fields=('id','engine','files','auxiliary','support','projector','architecture','context','capabilities','reasoning_control')
-            models=[{**{key:model.get(key) for key in fields},'defaults':model.get('origin',{}).get('defaults',{})}
+            models=[{**{key:model.get(key) for key in fields},'defaults':model.get('origin',{}).get('defaults',{}),
+                     **({'projection': model['projection']} if model.get('projection') else {})}
                     for model in self.data['models']]
             return hashlib.sha256(json.dumps({'root':self.data['root'],'models':models},sort_keys=True).encode()).hexdigest()
 
@@ -216,6 +219,19 @@ class NativeCatalog:
                 raise ValueError('A native support file changed during verification.')
             entries.append({**item,'path':path.relative_to(self.root).as_posix(),'mtime_ns':after.st_mtime_ns})
         return {**record,'support':{**support,'files':entries}}
+
+    def attach_projection(self, record, projection):
+        item = projection['file']
+        path = self.root / record['id'] / item['path']
+        before = path.stat()
+        result = {**record, 'projection': {**projection, 'file': {
+            **item, 'path': path.relative_to(self.root).as_posix(), 'mtime_ns': before.st_mtime_ns}}}
+        from forge_native_variants import projection_arguments
+        projection_arguments(self.root, result)
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ValueError('The model projection changed during verification.')
+        return result
 
     def ollama_inventory(self, root):
         root = Path(root).resolve(strict=True)

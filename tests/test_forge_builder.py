@@ -1105,6 +1105,9 @@ def test_production_project_preview_opens_without_creating_a_builder(tmp_path, u
                 page.get_by_text('Draft saved locally', exact=True).wait_for()
                 page.evaluate("window.dispatchEvent(new CustomEvent('forge:preview-open'))")
                 pane.get_by_role('heading', name=project['name'], exact=True).wait_for()
+                # Showing a pane on the current Builder page is not leaving the
+                # dirty brief. Keep its draft without opening a navigation modal.
+                assert page.get_by_role('dialog', name='Unsaved Builder edits', exact=True).count() == 0
             pane.get_by_role('button', name='Stop preview', exact=True).click()
             page.wait_for_function("()=>!document.querySelector('[aria-label=\"Project application preview\"]')")
             assert manager.previews.status(preview['id'])['status'] == 'stopped'
