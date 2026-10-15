@@ -3,7 +3,7 @@
 # Forge 5.2.2
 
 This Windows preview brings Settings over your workspace, groups skills and notes,
-and improves OpenRouter helper recovery. Five accent previews show how each palette
+and improves native replies and OpenRouter helper recovery. Five accent previews show how each palette
 changes Forge. Read [the 5.2.2 notes](docs/FORGE_522.md).
 
 GGUF models run with Forge-owned, bundled llama.cpp workers. Optional Strata Coder

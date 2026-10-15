@@ -33,6 +33,22 @@ blockers remain blocked, and concise answers or reviews with no findings can
 still complete normally. Ordered private reasoning state, exact free-model
 continuation, consent and access restrictions retain their existing guards.
 
+Strata's pipe adapter consumes its validated end-of-turn token identities before
+passing text to the response parser. Thinking and tool markers, ordinary literal
+text and tool continuations are preserved. An empty native final answer gets one
+saved answer-only correction with tools and thinking disabled for that request;
+the user's saved settings are unchanged. A second empty answer pauses with an
+accurate failure category. Completed tool actions are retained. Legacy delimiter
+artifacts are removed only from the prompt projection of verified older native
+turns; stored conversations and newly saved literal replies remain intact.
+
+Native Builder previews keep a small inset inside their scrolling owner. Explicit
+opening and resize correction handle fractional top-edge rounding without moving
+intentional reading scrolls. Attachment remains bounded to the same pane and
+preview identity, with cancellation, hidden-window, HUD, modal and replacement
+guards. Waiting never repeats navigation or a tool action, and native containment
+is independently checked before positioning.
+
 This revision changes neither the native model directory nor installed model
 files. The optional native models and their license notices are described in
 [the model guide](FORGE_520.md) and [5.2.1 notes](FORGE_521.md).
