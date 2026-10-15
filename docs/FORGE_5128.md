@@ -46,8 +46,9 @@ changes with XML inspection hardening and Windows lifecycle corrections.
 
 ## Verification and installation
 
-The goal-review fixture uses committed completion notifications followed by a
-durable state read. Its original deadline and result/usage assertions remain.
+Shared run-completion and goal-review fixtures use committed notifications
+followed by a durable state read. Their original deadlines and result/usage
+assertions remain; the shared helper advances event pages without losing history.
 Synthetic regressions cover XML declarations across encodings, startup readiness
 and tray callback completion. Release gates include the full backend/frontend
 suites, production build, packaged Windows lifecycle, installer recovery,

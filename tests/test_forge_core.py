@@ -34,11 +34,34 @@ def service(tmp_path,engine=None):
 
 def finished(svc,run):
     deadline=time.monotonic()+15
-    while time.monotonic()<deadline:
-        result=svc.dispatch('poll',{'id':run['id']})
-        if result['finished']: return result
-        time.sleep(.02)
-    raise AssertionError('Run did not finish')
+    committed=threading.Event()
+    def observe(event):
+        if event.get('run_id')==run['id'] and event.get('type')=='done': committed.set()
+    def snapshot():
+        after=0;events=[]
+        while True:
+            result=svc.dispatch('poll',{'id':run['id'],'after':after})
+            events.extend(result.get('events',[]))
+            if not result.get('has_more') or time.monotonic()>=deadline:
+                return {**result,'events':events}
+            cursor=result.get('next_cursor')
+            if type(cursor) is not int or cursor<=after:
+                raise AssertionError('Fixture event cursor did not advance')
+            after=cursor
+    svc.store.subscribe_events(observe)
+    try:
+        result=snapshot()
+        if result.get('finished') is not True:
+            committed.wait(max(0,deadline-time.monotonic()))
+            result=snapshot()
+        if result.get('finished') is True: return result
+        status=result.get('status')
+        diagnostic={'status':status if type(status) is str and status in {'queued','running','completed','failed','paused','interrupted','cancelled','awaiting_approval','waiting_question'} else 'other',
+                    'finished':result.get('finished') is True,'has_more':result.get('has_more') is True,
+                    'committed_done_observed':committed.is_set(),'event_count':len(result.get('events',[]))}
+        raise AssertionError('Run did not finish: '+json.dumps(diagnostic,sort_keys=True))
+    finally:
+        svc.store.unsubscribe_events(observe)
 
 def _wait_for_run_approval(svc,run,deadline):
     committed=threading.Event()
@@ -85,7 +108,7 @@ def test_always_ask_binds_exact_file_action_then_no_replay_on_resume(tmp_path):
             state=svc.store.run(run['id']); settings=state.get('settings',{})
             status=snapshot.get('status'); phase=state.get('phase')
             diagnostics={
-                'status':status if status in {'queued','running','awaiting_approval','waiting_question','completed','cancelled','failed','paused','interrupted'} else 'unknown',
+                'status':status if type(status) is str and status in {'queued','running','awaiting_approval','waiting_question','completed','cancelled','failed','paused','interrupted'} else 'unknown',
                 'phase':phase if phase in {'ready','generating','tools','round_complete','waiting_question','compacting','checkpoint'} else 'unknown',
                 'stop_category':('write_before_approval' if not no_write else
                     'approval_missing_recovery' if snapshot.get('recovery') else
