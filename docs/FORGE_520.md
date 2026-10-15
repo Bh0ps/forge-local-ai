@@ -52,6 +52,8 @@ Workers run hidden, belong to Forge's Windows process job and close with the coo
 llama.cpp binds an ephemeral loopback port with a random session key in a private file.
 Strata uses a private stdin/stdout token protocol. App/tool output is not written into
 native worker logs. Completed tool actions remain in Forge's normal invocation journal.
+Workers receive a small runtime environment without inherited cloud tokens or model
+overrides. Strata reserves 1.5 GiB of GPU headroom before filling its expert cache.
 A worker failure interrupts inference and never automatically replays a tool action.
 
 Local inference shares the existing GPU queue. Another local engine's active task blocks

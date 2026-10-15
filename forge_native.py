@@ -30,6 +30,13 @@ class NativeFailure(ValueError):
         return {'provider_id': 'forge-native', 'category': self.category}
 
 
+def worker_environment():
+    allowed={'SYSTEMROOT','SYSTEMDRIVE','WINDIR','COMSPEC','TEMP','TMP','LOCALAPPDATA',
+             'APPDATA','USERPROFILE','HOMEDRIVE','HOMEPATH','HOME','NUMBER_OF_PROCESSORS',
+             'PROCESSOR_ARCHITECTURE','XDG_CACHE_HOME'}
+    return {key.upper():value for key,value in os.environ.items() if key.upper() in allowed}
+
+
 class NativeRuntime:
     def __init__(self, home, *, bundle=None, busy=None, cpu_only=False):
         self.home = Path(home)
@@ -70,13 +77,10 @@ class NativeRuntime:
         return candidates[0]
 
     def _spawn(self, executable, arguments, *, stdin=False):
-        environment = os.environ.copy()
-        for key in list(environment):
-            if key.startswith(('LLAMA_','GGML_','STRATA_','CUDA_')):
-                environment.pop(key)
+        environment = worker_environment()
         directories = sorted({str(p.parent) for p in executable.parent.rglob('*.dll')})
         if (self.bundle/'shared').is_dir(): directories.append(str(self.bundle/'shared'))
-        system = Path(environment.get('SystemRoot','C:/Windows'))
+        system = Path(environment.get('SYSTEMROOT','C:/Windows'))
         environment['PATH'] = os.pathsep.join([str(executable.parent), *directories, str(system/'System32'), str(system)])
         process = subprocess.Popen([str(executable), *arguments], cwd=str(executable.parent), env=environment,
             stdin=subprocess.PIPE if stdin else subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -280,7 +284,8 @@ class NativeRuntime:
             arguments = ['--serve', '--pack', str(pack), '--native', str(path),
                 '--ple-gguf', str(self.catalog.root / model['files'][1]['path']),
                 '--expert-profile', str(Path(__file__).parent / 'forge_vendor' / 'strata' / 'expert-profile-coder.bin'),
-                '--expert-cache', 'auto', '--prefill', 'auto', '--spec', '4', '--mtp', str(mtp), '--max-context', str(context)]
+                '--expert-cache', 'auto', '--vram-reserve-mib', '1536', '--prefill', 'auto',
+                '--spec', '4', '--mtp', str(mtp), '--max-context', str(context)]
             if plan['mode']!='arena':
                 arguments+=['--resident-experts' if plan['mode']=='resident' else '--mmap-experts']
             if context>8192: arguments+=['--kv','int8']

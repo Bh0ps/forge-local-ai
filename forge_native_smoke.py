@@ -36,6 +36,8 @@ def frozen_native_smoke(service):
     if not callable(iq_pack.main) or not callable(prepare_mtp):raise ValueError('The frozen Strata pack module is unavailable.')
     if not (Path(__file__).parent/'forge_vendor/strata/draft_vocab.bin').is_file():
         raise ValueError('The frozen Strata draft vocabulary is unavailable.')
+    if file_hash(Path(__file__).parent/'forge_vendor/strata/QWEN_MTP_LICENSE')!='a0dc422560841fd68e06d974907f8b4c709bca44a67daad2b528437bdf676c08':
+        raise ValueError('The frozen Qwen draft license does not match its pinned bytes.')
     runtime=service.providers.native()
     runtime.catalog.configure(str(home/'models'/'native-smoke'))
     model=runtime.catalog.add([source],identifier='native-smoke-qwen',expected=[MODEL])
