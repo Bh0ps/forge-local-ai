@@ -193,6 +193,27 @@ def test_one_opening_allows_initial_render_but_never_adopts_a_remounted_pane(att
     assert value.effects.count('open-event') == 1 and value.clock.now == .05
 
 
+def test_opening_waits_for_expected_preview_after_previous_pane_during_page_transition(attachment):
+    value = attachment
+    previous = {**value.good, 'preview_id': 'previous-preview', 'pane_token': 'previous-mount'}
+    value.states[:] = [previous, value.good, value.good]
+    value.page.show(activate=False, request_open=True)
+    assert value.page.visible and value.page.bound_pane_token == 'mount'
+    assert value.clock.now == .05 and len(value.reads) == 3
+    assert value.effects.count('open-event') == value.effects.count('position') == 1
+    assert not set(value.effects) & {'focus', 'show', 'activate'}
+
+
+def test_opening_never_binds_a_previous_preview_that_persists_until_deadline(attachment):
+    value = attachment
+    value.states[:] = [{**value.good, 'preview_id': 'previous-preview', 'pane_token': 'previous-mount'}]
+    with pytest.raises(TimeoutError, match='opening timeout'):
+        value.page.show(activate=False, request_open=True)
+    assert value.clock.now == 10 and not value.page.visible
+    assert value.effects.count('open-event') == 1 and value.effects.count('position') == 0
+    assert all(snapshot['preview_id'] == 'previous-preview' for snapshot in value.reads)
+
+
 @pytest.mark.parametrize('blocker', ['modal', 'hud', 'css-hidden', 'ancestor-hidden', 'missing', 'preview', 'token', 'owner', 'cancel'])
 def test_second_read_blockers_cannot_be_retried_as_transient_geometry(attachment, blocker):
     value = attachment

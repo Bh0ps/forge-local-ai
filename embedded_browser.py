@@ -210,6 +210,11 @@ class EmbeddedWebView2Page(WebView2Page):
                 if snapshot.get('present') is not True:
                     if token is not None:
                         raise BrowserGuard('Browser panel changed. Inspect again after reopening it.')
+                elif (token is None and getattr(self, 'preview_id', None) is not None
+                        and snapshot.get('preview_id') != self.preview_id):
+                    # React can still show the previous preview while mounting
+                    # this opening. Do not admit or position that foreign pane.
+                    pass
                 else:
                     self._preview_identity(snapshot, {'pane_token': token})
                     current = snapshot.get('pane_token')
