@@ -1,6 +1,9 @@
 """The workspace can discover a preview while its native opening waits on UI."""
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+import threading
+
+import pytest
 
 import native_browser
 
@@ -88,3 +91,79 @@ def test_explicit_preview_open_budgets_navigation_after_initialization_and_does_
         assert clock.now == 25.05
     finally:
         svc.shutdown()
+
+
+@pytest.mark.parametrize('revoke', ['run-cancel', 'owner-change', 'preview-stop', 'browser-stop'])
+def test_pending_preview_attachment_rechecks_run_and_manager_ownership_before_position(tmp_path, revoke):
+    from native_browser import BrowserGuard
+    svc = service(tmp_path)
+    folder = tmp_path/'project'; folder.mkdir()
+    (folder/'index.html').write_text('<p>Pending fixture</p>', encoding='utf-8')
+    project = svc.create_project({'name': 'Pending fixture', 'path': str(folder)})
+    manager = svc.get_builder()
+    run = {'id': 'pending-fixture-run', 'project_id': project['id']}
+    preview = manager.execute(run, 'preview_start', {'mode': 'static'})
+    cancel, positions = threading.Event(), []
+    active = manager.previews.active[preview['id']]
+    class PendingPage(FakePage):
+        embedded = supports_pane_guard = True
+        visible = False
+        def navigate(self, url, check=None):
+            if check: check()
+            super().navigate(url)
+        def open_pane(self, check=None):
+            check()
+            if revoke == 'run-cancel': cancel.set()
+            elif revoke == 'owner-change': manager.previews.browser_preview = 'other-preview'
+            elif revoke == 'preview-stop': manager.previews.active.pop(preview['id'])
+            else: browser.stop()
+            check()  # Same check passed into real bind before native positioning.
+            positions.append(True)
+            self.visible = True
+    browser = manager.previews.browser = NativeBrowser(svc.store.home, view_factory=PendingPage,
+        navigation_guard=manager.previews.allowed_url, panel_id='forge-preview-panel')
+    try:
+        with pytest.raises(BrowserGuard, match='cancelled|changed'):
+            manager.execute(run, 'preview_open', {'id': preview['id']}, cancel)
+        assert not positions and not browser.view.visible
+        assert browser.view.effects.count('navigate') == 1
+    finally:
+        manager.previews.active[preview['id']] = active
+        manager.previews.browser_preview = preview['id']
+        svc.shutdown()
+
+
+def test_cancelled_preview_open_never_creates_a_view_or_navigates(tmp_path):
+    from native_browser import BrowserGuard
+    svc = service(tmp_path)
+    folder = tmp_path/'project'; folder.mkdir()
+    (folder/'index.html').write_text('<p>Cancelled fixture</p>', encoding='utf-8')
+    project = svc.create_project({'name': 'Cancelled fixture', 'path': str(folder)})
+    manager = svc.get_builder()
+    run = {'id': 'cancelled-fixture-run', 'project_id': project['id']}
+    preview = manager.execute(run, 'preview_start', {'mode': 'static'})
+    created = []
+    manager.previews.browser = NativeBrowser(svc.store.home,
+        view_factory=lambda changed: created.append(True) or FakePage(changed),
+        navigation_guard=manager.previews.allowed_url, panel_id='forge-preview-panel')
+    cancel = threading.Event(); cancel.set()
+    try:
+        with pytest.raises(BrowserGuard, match='cancelled'):
+            manager.previews.browser_action('show', {'id': preview['id']}, {'run_id': run['id'], 'cancel': cancel})
+        assert not created and manager.previews.browser.view is None
+    finally:
+        svc.shutdown()
+
+
+def test_cancelled_queued_open_cannot_clear_a_previous_browser_stop(tmp_path):
+    from native_browser import BrowserGuard
+    created = []
+    browser = NativeBrowser(tmp_path, view_factory=lambda changed: created.append(True) or FakePage(changed))
+    browser.stop()
+    cancel = threading.Event(); cancel.set()
+    try:
+        with pytest.raises(BrowserGuard, match='cancelled'):
+            browser.dispatch('show', context={'cancel': cancel})
+        assert browser.cancelled.is_set() and not created
+    finally:
+        browser.shutdown()

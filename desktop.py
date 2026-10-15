@@ -122,12 +122,15 @@ def _smoke_preview_failure_state(manager, identifier, window):
           return {builder:!!document.querySelector('nav[aria-label="Builder sections"]'),pane:!!p,
             pane_visible:!!r&&r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden',
             contained:!!r&&!!clip&&r.top>=clip.top-.5&&r.bottom<=clip.bottom+.5&&r.left>=clip.left-.5&&r.right<=clip.right+.5,
+            clip_top:!!r&&!!clip&&r.top>=clip.top-.5,clip_bottom:!!r&&!!clip&&r.bottom<=clip.bottom+.5,
+            clip_left:!!r&&!!clip&&r.left>=clip.left-.5,clip_right:!!r&&!!clip&&r.right<=clip.right+.5,
             viewport:!!r&&r.left>=0&&r.top>=0&&r.right<=innerWidth+.5&&r.bottom<=innerHeight+.5,
             modal:!!document.querySelector('dialog[open],.modal-backdrop'),hud:!!document.querySelector('.app.hud')};
         })()""")
         if type(ui) is dict:
             result.update({key: dict.get(ui, key) is True for key in
-                ('builder', 'pane', 'pane_visible', 'contained', 'viewport', 'modal', 'hud')})
+                ('builder', 'pane', 'pane_visible', 'contained', 'clip_top', 'clip_bottom',
+                 'clip_left', 'clip_right', 'viewport', 'modal', 'hud')})
     except Exception:
         pass
     return result

@@ -329,16 +329,19 @@ def test_preview_open_failure_records_safe_attachment_facts_before_cleanup():
     def evaluate(script):
         observed.append(script)
         return {'builder': True, 'pane': True, 'pane_visible': True, 'contained': False,
+            'clip_top': True, 'clip_bottom': False, 'clip_left': True, 'clip_right': True,
             'viewport': False, 'modal': False, 'hud': False, 'private': private}
     result = desktop._smoke_preview_failure_state(SimpleNamespace(previews=previews), 'fixture',
         SimpleNamespace(evaluate_js=evaluate))
     assert result == dict(available=True, running=True, loading=False, visible=False,
         view_present=True, record_ready=True, builder=True, pane=True, pane_visible=True,
+        clip_top=True, clip_bottom=False, clip_left=True, clip_right=True,
         contained=False, viewport=False, modal=False, hud=False)
     assert len(observed) == 1 and private not in json.dumps(result)
     # The report must remain primitive-only even if an untrusted page returns
     # strings or object values for every expected flag.
-    bad = {key: private for key in ('builder', 'pane', 'pane_visible', 'contained', 'viewport', 'modal', 'hud')}
+    bad = {key: private for key in ('builder', 'pane', 'pane_visible', 'contained', 'clip_top',
+        'clip_bottom', 'clip_left', 'clip_right', 'viewport', 'modal', 'hud')}
     result = desktop._smoke_preview_failure_state(SimpleNamespace(previews=previews), 'fixture',
         SimpleNamespace(evaluate_js=lambda script: bad))
     assert all(result[key] is False for key in bad) and private not in json.dumps(result)
