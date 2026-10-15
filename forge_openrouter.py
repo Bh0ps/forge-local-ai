@@ -14,6 +14,7 @@ import httpx
 from forge_credentials import CredentialVault
 from forge_inference import CompatibleProvider, ProviderStreamFailure, validated_response_format
 from forge_provider_state import reasoning_details, state_size, INCOMPLETE_PROVIDER_RECOVERY
+from forge_openrouter_errors import classify, message as failure_message, recovery_diagnostics, capacity
 from core import AGENT_SYSTEM_PROMPT, Core
 from context_window import estimated_prompt_tokens, prompt_budget, response_budget, require_model_context, history_character_limit
 from inference_stream import InferenceTimeoutError
@@ -32,16 +33,17 @@ CONDITION_FIELDS = frozenset(('min_prompt_tokens', 'utc_start', 'utc_end', 'utc_
 class OpenRouterFailure(ValueError):
     """A local, scrubbed error; remote error messages never gain this type."""
     def __init__(self,message,*,category='configuration',http_status=None,
-                 continuation_reason=None,requested_context=None,model_context_limit=None):
+                 continuation_reason=None,requested_context=None,model_context_limit=None,recovery=None):
         super().__init__(message)
         self.category=category;self.http_status=http_status
+        self.recovery=recovery_diagnostics(recovery)
         from forge_cloud_failure import continuation_diagnostics
         self.continuation=continuation_diagnostics({'category':category,'continuation_reason':continuation_reason,
             'requested_context':requested_context,'model_context_limit':model_context_limit})
 
     def diagnostics(self):
         return {'provider_id':'openrouter','category':self.category,
-            **({'http_status':self.http_status} if self.http_status is not None else {}),**self.continuation}
+            **({'http_status':self.http_status} if self.http_status is not None else {}),**self.continuation,**self.recovery}
 
 
 def _zero(value):
@@ -126,32 +128,48 @@ class OpenRouterProvider(CompatibleProvider):
 
     @staticmethod
     def _http_error(status,*,inference=False):
-        if status in (401, 403):
-            return 'OpenRouter rejected the API key. Update it in Forge Settings.'
-        if status == 429:
-            return 'OpenRouter free quota or capacity is limited. No automatic retry was made; check quota and retry later.'
-        if status == 402:
-            return 'OpenRouter rejected this free-only request. No paid model or credit purchase is required by Forge.'
-        if inference:
-            if status==400:return 'OpenRouter rejected the inference request (HTTP 400). Its model may require compatible reasoning and tool history; inspect and resolve that compatibility problem before resuming.'
-            if status==404:return 'No free OpenRouter inference route matched this model, privacy policy and tool capabilities (HTTP 404).'
-            return 'OpenRouter inference is unavailable (HTTP '+str(status)+'). Saved tool work remains local; no automatic request retry was made.'
-        return 'OpenRouter metadata is unavailable. Check the connection and retry later.'
+        return failure_message(classify(status)[0],status,inference=inference)
 
     @staticmethod
     def _http_category(status):
-        return 'authentication' if status in (401,403) else 'rate_limit' if status==429 else 'free_route' if status in (402,404) else 'invalid_request' if status==400 else 'provider_unavailable'
+        return classify(status)[0]
+
+    @staticmethod
+    def _failure(status,error=None,headers=None,*,inference=True):
+        category,details=classify(status,error,headers)
+        return OpenRouterFailure(failure_message(category,status,inference=inference),
+            category=category,http_status=status,recovery=details)
+
+    def response_error(self,response):
+        try:value=response.json()
+        except (ValueError,TypeError,RecursionError):value={}
+        raise self._failure(response.status_code,value.get('error') if isinstance(value,dict) else None,response.headers)
+
+    def stream_error(self,error,response):
+        code=error.get('code') if isinstance(error,dict) else None
+        raise self._failure(code if type(code) is int and 400<=code<=599 else None,error,response.headers)
 
     def _get(self, suffix):
         url=OPENROUTER_URL+suffix
+        def read(client):
+            with client.stream('GET',url,headers=self._headers(url)) as response:
+                bound=8*1024*1024 if response.is_success else 65536
+                content=bytearray()
+                for chunk in response.iter_bytes():
+                    if len(content)+len(chunk)>bound:
+                        raise OpenRouterFailure('OpenRouter returned oversized metadata.',category='metadata')
+                    content.extend(chunk)
+                return httpx.Response(response.status_code,headers=response.headers,content=bytes(content),request=response.request)
         try:
             if self.http_client:
-                response = self.http_client.get(url, headers=self._headers(url))
+                response = read(self.http_client)
             else:
                 with httpx.Client(timeout=10, follow_redirects=False, trust_env=False) as client:
-                    response = client.get(url, headers=self._headers(url))
+                    response = read(client)
             if not 200 <= response.status_code < 300:
-                raise OpenRouterFailure(self._http_error(response.status_code),category=self._http_category(response.status_code),http_status=response.status_code)
+                try:value=response.json()
+                except (ValueError,TypeError,RecursionError):value={}
+                raise self._failure(response.status_code,value.get('error') if isinstance(value,dict) else None,response.headers,inference=False)
             if self._authority is not None:self._authority._check(url,None)
             value = response.json()
             if not isinstance(value, dict):
@@ -282,7 +300,7 @@ class OpenRouterProvider(CompatibleProvider):
             raise OpenRouterFailure('OpenRouter returned invalid account metadata.')
         quota = data.get('free_model_daily_requests')
         cleaned = None
-        if isinstance(quota, dict) and all(type(quota.get(k)) is int and quota[k] >= 0 for k in ('used', 'limit', 'remaining')):
+        if isinstance(quota, dict) and all(type(quota.get(k)) is int and 0 <= quota[k] <= 2_147_483_647 for k in ('used', 'limit', 'remaining')):
             cleaned = {k: quota[k] for k in ('used', 'limit', 'remaining')}
         return {'free_model_daily_requests': cleaned,
                 'is_free_tier': data['is_free_tier'] if type(data.get('is_free_tier')) is bool else None,
@@ -304,7 +322,7 @@ class OpenRouterConnection:
         if not config:
             return {'id': 'openrouter', 'name': 'OpenRouter free', 'kind': 'openrouter', 'url': OPENROUTER_URL,
                     'configured': False, 'enabled': False, 'remote_consent': False, 'data_collection': 'deny', 'free_only': True, 'model': FREE_ROUTER}
-        return {**config, 'configured': bool(config.get('credential_ref'))}
+        return {**config, 'configured': bool(config.get('credential_ref')), 'free_capacity':capacity(config)}
 
     def save(self, data):
         config = self._config() or {};previous=dict(config)

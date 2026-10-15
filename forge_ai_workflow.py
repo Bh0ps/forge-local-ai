@@ -124,8 +124,7 @@ class AIWorkflow:
         ready=[role for role in SPECIALTIES if any(p.get('specialty')==role and p.get('enabled',True)
                and p.get('role') in ('researcher','reviewer') and
                (p.get('model')=='openrouter/free' or str(p.get('model','')).endswith(':free')) for p in profiles)]
-        quota=(config.get('account') or {}).get('free_model_daily_requests') or {}
-        remaining=quota.get('remaining') if type(quota.get('remaining')) is int else None
+        from forge_openrouter_errors import capacity
         sessions=sorted(self.store.entities('ai_workflow_tests'),key=lambda v:v.get('created_at',''),reverse=True)
         last=sessions[0] if sessions else {}
         workflow={'state':'unverified','checked_at':None,'receipt_id':None,'checks':[]}
@@ -139,9 +138,7 @@ class AIWorkflow:
                              ('disabled' if config.get('credential_ref') else 'missing'),
                              'enabled':bool(config.get('enabled')),'consent':bool(config.get('remote_consent'))},
             'authentication':config.get('metadata_auth') or {'state':'unverified','checked_at':None},
-            'free_capacity':{'state':'unknown' if remaining is None else ('available' if remaining>0 else 'exhausted'),
-                             'remaining':remaining,'checked_at':config.get('account_checked_at'),
-                             'note':'Metadata does not guarantee inference capacity.'},
+            'free_capacity':capacity(config),
             'catalog':{'state':'validated' if config.get('catalog_verified_at') else 'unverified',
                        'free_models':len(config.get('models') or []),'checked_at':config.get('catalog_verified_at'),
                        'error':config.get('catalog_error')},

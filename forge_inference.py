@@ -241,6 +241,11 @@ class CompatibleProvider:
         return result
     def estimate_tokens(self,messages,tools): return estimated_prompt_tokens(messages,tools,AGENT_SYSTEM_PROMPT)
     def prepare_body(self,data,body): return body
+    def response_error(self,response): response.raise_for_status()
+    def stream_error(self,error,response):
+        code=error.get('code') if isinstance(error,dict) else None
+        raise ProviderStreamFailure('Provider rejected the streamed response.',category='provider_error',
+            http_status=code if type(code) is int and 400<=code<=599 else None)
     def generate(self,data,cancel):
         # Validate the same context and tool contract before adapting protocols.
         cancel = cancel if cancel is not None else threading.Event()
@@ -350,10 +355,7 @@ class CompatibleProvider:
                 if isinstance(packet.get('provider'),str) and len(packet['provider'])<=300: final['response_provider']=packet['provider']
                 if isinstance(packet.get('id'),str) and len(packet['id'])<=300:final['provider_generation_id']=packet['id']
                 if packet.get('error'):
-                    error=packet['error']
-                    code=error.get('code') if isinstance(error,dict) else None
-                    raise ProviderStreamFailure('Provider rejected the streamed response.',category='provider_error',
-                        http_status=code if type(code) is int and 400<=code<=599 else None)
+                    self.stream_error(packet['error'],response)
                 usage=packet.get('usage')
                 if usage is not None and not isinstance(usage,dict): raise ValueError('Provider returned invalid usage counters.')
                 if usage:
@@ -439,7 +441,7 @@ class CompatibleProvider:
         try:
             yield from cancellable_inference(url,body,cancel,consume,
                                              headers_factory=headers,timeouts=Core._inference_timeouts(connect=10),
-                                             provider='Local provider',require_success=True)
+                                             provider='Local provider',require_success=True,response_error=self.response_error)
         except httpx.ConnectError:
             raise ValueError('The local provider is offline. Start its engine, then resume the run.') from None
         except httpx.TimeoutException:

@@ -65,7 +65,7 @@ WORKFLOW=[
     tool_schema('artifact_read','Retrieve a bounded range of a saved tool result or this run\'s structured checkpoint record.',{
         'id':{'type':'string'},'start':{'type':'integer'},'limit':{'type':'integer'}},['id']),
     tool_schema('attachment_read','Read a saved image as pixels using its forge-attachment reference.',{'id':{'type':'string'}},['id']),
-    tool_schema('delegate_agent','Assign a bounded subtask to a listed enabled helper. Only a refusal or empty cloud result permits retry_of with the failed run ID: reword the original task clearly without changing its objective or scope. At most three extra attempts; no completed tool actions are replayed. Other failures need their specific recovery action. Required assignments block completion; optional assignments may return unavailable.',{
+    tool_schema('delegate_agent','Assign a bounded subtask to a listed enabled helper. Only a refused, empty or unusable cloud result permits retry_of with the failed run ID: reword the original task clearly without changing its objective or scope. At most three extra attempts; no completed tool actions are replayed. Other failures need their specific recovery action. Required assignments block completion; optional assignments may return unavailable.',{
         'agent_id':{'type':'string'},'task':{'type':'string'},'wait':{'type':'boolean','default':True},
         'wait_seconds':{'type':'integer','minimum':0,'maximum':300,'default':120},
         'retry_of':{'type':'string'},'required':{'type':'boolean','default':True}},['agent_id','task']),
@@ -483,6 +483,7 @@ class RunManager:
                 assignment_id=data.get('assignment_id'),retry_of=data.get('retry_of'),
                 assignment_required=data.get('assignment_required',True),attempt=data.get('attempt',1),retry_count=data.get('retry_count',0),
                 assignment_original_request=data.get('assignment_original_request',text),
+                helper_result_corrections=data.get('helper_result_corrections',0),
                 retry_evidence=data.get('retry_evidence',[]),
                 summary='',elapsed_seconds=0,phase='ready',checkpoint='Request accepted.'),
                 existing['id'] if existing else None,source_key=data.get('source_key'),channel=channel)
@@ -1704,7 +1705,10 @@ class RunManager:
                     if details and (truncated or call_error):
                         from forge_openrouter import OpenRouterFailure
                         raise OpenRouterFailure('The provider returned incomplete reasoning or call data. '+INCOMPLETE_PROVIDER_RECOVERY,category='incomplete_provider_state')
-                    if calls and not truncated and not call_error and (details or run['settings']['provider_id']=='openrouter' and hasattr(provider,'validate_continuation')):
+                    from forge_helper_findings import completion_issue
+                    correction_continuation=bool(run['settings']['provider_id']=='openrouter' and details and not calls and (run.get('parent_id') or run.get('agent_id')) and
+                        run.get('mode')!='goal_review' and run.get('helper_result_corrections',0)<1 and completion_issue(visible_answer,run['request'])=='unusable_result')
+                    if (calls or correction_continuation) and not truncated and not call_error and (details or run['settings']['provider_id']=='openrouter' and hasattr(provider,'validate_continuation')):
                         from forge_openrouter import OpenRouterFailure, FREE_ROUTER
                         if run.get('continuation_model') and bound_model!=run['continuation_model']:
                             raise OpenRouterFailure('The provider changed the model bound to this tool exchange. Start a fresh scoped assignment; no tool from this response ran.',category='continuation_unavailable',continuation_reason='model_changed')
@@ -1749,6 +1753,16 @@ class RunManager:
                     if calls and run.get('tool_repair_streak'):
                         run=self.store.update_run(identifier,tool_repair_streak=0)
                     if not calls:
+                        if run['settings']['provider_id']=='openrouter' and (run.get('parent_id') or run.get('agent_id')) and run.get('mode')!='goal_review':
+                            from forge_helper_findings import completion_issue
+                            from forge_openrouter import OpenRouterFailure
+                            result_issue=completion_issue(visible_answer,run['request'])
+                            if result_issue=='unusable_result' and self.store.request_helper_correction(identifier):
+                                self.store.event(identifier,'status',text='Requesting concrete helper findings…')
+                                continue
+                            if result_issue:
+                                raise OpenRouterFailure('This helper reported a concrete blocker. Inspect its saved response before continuing the required assignment.' if result_issue=='assignment_blocked' else
+                                    'This helper returned no usable findings. Reword its original bounded assignment for a fresh attempt.',category=result_issue)
                         if (run.get('parent_id') or run.get('agent_id')) and not visible_answer.strip():
                             if run['settings']['provider_id']=='openrouter':
                                 from forge_openrouter import OpenRouterFailure
@@ -1866,7 +1880,11 @@ class RunManager:
             failure=str(exc)[:2000]
             if partial_details and run['settings']['provider_id']=='openrouter' and getattr(exc,'category',None)!='refusal':
                 failure='The provider stream ended with incomplete reasoning state. '+INCOMPLETE_PROVIDER_RECOVERY
-                self.store.update_run(identifier,failure={'provider_id':'openrouter','category':'incomplete_provider_state'})
+                from forge_openrouter_errors import recovery_diagnostics
+                cause=exc.diagnostics() if hasattr(exc,'diagnostics') else {}
+                safe_cause=recovery_diagnostics({**cause,'cause_category':cause.get('category',getattr(exc,'category',None))})
+                self.store.update_run(identifier,failure={'provider_id':'openrouter','category':'incomplete_provider_state',
+                    **({'http_status':cause['http_status']} if type(cause.get('http_status')) is int and 400<=cause['http_status']<=599 else {}),**safe_cause})
             elif getattr(exc,'category',None)=='incomplete_provider_state' and (run.get('failure') or {}).get('category')=='refusal':
                 # An unsafe Resume cannot erase the original explicit refusal.
                 # Its fresh reworded retry is independent of the archived state.

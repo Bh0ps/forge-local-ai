@@ -405,6 +405,23 @@ class ForgeStore(Store):
         if metadata.get('images'): metadata['images']=self.store_images(metadata['images'])
         return super().add_message(chat_id,role,content,**metadata)
 
+    def request_helper_correction(self,run_id):
+        """Commit the one logical-assignment correction and its request together."""
+        from forge_helper_findings import CORRECTION
+        with self._connection(transaction='write') as db:
+            row=db.execute('SELECT chat_id,data FROM runs WHERE id=?',(run_id,)).fetchone()
+            if not row:raise ValueError('Run not found.')
+            run=json.loads(row['data'])
+            if (run['settings']['provider_id']!='openrouter' or not (run.get('parent_id') or run.get('agent_id')) or
+                    run.get('mode')=='goal_review' or run['status'] in TERMINAL or run.get('helper_result_corrections',0)>=1):
+                return False
+            stamp=_now();run.update(helper_result_corrections=1,updated_at=stamp)
+            db.execute('UPDATE runs SET data=?,updated_at=? WHERE id=?',(encode(run),stamp,run_id))
+            db.execute('INSERT INTO messages(chat_id,role,content,metadata,created_at) VALUES(?,?,?,?,?)',
+                (row['chat_id'],'user',CORRECTION,self._metadata({'interaction_run_id':run_id}),stamp))
+            db.execute('UPDATE chats SET updated_at=? WHERE id=?',(stamp,row['chat_id']))
+            return True
+
     def save_assistant_turn(self,run_id,content,*,provider_state=None,**metadata):
         """Atomically save a public turn and its coordinator-only protocol state."""
         from storage import _text, MAX_MESSAGE_CHARACTERS
