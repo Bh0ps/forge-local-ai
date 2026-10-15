@@ -38,27 +38,44 @@ function PreviewPane({ preview, reload = 0, onError }: {preview: BuilderPreview;
   useEffect(() => {
     if (!isNative() || preview.status !== 'ready' || !pane.current) return;
     let disposed = false, pending = false, dirty = false, last = '';
-    let frame = 0;
-    function verticalViewport() {
+    let frame = 0, resizeFitPending = false;
+    function paneViewport() {
       const scrollport = pane.current?.closest('.builder-page')?.getBoundingClientRect();
-      return {top: Math.max(0, scrollport?.top ?? 0), bottom: Math.min(innerHeight - 28, scrollport?.bottom || innerHeight - 28)};
+      // Keep a small inset: native scrolling can round a flush top edge above
+      // its owner even though the pane still fits the window viewport.
+      return {top: Math.max(0, scrollport?.top ?? 0) + 2, bottom: Math.min(innerHeight - 28, scrollport?.bottom || innerHeight - 28) - 2,
+        left: Math.max(0, scrollport?.left ?? 0), right: Math.min(innerWidth, scrollport?.right ?? innerWidth)};
+    }
+    function sizePane(height: number) {
+      if (!pane.current) return;
+      if (pane.current.style.minHeight !== '160px') pane.current.style.minHeight = '160px';
+      if (pane.current.style.height !== `${height}px`) pane.current.style.height = `${height}px`;
+    }
+    function correctTop(nearEdge = false) {
+      if (!pane.current) return;
+      const scrollport = pane.current.closest<HTMLElement>('.builder-page');
+      const delta = paneViewport().top - pane.current.getBoundingClientRect().top;
+      // Correct only an explicit opening or a few pixels of resize rounding.
+      // Ordinary reading scrolls must never pull the user back to the preview.
+      if (scrollport && delta > 0 && (!nearEdge || delta <= 4)) scrollport.scrollTop -= Math.ceil(delta);
     }
     function schedule() { if (!disposed && !frame) frame = requestAnimationFrame(() => { frame = 0; void bind(); }); }
+    function resized() { resizeFitPending = true; schedule(); }
     function openPane() {
       if (disposed || !pane.current) return;
       if (!document.querySelector('.modal-backdrop, dialog[open]')) {
-        const viewport = verticalViewport();
+        const viewport = paneViewport();
         // Size before scrolling. Resizing a bottom-aligned pane afterwards can
         // repeatedly move its scroll anchor and push it outside the viewport.
         const height = Math.min(760, Math.floor(viewport.bottom - viewport.top));
         if (height >= 160) {
-          pane.current.style.minHeight = '160px';
-          pane.current.style.height = `${height}px`;
+          sizePane(height);
         }
         const r = pane.current.getBoundingClientRect();
-        if (r.y < viewport.top || r.x < 0 || r.right > innerWidth + 1 || r.bottom > viewport.bottom) {
+        if (r.y < viewport.top || r.x < viewport.left || r.right > viewport.right || r.bottom > viewport.bottom) {
           pane.current.scrollIntoView?.({block: 'start', inline: 'nearest', behavior: 'instant'});
         }
+        correctTop();
       }
       last = ''; schedule();
     }
@@ -66,19 +83,21 @@ function PreviewPane({ preview, reload = 0, onError }: {preview: BuilderPreview;
       if (disposed || !pane.current) return;
       if (pending) { dirty = true; return; }
       const blocked = Boolean(document.querySelector('.modal-backdrop, dialog[open]'));
+      const fitResize = resizeFitPending; resizeFitPending = false;
+      if (!blocked && fitResize) correctTop(true);
       let r = pane.current.getBoundingClientRect();
       // A native child must fit wholly inside its actual owner. Unlike an
       // iframe, it cannot be clipped by the surrounding scroll container.
-      const viewport = verticalViewport();
+      const viewport = paneViewport();
       const available = Math.floor(viewport.bottom - r.y);
-      if (available < 160 || r.y < viewport.top - .5 || r.x < 0 || r.right > innerWidth + 1) {
+      if (available < 160 || r.y < viewport.top - .5 || r.x < viewport.left - .5 || r.right > viewport.right + .5) {
         await api('preview_browser_hide', {id: preview.id, pane_token: paneToken}).catch(() => {}); last = ''; return;
       }
       const height = Math.min(760, available);
-      pane.current.style.minHeight = '160px';
-      pane.current.style.height = `${height}px`;
+      sizePane(height);
       r = pane.current.getBoundingClientRect();
-      if (r.y < viewport.top - .5 || r.bottom > viewport.bottom + .5) {
+      const fitted = paneViewport();
+      if (r.y < fitted.top - .5 || r.bottom > fitted.bottom + .5 || r.x < fitted.left - .5 || r.right > fitted.right + .5) {
         await api('preview_browser_hide', {id: preview.id, pane_token: paneToken}).catch(() => {}); last = ''; return;
       }
       const data = { id: preview.id, pane_token: paneToken, panel_id: 'forge-preview-panel', rect: { x: r.x, y: r.y, width: r.width, height: r.height }, viewport: {width: innerWidth, height: innerHeight} };
@@ -89,11 +108,18 @@ function PreviewPane({ preview, reload = 0, onError }: {preview: BuilderPreview;
       catch (e) { if (!disposed) onError(errorText(e)); }
       finally { pending = false; if (disposed) void api('preview_browser_hide', {id: preview.id, pane_token: paneToken}).catch(() => {}); else if (dirty) { dirty = false; schedule(); } }
     }
-    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(schedule) : null;
+    const scrollport = pane.current.closest('.builder-page');
+    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(entries => {
+      // Our own fitted height also resizes the pane. Only an owner resize
+      // may realign it; a reading scroll can legitimately change that height.
+      if (entries.some(entry => entry.target === scrollport)) resizeFitPending = true;
+      schedule();
+    }) : null;
     resize?.observe(pane.current);
+    if (scrollport) resize?.observe(scrollport);
     const observer = new MutationObserver(schedule); observer.observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'open', 'hidden']});
-    window.addEventListener('resize', schedule); window.addEventListener('scroll', schedule, true); window.addEventListener('forge:preview-open', openPane); openPane();
-    return () => { disposed = true; cancelAnimationFrame(frame); resize?.disconnect(); observer.disconnect(); window.removeEventListener('resize', schedule); window.removeEventListener('scroll', schedule, true); window.removeEventListener('forge:preview-open', openPane); void api('preview_browser_hide', {id: preview.id, pane_token: paneToken}).catch(() => {}); };
+    window.addEventListener('resize', resized); window.addEventListener('scroll', schedule, true); window.addEventListener('forge:preview-open', openPane); openPane();
+    return () => { disposed = true; cancelAnimationFrame(frame); resize?.disconnect(); observer.disconnect(); window.removeEventListener('resize', resized); window.removeEventListener('scroll', schedule, true); window.removeEventListener('forge:preview-open', openPane); void api('preview_browser_hide', {id: preview.id, pane_token: paneToken}).catch(() => {}); };
   }, [preview.id, preview.status]);
   if (!isNative()) return <iframe key={`${preview.id}-${reload}`} className="builder-preview-frame" title="Local application preview" src={preview.url || undefined} sandbox="allow-scripts allow-forms allow-same-origin" />;
   return <div className="builder-preview-frame" id="forge-preview-panel" data-forge-browser-panel="forge-preview-panel" data-forge-preview-id={preview.id} data-forge-pane-token={paneToken} ref={pane}><p>Opening the separate local preview…</p></div>;

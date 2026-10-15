@@ -21,6 +21,7 @@ from forge_runs import RunManager
 from forge_store import ForgeStore, TERMINAL, atomic_text, encode, validate_goal_limits
 from project_tools import ProjectTools
 from storage import _now
+from forge_version import VERSION
 
 
 def _publish_channel_goal_document(path,text):
@@ -384,7 +385,7 @@ class ForgeService:
     def bootstrap(self):
         runs=self.store.runs(limit=200)
         from forge_workspace_ui import WorkspaceUI
-        return dict(version='5.2.1',name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
+        return dict(version=VERSION,name='Forge',settings=self.store.get_settings(),projects=WorkspaceUI(self.store).projects(),
                     chats=self.store.list_chats(),runs=runs,goals=[self.goal_view(goal,runs) for goal in self.store.active_goals()],
                     spaces=self.store.entities('spaces'),schedules=self.store.entities('schedules'),agents=self.store.entities('agents'),
                     providers=self.providers.configurations(),commands=COMMANDS,
@@ -550,7 +551,7 @@ class ForgeService:
             with self.manager_lock:
                 if self.update_manager is None:
                     from forge_updates import UpdateManager
-                    self.update_manager=UpdateManager(self,current_version='5.2.1')
+                    self.update_manager=UpdateManager(self,current_version=VERSION)
             return self.update_manager.dispatch(action,data)
         if action.startswith(('channel_','notification_')):
             return self.get_channels().dispatch(action,data)
@@ -1235,14 +1236,15 @@ class ForgeService:
             latest=max(attempts,key=lambda r:r.get('attempt',1))
             if latest['id']!=retry['id']:raise AgentLaunchRejected('This assignment already has a newer attempt. Retrieve that result instead.')
             if retry.get('retry_count',0)>=3:raise AgentLaunchRejected('This assignment used all three extra attempts. Report it unavailable or resolve the required blocker.')
-            if (retry.get('failure') or {}).get('category') not in ('refusal','empty_result'):
-                raise AgentLaunchRejected('Only refused or empty cloud results may use a reworded assignment retry. Resolve this failure using its specific recovery action before continuing.')
+            if (retry.get('failure') or {}).get('category') not in ('refusal','empty_result','unusable_result'):
+                raise AgentLaunchRejected('Only refused or empty cloud results, including unusable acknowledgments, may use a reworded assignment retry. Resolve this failure using its specific recovery action before continuing.')
             original=self.store.run(assignment)
             if 'required' in data and required!=original.get('assignment_required',True):
                 raise AgentLaunchRejected('A retry must preserve whether the original assignment is required.')
             required=original.get('assignment_required',True)
             lineage={'assignment_id':assignment,'retry_of':retry['id'],'attempt':retry.get('attempt',1)+1,
-                'retry_count':retry.get('retry_count',0)+1,'assignment_original_request':original.get('assignment_original_request',original['request'])}
+                'retry_count':retry.get('retry_count',0)+1,'assignment_original_request':original.get('assignment_original_request',original['request']),
+                'helper_result_corrections':retry.get('helper_result_corrections',0)}
         if parent:
             with self.jobs.lock: parent_job=self.jobs.jobs.get(parent['id'])
             if parent_job and parent_job['cancel'].is_set(): raise AgentLaunchRejected('The parent run is stopping; no helper was started.')
@@ -1410,7 +1412,7 @@ class ForgeService:
         successful=child['status']=='completed' and bool(assistant.strip())
         remaining=max(0,3-child.get('retry_count',0))
         retryable=(child.get('settings',{}).get('provider_id')=='openrouter' and child['status'] in ('paused','failed','interrupted') and
-            remaining>0 and (child.get('failure') or {}).get('category') in ('refusal','empty_result'))
+            remaining>0 and (child.get('failure') or {}).get('category') in ('refusal','empty_result','unusable_result'))
         public={key:child.get(key) for key in ('id','chat_id','parent_id','agent_id','project_id','workspace_project_id','worktree_id',
             'status','readonly','checkpoint','recovery','rounds','tools','output_tokens','assignment_id','retry_of','attempt','retry_count','assignment_required','failure')}
         public['settings']={key:child['settings'].get(key) for key in ('provider_id','model','context')}
@@ -1429,6 +1431,7 @@ class ForgeService:
             'next_action':'Use the helper evidence to continue the task.' if successful else
                 'Reword the original bounded task without changing its objective; call delegate_agent with retry_of='+child['id']+' for a fresh free-router attempt. Preserve its scopes and completed evidence.' if retryable else
                 'Resume cannot replay this incomplete signed exchange. Inspect the saved work and request explicit recovery; a new unrelated helper does not satisfy this required assignment.' if (child.get('failure') or {}).get('category')=='incomplete_provider_state' else
+                'Resolve the concrete blocker in the saved response before resuming this assignment; do not repeat unchanged work or treat this report as verified completion.' if (child.get('failure') or {}).get('category')=='assignment_blocked' else
                 'Inspect the helper activity or pending approval/question; call agent_result to wait again. Do not treat unfinished work as complete.'}
 
     @staticmethod

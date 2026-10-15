@@ -5,6 +5,7 @@ import json
 import re
 from copy import deepcopy
 from forge_cloud_failure import continuation_diagnostics
+from forge_openrouter_errors import recovery_diagnostics
 
 
 ACCENTS = ('copper', 'sage', 'blue', 'violet', 'rose')
@@ -60,6 +61,7 @@ def _failure(value):
     if type(value.get('http_status')) is int and 100 <= value['http_status'] <= 599:
         result['http_status'] = value['http_status']
     result.update(continuation_diagnostics(value))
+    result.update(recovery_diagnostics(value))
     return result or None
 
 
@@ -274,5 +276,6 @@ class WorkspaceUI:
                 'last_tool': dict(last) if last else None, 'retry_count': run.get('retry_count', 0),
                 'attempt': run.get('attempt', 1), 'stop_category': failure.get('category'),
                 'http_status': failure.get('http_status'), **continuation_diagnostics(failure),
+                **recovery_diagnostics(failure),
                 'finish_reason': run.get('last_finish_reason'), 'generation_id': run.get('provider_generation_id'),
                 'response_provider': run.get('response_provider')}

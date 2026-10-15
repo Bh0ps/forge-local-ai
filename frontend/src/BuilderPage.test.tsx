@@ -71,7 +71,7 @@ describe('Builder brief and completion evidence', () => {
     try {
       const view = render(<BuilderPage projects={[project]}/>); await screen.findByLabelText('Objective');
       await userEvent.click(screen.getByRole('button', {name: 'Preview'}));
-      await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_show', expect.objectContaining({id: 'preview', rect: expect.objectContaining({y: 300, height: innerHeight - 328})})));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_show', expect.objectContaining({id: 'preview', rect: expect.objectContaining({y: 300, height: innerHeight - 330})})));
       expect(scroll).toHaveBeenCalledTimes(1);
       expect(scroll).toHaveBeenLastCalledWith({block: 'start', inline: 'nearest', behavior: 'instant'});
       top = innerHeight - 100; fireEvent.scroll(window);
@@ -83,7 +83,7 @@ describe('Builder brief and completion evidence', () => {
       await waitFor(() => expect(call.mock.calls.filter(([action]) => action === 'preview_browser_show').length).toBe(shown + 1));
       expect(scroll).toHaveBeenCalledTimes(2);
       top = 220; fireEvent.scroll(window);
-      await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_show', expect.objectContaining({rect: expect.objectContaining({y: 220, height: innerHeight - 248})})));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_show', expect.objectContaining({rect: expect.objectContaining({y: 220, height: innerHeight - 250})})));
       expect(scroll).toHaveBeenCalledTimes(2);
       const afterScroll = call.mock.calls.filter(([action]) => action === 'preview_browser_show').length;
       top = 10; fireEvent.scroll(window);
@@ -94,6 +94,66 @@ describe('Builder brief and completion evidence', () => {
       view.unmount();
       expect(call).toHaveBeenCalledWith('preview_browser_hide', {id: 'preview', pane_token: paneToken});
     } finally {
+      if (descriptor) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', descriptor);
+      else delete (HTMLElement.prototype as {scrollIntoView?: unknown}).scrollIntoView;
+    }
+  });
+  it('corrects fractional native top clipping on open and resize without replaying or relaxing owner bounds', async () => {
+    let clipTop = 89.25, top = innerHeight - 100, left = 100, scrollTop = 700;
+    let onResize: ResizeObserverCallback | undefined;
+    vi.stubGlobal('ResizeObserver', class {constructor(callback: ResizeObserverCallback) {onResize = callback;} observe() {} disconnect() {}});
+    const preview = {id: 'preview', builder_id: 'builder', status: 'ready', url: 'http://127.0.0.1:1234/'};
+    const call = bridge({builder_get: {...record, previews: [preview]}, preview_browser_status: {builder_id: 'builder'}, preview_browser_show: {ok: true}, preview_browser_hide: {ok: true}});
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function(this: HTMLElement) {
+      if (this.classList.contains('builder-page')) {
+        if (!Object.hasOwn(this, 'scrollTop')) Object.defineProperty(this, 'scrollTop', {configurable: true, get: () => scrollTop, set: (value: number) => {top += scrollTop - value; scrollTop = value;}});
+        return {x:20,y:clipTop,top:clipTop,left:20,width:innerWidth-40,height:innerHeight-28-clipTop,right:innerWidth-20,bottom:innerHeight-28,toJSON:()=>({})} as DOMRect;
+      }
+      const height = this.id === 'forge-preview-panel' ? Number.parseInt(this.style.height) || 400 : 0;
+      return {x:left,y:top,top,left,width:200,height,right:left+200,bottom:top+height,toJSON:()=>({})} as DOMRect;
+    });
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView');
+    const scroll = vi.fn(function(this: HTMLElement) {if (this.id === 'forge-preview-panel') top = clipTop - .75;});
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {configurable: true, value: scroll});
+    try {
+      render(<BuilderPage projects={[project]}/>); await screen.findByLabelText('Objective');
+      await userEvent.click(screen.getByRole('button', {name: 'Preview'}));
+      const shows = () => call.mock.calls.filter(([action]) => action === 'preview_browser_show');
+      await waitFor(() => expect(shows().length).toBeGreaterThan(0));
+      function expectContained() {
+        const data = shows().at(-1)![1] as {rect: {y: number; height: number}; pane_token: string};
+        expect(data.rect.y).toBeGreaterThanOrEqual(clipTop + 2);
+        expect(data.rect.y + data.rect.height).toBeLessThanOrEqual(innerHeight - 30);
+        expect(data.pane_token).toBe(document.getElementById('forge-preview-panel')?.getAttribute('data-forge-pane-token'));
+      }
+      expectContained(); expect(scroll).toHaveBeenCalledTimes(1);
+      const first = shows().length;
+      clipTop = 91; top = clipTop - .75; fireEvent.resize(window);
+      await waitFor(() => expect(shows().length).toBeGreaterThan(first));
+      expectContained(); expect(scroll).toHaveBeenCalledTimes(1);
+      const beforeTinyScroll = shows().length;
+      top -= .5; fireEvent.scroll(window);
+      await waitFor(() => expect(shows().length).toBeGreaterThan(beforeTinyScroll));
+      const tinyScrollTop = top;
+      await act(async () => {
+        const pane = document.getElementById('forge-preview-panel')!;
+        onResize?.([{target: pane, contentRect: pane.getBoundingClientRect(), borderBoxSize: [], contentBoxSize: [], devicePixelContentBoxSize: []}], {} as ResizeObserver);
+        await new Promise(resolve => requestAnimationFrame(resolve));
+      });
+      expect(top).toBe(tinyScrollTop); // A fitted height change cannot rearm scrolling.
+      const resized = shows().length;
+      top = clipTop + .5; fireEvent.scroll(window);
+      await waitFor(() => expect(call).toHaveBeenLastCalledWith('preview_browser_hide', expect.objectContaining({id:'preview'})));
+      expect(top).toBe(clipTop + .5); // Even a small intentional scroll stays put.
+      expect(shows()).toHaveLength(resized);
+      const hides = call.mock.calls.filter(([action]) => action === 'preview_browser_hide').length;
+      top = clipTop + 2.25;
+      left = 19.25; fireEvent.scroll(window);
+      await waitFor(() => expect(call.mock.calls.filter(([action]) => action === 'preview_browser_hide').length).toBeGreaterThan(hides));
+      expect(shows()).toHaveLength(resized);
+      expect(call.mock.calls.some(([action]) => ['preview_start', 'preview_browser_reload'].includes(action))).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
       if (descriptor) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', descriptor);
       else delete (HTMLElement.prototype as {scrollIntoView?: unknown}).scrollIntoView;
     }

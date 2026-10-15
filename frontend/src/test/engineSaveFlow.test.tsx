@@ -1,4 +1,4 @@
-import { act,fireEvent,render,screen,waitFor } from '@testing-library/react';
+import { act,fireEvent,render,screen,waitFor,within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe,expect,it,vi } from 'vitest';
 import App from '../App';
@@ -94,7 +94,16 @@ describe('confirmed connection save in the actual workspace',()=>{
   it('keeps the post-save model refresh warning visible and preserves the conversation draft',async()=>{
     const fixture=await actualApp('models');await screen.findByText('Synthetic model refresh unavailable');expect(screen.queryByRole('dialog',{name:'Add local engine'})).toBeNull();
     expect(fixture.call.mock.calls.filter(([action])=>action==='provider_save')).toHaveLength(1);expect(screen.queryByText('Engine saved.')).toBeNull();
-    await userEvent.click(screen.getByRole('button',{name:'Saved connection fixture'}));await waitFor(()=>expect((screen.getByRole('textbox',{name:'Message Forge'}) as HTMLTextAreaElement).value).toBe('Keep this draft'));expect(fixture.drafts.get(fixture.chat.id)?.content).toMatchObject({text:'Keep this draft'});
+    const dialog=screen.getByRole('dialog',{name:'Settings'});
+    expect(within(dialog).getByRole('status').textContent).toBe('Synthetic model refresh unavailable');
+    const composer=document.querySelector('textarea[aria-label="Message Forge"]');
+    const before=fixture.call.mock.calls.filter(([action])=>action==='get_chat').length;
+    await userEvent.click(within(dialog).getByRole('button',{name:'Close dialog'}));
+    expect(screen.getByRole('textbox',{name:'Message Forge'})).toBe(composer);
+    await waitFor(()=>expect(composer).toHaveProperty('value','Keep this draft'));
+    expect(screen.getByText('Retained connection conversation')).toBeTruthy();
+    expect(fixture.call.mock.calls.filter(([action])=>action==='get_chat')).toHaveLength(before);
+    expect(fixture.drafts.get(fixture.chat.id)?.content).toMatchObject({text:'Keep this draft'});
   });
   it('retains the provider-list inline error alongside the confirmed save notice',async()=>{
     const fixture=await actualApp('providers');await screen.findByText('Synthetic connection-list refresh unavailable');expect(screen.getByText('Engine saved.')).toBeTruthy();expect(fixture.call.mock.calls.filter(([action])=>action==='provider_save')).toHaveLength(1);

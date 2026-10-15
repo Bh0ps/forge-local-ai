@@ -62,6 +62,8 @@ def test_start_rechecks_chat_snapshot_before_creating_writer(tmp_path, monkeypat
 def test_resuming_old_run_after_chat_move_cannot_write_previous_project(tmp_path, monkeypatch):
     svc = service(tmp_path)
     try:
+        launched = []
+        monkeypatch.setattr(svc.jobs, '_launch', lambda saved: launched.append(saved['id']))
         first_folder = tmp_path / 'first'
         second_folder = tmp_path / 'second'
         first_folder.mkdir()
@@ -69,13 +71,18 @@ def test_resuming_old_run_after_chat_move_cannot_write_previous_project(tmp_path
         first = svc.create_project({'name': 'First', 'path': str(first_folder)})
         second = svc.create_project({'name': 'Second', 'path': str(second_folder)})
         run = svc.jobs.start({'project_id': first['id'], 'text': 'Inspect files'})
-        finished(svc, run)
+        # The regression concerns resuming a persisted run after a chat move.
+        # Commit that prior completion directly; inference speed is unrelated.
+        svc.store.finish_run(run['id'], {'status': 'completed', 'phase': 'checkpoint'},
+                             {'chat_id': run['chat_id'], 'status': 'completed'})
         svc.dispatch('chat_move', {'id': run['chat_id'], 'project_id': second['id']})
         svc.store.update_run(run['id'], status='paused')
-        monkeypatch.setattr(svc.jobs, '_launch', lambda saved: None)
         with pytest.raises(ValueError, match='project|moved'):
             svc.jobs.resume(run['id'])
         assert svc.store.run(run['id'])['status'] == 'paused'
+        assert svc.store.run(run['id'])['project_id'] == first['id']
+        assert svc.store.get_chat(run['chat_id'])['project_id'] == second['id']
+        assert launched == [run['id']]
     finally:
         svc.shutdown()
 

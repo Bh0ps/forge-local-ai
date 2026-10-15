@@ -4,3 +4,4 @@
 
 /* Native preview fitting must not move the browser's scroll anchor. */
 .builder-page{overflow-anchor:none}
+#forge-preview-panel{scroll-margin:2px}

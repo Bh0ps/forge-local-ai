@@ -6,15 +6,17 @@ import { Badge, ErrorNotice, Field, Toggle } from './components';
 import type { Agent, Settings } from './types';
 import './openRouter.css';
 
+interface Capacity {state:string;remaining?:number;used?:number;limit?:number;checked_at?:string;expires_at?:string;note?:string}
 interface Provider {
   enabled?: boolean; connected?: boolean; remote_consent?: boolean; data_collection?: string;
   account?: { free_model_daily_requests?: { used: number; limit: number; remaining: number }; quota_note?: string };
   models?: { name: string }[];
+  free_capacity?: Capacity;
 }
 interface WorkflowStatus {
   guidance_enabled?: boolean;
   configuration?: {state:string}; authentication?: {state:string;checked_at?:string;error?:string};
-  free_capacity?: {state:string;remaining?:number;checked_at?:string;note?:string}; catalog?: {state:string;free_models?:number;checked_at?:string};
+  free_capacity?: Capacity; catalog?: {state:string;free_models?:number;checked_at?:string};
   profiles?: {state:string;missing?:string[];ready?:string[];checked_at?:string};
   workflow?: {state:string;checked_at?:string;receipt_id?:string;checks?:unknown[]};
 }
@@ -26,6 +28,7 @@ export function OpenRouterSettings({ notify, settings, onChange }: { notify: (v:
   const [savedProvider, setSavedProvider] = useState<Provider>({});
   const keyDraft=useRetainedScratch('openrouter-key','','unsaved_setup'),key=keyDraft.value,setKey=keyDraft.update;const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const [workflow,setWorkflow]=useState<WorkflowStatus|null>(null), [selfTest,setSelfTest]=useState<{id:string;state:string;stages?:unknown[];failure_reason?:string}|null>(null);
+  const [metadataNow,setMetadataNow]=useState(Date.now);
   async function refreshWorkflow(){const value=await api<WorkflowStatus>('ai_workflow_status');setWorkflow(value);}
   useEffect(() => {
     let disposed = false;
@@ -36,7 +39,10 @@ export function OpenRouterSettings({ notify, settings, onChange }: { notify: (v:
   }, []);
   useEffect(()=>{if(!selfTest||selfTest.state!=='running')return;let alive=true,pending=false;const timer=setInterval(async()=>{if(pending||document.visibilityState==='hidden')return;pending=true;try{const value=await api<typeof selfTest>('ai_workflow_self_test_status',{id:selfTest.id});if(alive){setSelfTest(value);if(value?.state!=='running')await refreshWorkflow();}}catch(e){if(alive)setError(errorText(e));}finally{pending=false;}},1500);return()=>{alive=false;clearInterval(timer);};},[selfTest?.id,selfTest?.state]);
   const ready = Boolean(savedProvider.enabled && savedProvider.connected && savedProvider.remote_consent && !key && JSON.stringify(connectionOptions(provider)) === JSON.stringify(connectionOptions(savedProvider)));
-  const quota = savedProvider.account?.free_model_daily_requests;
+  const capacity=savedProvider.free_capacity || workflow?.free_capacity;
+  const capacityState=capacity && ['available','exhausted'].includes(capacity.state) && (!capacity.expires_at || !Number.isFinite(Date.parse(capacity.expires_at)) || Date.parse(capacity.expires_at)<=metadataNow) ? 'stale' : capacity?.state || 'unknown';
+  const quota=['available','exhausted'].includes(capacityState) ? capacity : undefined;
+  useEffect(()=>{if(!capacity?.expires_at)return;const timer=setInterval(()=>setMetadataNow(Date.now()),30000);return()=>clearInterval(timer);},[capacity?.expires_at]);
   const reviewModel = String(settings?.goal_review_model || FREE_ROUTER);
   const reviewContext = Number(settings?.goal_review_context || 32768);
   const reviewContexts = [...new Set([8192,16384,32768,65536,reviewContext])].sort((a,b) => a-b);
@@ -57,6 +63,15 @@ export function OpenRouterSettings({ notify, settings, onChange }: { notify: (v:
       await refreshWorkflow().catch(()=>{});
     } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
   }
+  async function refreshAllowance(){
+    setBusy(true);setError('');
+    try{
+      const checked=await api<{provider:Provider}>('openrouter_test');
+      setSavedProvider(checked.provider);setMetadataNow(Date.now());
+      if(!profileDraft.dirty){setProvider(checked.provider);profileDraft.accepted(checked.provider);}
+      await refreshWorkflow();
+    }catch(e){setError(errorText(e));}finally{setBusy(false);}
+  }
   async function setupAgents() {
     setBusy(true); setError('');
     try {
@@ -73,7 +88,7 @@ export function OpenRouterSettings({ notify, settings, onChange }: { notify: (v:
   async function setupWorkflow(){setBusy(true);setError('');try{const result=await api<{status:WorkflowStatus;settings?:Partial<Settings>}>('ai_workflow_setup',{goal_guidance:true});setWorkflow(result.status);if(onChange&&result.settings)await onChange({goal_cloud_guidance:Boolean(result.settings.goal_cloud_guidance),auto_delegate:Boolean(result.settings.auto_delegate),goal_review_enabled:Boolean(result.settings.goal_review_enabled)});notify('Goal guidance and free cloud workflow profiles configured. Run the workflow check to verify execution.');}catch(e){setError(errorText(e));}finally{setBusy(false);}}
   async function testWorkflow(){setBusy(true);setError('');try{const result=await api<{id:string;state:string;stages?:unknown[];failure_reason?:string}>('ai_workflow_self_test');setSelfTest(result);}catch(e){setError(errorText(e));}finally{setBusy(false);}}
   return <div className="openrouter-settings">
-    <div className="openrouter-title"><div><h2>OpenRouter team</h2><p className="muted">Give your local agent remote help and an independent completion check.</p></div><Badge>{workflow?.workflow?.state==='verified' ? 'Workflow verified' : savedProvider.connected ? 'Account authenticated' : 'Setup needed'}</Badge></div>
+    <div className="openrouter-title"><div><h2>OpenRouter team</h2></div><Badge>{workflow?.workflow?.state==='verified' ? 'Workflow verified' : savedProvider.connected ? 'Account authenticated' : 'Setup needed'}</Badge></div>
     {error && <ErrorNotice error={error} />}
     <section className="settings-card">
       <div className="openrouter-section-title"><KeyRound size={17} /><div><h3>Connection</h3><small>Free-only models · No additional local VRAM</small></div></div>
@@ -82,10 +97,10 @@ export function OpenRouterSettings({ notify, settings, onChange }: { notify: (v:
       <Toggle label="Enable free OpenRouter agents" checked={Boolean(provider.enabled)} disabled={busy} onChange={enabled => setProvider({ ...provider, enabled })} />
       <Toggle label="Allow providers that collect data" description="Off requests providers that do not collect prompt data. Free providers may be unavailable under this restriction." checked={provider.data_collection === 'allow'} disabled={busy} onChange={allow => setProvider({ ...provider, data_collection: allow ? 'allow' : 'deny' })} />
       <div className="setup-actions">{(keyDraft.dirty || profileDraft.dirty) && <button type="button" className="text-button" disabled={busy} onClick={()=>{keyDraft.discard();setProvider(savedProvider);profileDraft.accepted(savedProvider);}}>Discard connection input</button>}<button className="primary" disabled={busy} onClick={() => void save()}><KeyRound size={14} />Save connection</button><button className="secondary" disabled={busy} onClick={() => void save(true)}><Check size={14} />Connect / Test</button><a href="https://openrouter.ai/settings/keys" target="_blank" rel="noopener noreferrer">Create a key</a></div>
-      {quota && <p className="openrouter-quota">Free requests today: {quota.used} / {quota.limit} · {quota.remaining} remaining. Helpers and reviews share this quota.</p>}
+      <div className="openrouter-quota"><p>{quota ? <>Free requests today: {quota.used} / {quota.limit} · {quota.remaining} remaining. Helpers and reviews share this quota.</> : capacityState==='stale' ? 'Daily allowance needs refresh.' : 'Daily allowance is unavailable.'}{capacity?.checked_at && <small> Checked {new Date(capacity.checked_at).toLocaleString()}</small>}</p><button type="button" className="text-button" disabled={busy||!ready} onClick={()=>void refreshAllowance()}>Refresh allowance</button></div>
     </section>
     {settings && onChange && <>
-      <section className="settings-card"><h3>Goal guidance and workflow verification</h3><Toggle label="Use OpenRouter guidance for goals" checked={Boolean(settings.goal_cloud_guidance ?? workflow?.guidance_enabled)} disabled={busy} description="A scoped planner advises ordinary goals and Builder tasks before local implementation. Advisory outages continue locally after 60 seconds." onChange={value=>void change({goal_cloud_guidance:value})}/><div className="workflow-connection-states">{[['Configuration',workflow?.configuration],['Account authentication',workflow?.authentication],['Free capacity',workflow?.free_capacity],['Free catalogue',workflow?.catalog],['Profiles',workflow?.profiles],['Goal workflow',workflow?.workflow]].map(([name,value])=>{const state=value as {state?:string;checked_at?:string}|undefined;return <div key={String(name)}><strong>{String(name)}</strong><Badge>{state?.state || 'unverified'}</Badge><small>{state?.checked_at ? new Date(state.checked_at).toLocaleString() : 'No verification recorded'}</small></div>;})}</div>{workflow?.profiles?.missing?.length ? <p>Missing profiles: {workflow.profiles.missing.join(', ')}</p> : null}<div className="setup-actions"><button className="primary" disabled={busy||!ready} onClick={()=>void setupWorkflow()}>Set up goal connections</button><button className="secondary" disabled={busy||!ready||selfTest?.state==='running'} onClick={()=>void testWorkflow()}>Verify goal workflow</button><button className="text-button" disabled={busy} onClick={()=>void refreshWorkflow().catch(e=>setError(errorText(e)))}>Refresh status</button></div>{selfTest && <details open><summary>Workflow check · {selfTest.state}</summary><small>Journal {selfTest.id}</small>{selfTest.failure_reason && <p role="alert">{selfTest.failure_reason}</p>}<pre>{JSON.stringify(selfTest.stages || [],null,2)}</pre></details>}<p className="muted">Account authentication and profile configuration do not establish a completed goal workflow. The live check records planner, local execution, checks and independent review.</p></section>
+      <section className="settings-card"><h3>Goal guidance and workflow verification</h3><Toggle label="Use OpenRouter guidance for goals" checked={Boolean(settings.goal_cloud_guidance ?? workflow?.guidance_enabled)} disabled={busy} description="A scoped planner advises ordinary goals and Builder tasks before local implementation. Advisory outages continue locally after 60 seconds." onChange={value=>void change({goal_cloud_guidance:value})}/><div className="workflow-connection-states">{[['Configuration',workflow?.configuration],['Account authentication',workflow?.authentication],['Free capacity',{...capacity,state:capacityState}],['Free catalogue',workflow?.catalog],['Profiles',workflow?.profiles],['Goal workflow',workflow?.workflow]].map(([name,value])=>{const state=value as {state?:string;checked_at?:string}|undefined;return <div key={String(name)}><strong>{String(name)}</strong><Badge>{state?.state || 'unverified'}</Badge><small>{state?.checked_at ? new Date(state.checked_at).toLocaleString() : 'No verification recorded'}</small></div>;})}</div>{workflow?.profiles?.missing?.length ? <p>Missing profiles: {workflow.profiles.missing.join(', ')}</p> : null}<div className="setup-actions"><button className="primary" disabled={busy||!ready} onClick={()=>void setupWorkflow()}>Set up goal connections</button><button className="secondary" disabled={busy||!ready||selfTest?.state==='running'} onClick={()=>void testWorkflow()}>Verify goal workflow</button><button className="text-button" disabled={busy} onClick={()=>void refreshWorkflow().catch(e=>setError(errorText(e)))}>Refresh status</button></div>{selfTest && <details open><summary>Workflow check · {selfTest.state}</summary><small>Journal {selfTest.id}</small>{selfTest.failure_reason && <p role="alert">{selfTest.failure_reason}</p>}<pre>{JSON.stringify(selfTest.stages || [],null,2)}</pre></details>}<p className="muted">Account authentication and profile configuration do not establish a completed goal workflow. The live check records planner, local execution, checks and independent review.</p></section>
       <section className="openrouter-setup"><Sparkles size={18} /><div><strong>Local lead, remote team</strong><small>Set up a Researcher, a read-only Assistant and a separate goal reviewer. The main agent can request help as it works.</small></div><button className="primary" disabled={busy || !ready} onClick={() => void setupAgents()}>Set up helpers &amp; reviewer</button></section>
       <section className="openrouter-setup"><Bot size={18}/><div><strong>Builder specialists</strong><small>Free planning, design, coding advice, diagnosis, research and review. The local agent applies all changes.</small></div><button className="secondary" disabled={busy || !ready} onClick={()=>void setupSpecialists()}>Set up Builder specialists</button></section>
       <Toggle label="Require cloud review for Builder completion" description="Off allows local completion after verified gates when the free reviewer is unavailable. Valid review findings still require repairs." checked={Boolean(settings.cloud_required_review)} onChange={value=>void change({cloud_required_review:value})}/>

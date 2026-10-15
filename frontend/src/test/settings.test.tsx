@@ -46,7 +46,7 @@ describe('settings navigation', () => {
   it('finds specific controls by keyword and reveals advanced controls without changing their values', async () => {
     const settings = { ...DEFAULT_SETTINGS, temperature: 0.4, goal_limits: { minutes: 83, tokens: 17000, rounds: 41, tools: 19 } };
     const { onChange } = workspace(settings);
-    const advanced = screen.getByText('Advanced conversation settings').closest('details')!;
+    const advanced = screen.getByText('Advanced').closest('details')!;
     expect(advanced.open).toBe(false);
     await userEvent.type(screen.getByRole('textbox', { name: 'Find a setting' }), 'temperature');
     const nav = screen.getByRole('navigation', { name: 'Settings sections' });
@@ -87,7 +87,7 @@ describe('settings navigation', () => {
   });
   it('preserves other goal limits and refuses fractional limits', async () => {
     const { onChange } = workspace({ ...DEFAULT_SETTINGS, goal_limits: { minutes: 83, tokens: 17000, rounds: 41, tools: 19 } });
-    await userEvent.click(screen.getByText('Advanced conversation settings'));
+    await userEvent.click(screen.getByText('Advanced'));
     const input = screen.getByLabelText('Time limit (minutes)');
     fireEvent.change(input, { target: { value: '3.5' } }); expect(onChange).not.toHaveBeenCalled();
     fireEvent.change(input, { target: { value: '90' } });

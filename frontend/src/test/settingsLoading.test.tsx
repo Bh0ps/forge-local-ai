@@ -55,6 +55,38 @@ async function workspace(streaming = false) {
 }
 
 describe('Settings page loading in the workspace', () => {
+  it('keeps the same composer and history nodes, reading position and draft behind the dialog', async () => {
+    const page=deferred<typeof loaded>();vi.spyOn(loading,'loadSettingsPage').mockReturnValue(page.promise);
+    const fixture=await workspace(),composer=screen.getByRole('textbox',{name:'Message Forge'}),history=screen.getByRole('region',{name:'Conversation history'});
+    history.scrollTop=137;
+    const loadedChats=fixture.call.mock.calls.filter(([action])=>action==='get_chat').length;
+    const trigger=screen.getByRole('button',{name:'Settings'});await userEvent.click(trigger);
+    const dialog=screen.getByRole('dialog',{name:'Settings'});
+    expect(dialog).toHaveProperty('open',true);
+    expect(document.querySelector('textarea[aria-label="Message Forge"]')).toBe(composer);
+    expect(document.querySelector('.chat-scroll')).toBe(history);
+    expect(history.scrollTop).toBe(137);
+    expect(screen.queryByRole('textbox',{name:'Message Forge'})).toBeNull();
+    await act(async()=>page.resolve(loaded));
+    expect(screen.getByRole('textbox',{name:'Find a setting'})).toBe(document.activeElement);
+    fireEvent(dialog,new Event('cancel',{bubbles:true,cancelable:true}));
+    expect(screen.getByRole('textbox',{name:'Message Forge'})).toBe(composer);
+    expect(composer).toHaveProperty('value','Keep this draft');expect(history.scrollTop).toBe(137);
+    expect(document.activeElement).toBe(trigger);
+    expect(fixture.call.mock.calls.filter(([action])=>action==='get_chat')).toHaveLength(loadedChats);
+  });
+
+  it('opens composer permission settings in the same dialog without replacing the conversation',async()=>{
+    vi.spyOn(loading,'loadSettingsPage').mockResolvedValue(loaded);await workspace();
+    const history=document.querySelector('.chat-scroll');
+    await userEvent.click(screen.getByTitle('Permission profile'));
+    const dialog=await screen.findByRole('dialog',{name:'Settings'});
+    expect(await screen.findByText('permissions')).toBeTruthy();
+    expect(document.querySelector('.chat-scroll')).toBe(history);
+    fireEvent(dialog,new Event('cancel',{bubbles:true,cancelable:true}));
+    expect(screen.getByRole('textbox',{name:'Message Forge'})).toHaveProperty('value','Keep this draft');
+  });
+
   it('leaves Settings unfetched on the default chat and only requests it when opened', async () => {
     const page = deferred<typeof loaded>();
     const load = vi.spyOn(loading, 'loadSettingsPage').mockReturnValue(page.promise);
@@ -76,9 +108,9 @@ describe('Settings page loading in the workspace', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Settings' }));
     await waitFor(() => expect(fixture.call.mock.calls.some(([action]) => action === 'draft_save')).toBe(true));
     await act(async () => fixture.completeSave());
-    await userEvent.click(screen.getByRole('button', { name: 'Return to chat' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Close Settings' }));
     const composer = await screen.findByRole('textbox', { name: 'Message Forge' });
-    expect((composer as HTMLTextAreaElement).value).toBe('Keep the edited draft'); expect(composer).toBe(document.activeElement);
+    expect((composer as HTMLTextAreaElement).value).toBe('Keep the edited draft'); expect(screen.getByRole('button', {name:'Settings'})).toBe(document.activeElement);
     await act(async () => page.resolve(loaded));
     expect(screen.queryByRole('heading', { name: 'Loaded settings fixture' })).toBeNull();
     expect(fixture.drafts.get('lazy-settings-chat')?.content).toMatchObject({ text: 'Keep the edited draft' });
@@ -87,8 +119,9 @@ describe('Settings page loading in the workspace', () => {
   it('ignores an abandoned page completion after the project changes', async () => {
     const page = deferred<typeof loaded>(); vi.spyOn(loading, 'loadSettingsPage').mockReturnValue(page.promise);
     await workspace(); await userEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Close Settings' }));
     await userEvent.click(screen.getByRole('button', { name: 'Next fixture project' }));
-    await screen.findByText('Working in Next fixture project');
+    await waitFor(() => expect(document.querySelector('.welcome>p')?.textContent).toBe('Next fixture project'));
     await act(async () => page.resolve(loaded));
     expect(screen.queryByRole('heading', { name: 'Loaded settings fixture' })).toBeNull();
     expect((screen.getByRole('textbox', { name: 'Message Forge' }) as HTMLTextAreaElement).value).toBe('');
@@ -102,7 +135,7 @@ describe('Settings page loading in the workspace', () => {
     const fixture=await workspace(true);await userEvent.click(screen.getByRole('button',{name:'Settings'}));
     fixture.queueToken('Continued while Settings loads.');
     await waitFor(()=>expect(fixture.call.mock.calls.some(([name])=>name==='poll')).toBe(true));
-    await userEvent.click(screen.getByRole('button',{name:'Return to chat'}));
+    await userEvent.click(screen.getByRole('button',{name:'Close Settings'}));
     expect(await screen.findByText('Continued while Settings loads.')).toBeTruthy();
     expect(fixture.call.mock.calls.some(([name])=>name==='run_cancel' || name==='run_pause')).toBe(false);
     await act(async()=>page.resolve(loaded));expect(screen.queryByRole('textbox',{name:'Find a setting'})).toBeNull();
@@ -115,7 +148,7 @@ describe('Settings page loading in the workspace', () => {
     expect(window.pywebview!.api.screenshot).toHaveBeenCalledTimes(1);
     await userEvent.click(screen.getByRole('button',{name:'Settings'}));
     await act(async()=>capture.resolve({image:'c3ludGhldGlj'}));
-    await userEvent.click(screen.getByRole('button',{name:'Return to chat'}));
+    await userEvent.click(screen.getByRole('button',{name:'Close Settings'}));
     expect(await screen.findByRole('img',{name:'Attachment 1'})).toBeTruthy();
     expect((screen.getByRole('textbox',{name:'Message Forge'}) as HTMLTextAreaElement).value).toBe('Keep this draft');
     await act(async()=>page.resolve(loaded));expect(screen.queryByRole('textbox',{name:'Find a setting'})).toBeNull();
@@ -141,19 +174,18 @@ describe('Settings page loading in the workspace', () => {
     consoleError.mockRestore();
   });
 
-  it('returns with local Escape and honors refused navigation after a chunk failure', async () => {
+  it('closes Settings with local Escape without navigating away from the retained chat', async () => {
     const page = deferred<typeof loaded>(); vi.spyOn(loading, 'loadSettingsPage').mockReturnValue(page.promise);
     vi.spyOn(console, 'error').mockImplementation(() => {});
     await workspace(); await userEvent.click(screen.getByRole('button', { name: 'Settings' }));
     await act(async () => page.reject(new Error('Synthetic failed module')));
-    const heading = await screen.findByRole('heading', { name: 'Settings could not be opened' });
-    expect(document.activeElement).toBe(heading);
-    const deny = (event: Event) => event.preventDefault(); window.addEventListener('forge:navigate', deny);
-    try { await userEvent.keyboard('{Escape}'); expect(screen.queryByRole('textbox', { name: 'Message Forge' })).toBeNull(); }
-    finally { window.removeEventListener('forge:navigate', deny); }
-    await userEvent.keyboard('{Escape}');
-    const composer = await screen.findByRole('textbox', { name: 'Message Forge' });
-    expect((composer as HTMLTextAreaElement).value).toBe('Keep this draft'); expect(document.activeElement).toBe(composer);
+    expect(document.activeElement).toBe(await screen.findByRole('heading', { name: 'Settings could not be opened' }));
+    const navigated=vi.fn(); window.addEventListener('forge:navigate',navigated);
+    try { await userEvent.keyboard('{Escape}'); expect(navigated).not.toHaveBeenCalled(); }
+    finally { window.removeEventListener('forge:navigate',navigated); }
+    expect(screen.queryByRole('dialog',{name:'Settings'})).toBeNull();
+    expect(screen.getByRole('textbox',{name:'Message Forge'})).toHaveProperty('value','Keep this draft');
+    expect(document.activeElement).toBe(screen.getByRole('button',{name:'Settings'}));
   });
 
   it('keeps exhausted Settings recovery accessible and retains the edited draft through Return and reopening', async () => {
@@ -167,12 +199,12 @@ describe('Settings page loading in the workspace', () => {
     expect(screen.queryByRole('button', { name: 'Retry Settings' })).toBeNull();
     expect(screen.getByRole('alert').textContent).toContain('Your chat is still available. Reopen Forge');
     await act(async () => updateReadiness.start(attempt, vi.fn()));
-    expect(screen.getByRole('button', { name: 'Return to chat' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Close Settings' }).hasAttribute('disabled')).toBe(true);
     await userEvent.keyboard('{Escape}'); expect(screen.queryByRole('textbox', { name: 'Message Forge' })).toBeNull();
     await act(async () => updateReadiness.aborted(attempt));
-    const returned = screen.getByRole('button', { name: 'Return to chat' }); returned.focus(); await userEvent.keyboard('{Enter}');
+    const returned = screen.getByRole('button', { name: 'Close Settings' }); returned.focus(); await userEvent.keyboard('{Enter}');
     const composer = await screen.findByRole('textbox', { name: 'Message Forge' });
-    expect((composer as HTMLTextAreaElement).value).toBe('Keep this edited draft'); expect(document.activeElement).toBe(composer);
+    expect((composer as HTMLTextAreaElement).value).toBe('Keep this edited draft'); expect(document.activeElement).toBe(screen.getByRole('button', {name:'Settings'}));
     await userEvent.click(screen.getByRole('button', { name: 'Settings' }));
     await screen.findByRole('heading', { name: 'Settings could not be opened' });
     expect(screen.queryByRole('button', { name: 'Retry Settings' })).toBeNull();
@@ -188,7 +220,7 @@ describe('Settings page loading in the workspace', () => {
     await act(async () => { updateReadiness.start(attempt, vi.fn()); });
     await act(async () => page.resolve({ default: (props: PageProps) => { mounted(); return <FixtureSettings {...props} />; } }));
     expect(mounted).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Return to chat' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: 'Close Settings' }).hasAttribute('disabled')).toBe(true);
     await act(async () => updateReadiness.aborted(attempt));
     await screen.findByRole('heading', { name: 'Loaded settings fixture' }); expect(mounted).toHaveBeenCalled();
   });

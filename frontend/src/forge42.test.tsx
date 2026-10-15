@@ -200,7 +200,7 @@ describe('free OpenRouter connection', () => {
   it('masks the key, requires reviewed remote controls, and tests metadata only on request', async () => {
     const provider = { enabled: false, remote_consent: false, data_collection: 'deny', connected: false };
     const { call } = bridge({ openrouter_status: { provider }, openrouter_save: (data: Record<string, unknown>) => ({ provider: { ...data, api_key: undefined } }),
-      openrouter_test: { provider: { enabled: true, remote_consent: true, connected: true, data_collection: 'deny', account: { free_model_daily_requests: { used: 7, limit: 50, remaining: 43 } } } }, openrouter_setup_agents: { agents: [{ id: 'cloud_fixture' }], settings: { auto_delegate: true, goal_review_enabled: true } } });
+      openrouter_test: { provider: { enabled: true, remote_consent: true, connected: true, data_collection: 'deny', account: { free_model_daily_requests: { used: 7, limit: 50, remaining: 43 } }, free_capacity: {state:'available',used:7,limit:50,remaining:43,checked_at:new Date().toISOString(),expires_at:new Date(Date.now()+300000).toISOString()} } }, openrouter_setup_agents: { agents: [{ id: 'cloud_fixture' }], settings: { auto_delegate: true, goal_review_enabled: true } } });
     const notify = vi.fn();
     render(<OpenRouterSettings notify={notify} settings={DEFAULT_SETTINGS} onChange={vi.fn(async () => {})} />);
     const key = await screen.findByLabelText('OpenRouter API key') as HTMLInputElement;
