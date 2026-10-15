@@ -18,7 +18,9 @@ try {
 & $Python scripts/generate_assets.py
 & $Python -m pytest -q
 if ($LASTEXITCODE -ne 0) { throw 'Validation failed; no release was produced' }
-& $Python -m PyInstaller --noconfirm --clean --onedir --noupx --windowed --name Forge --add-data 'frontend/dist;frontend/dist' --add-data 'assets;assets' --add-data 'browser-extension;browser-extension' --add-data 'LICENSE;.' --add-data 'THIRD_PARTY_NOTICES.md;.' --icon assets/forge.ico --collect-all ddgs --collect-all tzdata --collect-all faster_whisper --collect-all av --collect-all huggingface_hub --collect-all hf_xet --collect-all gguf --copy-metadata huggingface-hub --collect-all sounddevice --collect-all pystray --collect-all webview --collect-submodules mcp.client --collect-submodules mcp.shared --copy-metadata mcp --collect-all playwright --hidden-import webview.platforms.edgechromium --hidden-import pywinauto --hidden-import forge_service --hidden-import forge_release_policy --hidden-import forge_updates desktop.py
+& $Python scripts/fetch_native_runtimes.py --destination native-runtimes --cache build/native-downloads
+if ($LASTEXITCODE -ne 0) { throw 'Pinned native runtime acquisition failed' }
+& $Python -m PyInstaller --noconfirm --clean --onedir --noupx --windowed --name Forge --add-data 'frontend/dist;frontend/dist' --add-data 'assets;assets' --add-data 'native-runtimes;native-runtimes' --add-data 'native-models.lock.json;.' --add-data 'forge_vendor/strata/LICENSE;forge_vendor/strata' --add-data 'forge_vendor/strata/ORIGIN.json;forge_vendor/strata' --add-data 'forge_vendor/strata/expert-profile-coder.bin;forge_vendor/strata' --add-data 'forge_vendor/strata/draft_vocab.bin;forge_vendor/strata' --add-data 'forge_vendor/strata/QWEN_MTP_LICENSE;forge_vendor/strata' --add-data 'browser-extension;browser-extension' --add-data 'LICENSE;.' --add-data 'THIRD_PARTY_NOTICES.md;.' --icon assets/forge.ico --collect-all ddgs --collect-all tzdata --collect-all faster_whisper --collect-all av --collect-all huggingface_hub --collect-all hf_xet --collect-all gguf --collect-all jinja2 --collect-all regex --copy-metadata huggingface-hub --collect-all sounddevice --collect-all pystray --collect-all webview --collect-submodules mcp.client --collect-submodules mcp.shared --copy-metadata mcp --collect-all playwright --hidden-import webview.platforms.edgechromium --hidden-import pywinauto --hidden-import forge_service --hidden-import forge_release_policy --hidden-import forge_updates desktop.py
 if ($LASTEXITCODE -ne 0) { throw 'Desktop build failed' }
 & $Python -m PyInstaller --noconfirm --clean --onefile --noupx --console --name ForgeBrowserHost --exclude-module playwright browser_tools.py
 if ($LASTEXITCODE -ne 0) { throw 'Browser native host build failed' }
@@ -29,7 +31,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Dependency license collection failed' }
 & $Python scripts/prune_license_cache.py --app dist/Forge
 if ($LASTEXITCODE -ne 0) { throw 'Dependency notice sanitization failed' }
 New-Item -ItemType Directory -Force -Path release | Out-Null
-Compress-Archive -Path 'dist\Forge\*' -DestinationPath 'release\Forge-5.1.29-Portable.zip' -Force
+Compress-Archive -Path 'dist\Forge\*' -DestinationPath 'release\Forge-5.2.0-Portable.zip' -Force
 if (Get-Command $Iscc -ErrorAction SilentlyContinue) {
     & $Iscc installer.iss
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }

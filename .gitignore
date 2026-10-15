@@ -3,6 +3,7 @@
 venv/
 node_modules/
 frontend/dist/
+native-runtimes/
 .forge/
 .sidekick/
 env/
@@ -11,6 +12,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.vite/
 .coverage
 .coverage.*
 htmlcov/
@@ -79,6 +81,7 @@ Desktop.ini
 !/docs/FORGE_512.md
 !/docs/FORGE_513.md
 !/docs/FORGE_514.md
+!/docs/FORGE_522.md
 /CHANGELOG.md
 /QUICKSTART.md
 /assets/evaluations/README.md

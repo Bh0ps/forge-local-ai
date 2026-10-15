@@ -29,4 +29,13 @@ describe('dialog accessibility', () => {
     const second = screen.getByRole('dialog', { name: 'Second connection' });
     expect(first.getAttribute('aria-labelledby')).not.toBe(second.getAttribute('aria-labelledby'));
   });
+
+  it('cancels a nested editor without closing its Settings dialog', async()=>{
+    function Nested(){const [child,setChild]=useState(false),[parent,setParent]=useState(true);return parent?<Modal title="Settings" close={()=>setParent(false)}><button onClick={()=>setChild(true)}>Edit connection</button>{child&&<Modal title="Connection" close={()=>setChild(false)}><input autoFocus aria-label="Server"/></Modal>}</Modal>:null;}
+    render(<Nested/>);await userEvent.click(screen.getByRole('button',{name:'Edit connection'}));
+    fireEvent(screen.getByRole('dialog',{name:'Connection'}),new Event('cancel',{bubbles:true,cancelable:true}));
+    expect(screen.queryByRole('dialog',{name:'Connection'})).toBeNull();
+    expect(screen.getByRole('dialog',{name:'Settings'})).toHaveProperty('open',true);
+    expect(document.activeElement).toBe(screen.getByRole('button',{name:'Edit connection'}));
+  });
 });

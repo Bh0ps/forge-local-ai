@@ -65,7 +65,7 @@ WORKFLOW=[
     tool_schema('artifact_read','Retrieve a bounded range of a saved tool result or this run\'s structured checkpoint record.',{
         'id':{'type':'string'},'start':{'type':'integer'},'limit':{'type':'integer'}},['id']),
     tool_schema('attachment_read','Read a saved image as pixels using its forge-attachment reference.',{'id':{'type':'string'}},['id']),
-    tool_schema('delegate_agent','Assign a bounded subtask to a listed enabled helper. Only a refusal or empty cloud result permits retry_of with the failed run ID: reword the original task clearly without changing its objective or scope. At most three extra attempts; no completed tool actions are replayed. Other failures need their specific recovery action. Required assignments block completion; optional assignments may return unavailable.',{
+    tool_schema('delegate_agent','Assign a bounded subtask to a listed enabled helper. Only a refused, empty or unusable cloud result permits retry_of with the failed run ID: reword the original task clearly without changing its objective or scope. At most three extra attempts; no completed tool actions are replayed. Other failures need their specific recovery action. Required assignments block completion; optional assignments may return unavailable.',{
         'agent_id':{'type':'string'},'task':{'type':'string'},'wait':{'type':'boolean','default':True},
         'wait_seconds':{'type':'integer','minimum':0,'maximum':300,'default':120},
         'retry_of':{'type':'string'},'required':{'type':'boolean','default':True}},['agent_id','task']),
@@ -483,6 +483,7 @@ class RunManager:
                 assignment_id=data.get('assignment_id'),retry_of=data.get('retry_of'),
                 assignment_required=data.get('assignment_required',True),attempt=data.get('attempt',1),retry_count=data.get('retry_count',0),
                 assignment_original_request=data.get('assignment_original_request',text),
+                helper_result_corrections=data.get('helper_result_corrections',0),
                 retry_evidence=data.get('retry_evidence',[]),
                 summary='',elapsed_seconds=0,phase='ready',checkpoint='Request accepted.'),
                 existing['id'] if existing else None,source_key=data.get('source_key'),channel=channel)
@@ -776,7 +777,18 @@ class RunManager:
                 'Reload relevant tasks between steps. Work until tasks are complete; never claim success without evidence.')
             packet=self.workflow.context(run)
             messages.append({'role':'system','content':(packet if packet else 'Goal checkpoint (saved task data):\n'+compact_goal_context(goal,run['settings']['context'])+continuation)+execution_guidance})
-        before=[]; after=[]; mutations={}
+        before=[]; after=[]; mutations={}; native_terminal_rows=set()
+        if any(row['role']=='assistant' and row.get('native_turn_format') is None and row['content'] in ('<|im_end|>','<|endoftext|>') for row in chat['messages']):
+            # Older Strata adapters persisted an EOS token as the entire answer.
+            # Project only those proven owned turns; preserve the original rows,
+            # reasoning, tool calls, and literal marker text from other sources.
+            with self.store._connection() as db:
+                native_terminal_rows={row[0] for row in db.execute(
+                    "SELECT m.id FROM messages m JOIN runs r ON r.id=json_extract(m.metadata,'$.interaction_run_id') AND r.chat_id=m.chat_id "
+                    "WHERE m.chat_id=? AND m.role='assistant' AND m.content IN ('<|im_end|>','<|endoftext|>') "
+                    "AND json_type(m.metadata,'$.native_turn_format') IS NULL "
+                    "AND json_extract(r.data,'$.settings.provider_id')='forge-native' AND json_extract(r.data,'$.response_provider')='Strata'",
+                    (run['chat_id'],))}
         if not run.get('cloud_scope'):
             with self.store._connection() as db:
                 mutations={row['message_id']:dict(row) for row in db.execute(
@@ -786,6 +798,7 @@ class RunManager:
             if run.get('cloud_scope'): continue
             if row['id']<=run.get('boundary',0) or row['id']==run.get('request_message_id'): continue
             message=transcript_message(row)
+            if row['id'] in native_terminal_rows:message['content']=''
             if row['role']=='tool' and row['id'] in context_results:message['content']=encode(context_results[row['id']])
             invocation=mutations.get(row['id']) if row['role']=='tool' else None
             if invocation and invocation['name']==row.get('tool_name'):
@@ -1568,7 +1581,8 @@ class RunManager:
                     run=self._skill_guidance(run,schemas)
                     schemas=self.registry.schemas(run,info.get('capabilities',[])); names={s['function']['name']:s for s in schemas}
                     report_state=self._guided_report_state(run)
-                    if report_state:schemas=[];names={}
+                    native_final_answer=bool(run['settings']['provider_id']=='forge-native' and run.get('native_final_answer_pending'))
+                    if report_state or native_final_answer:schemas=[];names={}
                     timings=dict(run.get('coordinator_timings') or {}); timings['schema_skill_selection_seconds']=round(time.monotonic()-routing_started,6)
                     run=self.store.update_run(identifier,coordinator_timings=timings)
                     limit=self._limits(run,started)
@@ -1620,7 +1634,7 @@ class RunManager:
                         'cloud_guidance':self._supplied_guidance(run,prepared_messages),
                         'verification_failures':verification_packet(run)},**memory_updates)
                     self.store.event(identifier,'context',**run['context_snapshot'])
-                    data={**run['settings'],'model':effective_model,'thinking':run['settings'].get('thinking',True) and (not run.get('output_retries') or info.get('reasoning',{}).get('mandatory') is True) and (run['settings']['provider_id']=='openrouter' or supports_thinking(effective_model,info)),
+                    data={**run['settings'],'model':effective_model,'thinking':run['settings'].get('thinking',True) and not native_final_answer and (not run.get('output_retries') or info.get('reasoning',{}).get('mandatory') is True) and (run['settings']['provider_id']=='openrouter' or supports_thinking(effective_model,info)),
                           'messages':prepared_messages,'tools':offered_schemas,'token_breakdown':breakdown}
                     if admitted is not None:data['_admitted_provider']=admitted
                     if run.get('mode')=='goal_review':
@@ -1692,7 +1706,8 @@ class RunManager:
                     details=partial_details if run['settings']['provider_id']=='openrouter' else None
                     bound_model=final.get('provider_model') or partial_model or run.get('continuation_model') or '__unresolved__'
                     private={'provider_id':'openrouter','model_id':bound_model,'reasoning_details':details} if details else None
-                    self.store.save_assistant_turn(run['id'],partial,provider_state=private,interaction_run_id=run['id'],thinking=thinking,tool_calls=[] if truncated or call_error else calls,status='partial' if truncated or call_error else 'complete')
+                    native_answer_tool_violation=bool(native_final_answer and (calls or call_error))
+                    self.store.save_assistant_turn(run['id'],partial,provider_state=private,interaction_run_id=run['id'],thinking=thinking,tool_calls=[] if truncated or call_error or native_answer_tool_violation else calls,status='partial' if truncated or call_error or native_answer_tool_violation else 'complete')
                     partial=thinking='';partial_details=[];partial_model=None
                     model_updates={}
                     returned=final.get('provider_model')
@@ -1704,7 +1719,13 @@ class RunManager:
                     if details and (truncated or call_error):
                         from forge_openrouter import OpenRouterFailure
                         raise OpenRouterFailure('The provider returned incomplete reasoning or call data. '+INCOMPLETE_PROVIDER_RECOVERY,category='incomplete_provider_state')
-                    if calls and not truncated and not call_error and (details or run['settings']['provider_id']=='openrouter' and hasattr(provider,'validate_continuation')):
+                    if native_answer_tool_violation:
+                        from forge_native import NativeFailure
+                        raise NativeFailure('protocol','The native model requested tools during its answer-only correction. No tool from this response ran; inspect the saved result before resuming.')
+                    from forge_helper_findings import completion_issue
+                    correction_continuation=bool(run['settings']['provider_id']=='openrouter' and details and not calls and (run.get('parent_id') or run.get('agent_id')) and
+                        run.get('mode')!='goal_review' and run.get('helper_result_corrections',0)<1 and completion_issue(visible_answer,run['request'])=='unusable_result')
+                    if (calls or correction_continuation) and not truncated and not call_error and (details or run['settings']['provider_id']=='openrouter' and hasattr(provider,'validate_continuation')):
                         from forge_openrouter import OpenRouterFailure, FREE_ROUTER
                         if run.get('continuation_model') and bound_model!=run['continuation_model']:
                             raise OpenRouterFailure('The provider changed the model bound to this tool exchange. Start a fresh scoped assignment; no tool from this response ran.',category='continuation_unavailable',continuation_reason='model_changed')
@@ -1749,6 +1770,25 @@ class RunManager:
                     if calls and run.get('tool_repair_streak'):
                         run=self.store.update_run(identifier,tool_repair_streak=0)
                     if not calls:
+                        if run['settings']['provider_id']=='forge-native':
+                            if not visible_answer.strip():
+                                if self.store.request_native_final_answer(identifier):
+                                    self.store.event(identifier,'status',text='Requesting a visible final answer…')
+                                    continue
+                                from forge_native import NativeFailure
+                                raise NativeFailure('empty_result','The native model ended without a visible answer after one correction. Completed tool results are saved; review the model settings and Resume.')
+                            if native_final_answer:
+                                run=self.store.update_run(identifier,native_final_answer_pending=False)
+                        if run['settings']['provider_id']=='openrouter' and (run.get('parent_id') or run.get('agent_id')) and run.get('mode')!='goal_review':
+                            from forge_helper_findings import completion_issue
+                            from forge_openrouter import OpenRouterFailure
+                            result_issue=completion_issue(visible_answer,run['request'])
+                            if result_issue=='unusable_result' and self.store.request_helper_correction(identifier):
+                                self.store.event(identifier,'status',text='Requesting concrete helper findings…')
+                                continue
+                            if result_issue:
+                                raise OpenRouterFailure('This helper reported a concrete blocker. Inspect its saved response before continuing the required assignment.' if result_issue=='assignment_blocked' else
+                                    'This helper returned no usable findings. Reword its original bounded assignment for a fresh attempt.',category=result_issue)
                         if (run.get('parent_id') or run.get('agent_id')) and not visible_answer.strip():
                             if run['settings']['provider_id']=='openrouter':
                                 from forge_openrouter import OpenRouterFailure
@@ -1866,7 +1906,11 @@ class RunManager:
             failure=str(exc)[:2000]
             if partial_details and run['settings']['provider_id']=='openrouter' and getattr(exc,'category',None)!='refusal':
                 failure='The provider stream ended with incomplete reasoning state. '+INCOMPLETE_PROVIDER_RECOVERY
-                self.store.update_run(identifier,failure={'provider_id':'openrouter','category':'incomplete_provider_state'})
+                from forge_openrouter_errors import recovery_diagnostics
+                cause=exc.diagnostics() if hasattr(exc,'diagnostics') else {}
+                safe_cause=recovery_diagnostics({**cause,'cause_category':cause.get('category',getattr(exc,'category',None))})
+                self.store.update_run(identifier,failure={'provider_id':'openrouter','category':'incomplete_provider_state',
+                    **({'http_status':cause['http_status']} if type(cause.get('http_status')) is int and 400<=cause['http_status']<=599 else {}),**safe_cause})
             elif getattr(exc,'category',None)=='incomplete_provider_state' and (run.get('failure') or {}).get('category')=='refusal':
                 # An unsafe Resume cannot erase the original explicit refusal.
                 # Its fresh reworded retry is independent of the archived state.

@@ -91,7 +91,7 @@ describe('actual App steering reply owns only its original focus',()=>{
   });
   it('retains a newer same-chat draft and does not move focus after later input',async()=>{
     const owner=await workspace(true);await startSteer(owner);owner.prompt.focus();fireEvent.change(owner.prompt,{target:{value:'A newer direction'}});
-    const control=screen.getByRole('button',{name:'Notifications'});control.focus();await act(async()=>owner.pending.resolve({ok:true}));
+    const control=screen.getByRole('button',{name:'Open Forge browser'});control.focus();await act(async()=>owner.pending.resolve({ok:true}));
     expect(owner.prompt.value).toBe('A newer direction');expect(document.activeElement).toBe(control);
   });
   it('does not refocus the composer when later typing retains the same focused input',async()=>{
@@ -114,11 +114,11 @@ describe('actual App pagination restores reader focus after commit',()=>{
     expect(owner.call.mock.calls.filter(([action,data])=>action==='get_chat'&&Number(data?.limit)>80)).toEqual([['get_chat',{id:'first',limit:160}]]);
   });
   it('lets another focused reader control win while history arrives',async()=>{
-    const owner=await workspace();await startHistory(owner);const control=screen.getByRole('button',{name:'Notifications'});control.focus();
+    const owner=await workspace();await startHistory(owner);const control=screen.getByRole('button',{name:'Open Forge browser'});control.focus();
     await act(async()=>owner.pending.resolve({...owner.first,total_messages:2}));expect(document.activeElement).toBe(control);expect(owner.prompt.value).toBe('Retained reading draft');
   });
   it('does not claim pointer/programmatic activation from an unfocused history button',async()=>{
-    const owner=await workspace(),control=screen.getByRole('button',{name:'Notifications'});control.focus();fireEvent.click(screen.getByRole('button',{name:'Load earlier messages'}));
+    const owner=await workspace(),control=screen.getByRole('button',{name:'Open Forge browser'});control.focus();fireEvent.click(screen.getByRole('button',{name:'Load earlier messages'}));
     await act(async()=>owner.pending.resolve({...owner.first,total_messages:2}));expect(document.activeElement).toBe(control);
   });
   it('leaves a newer chat and its focused control intact when the older page arrives',async()=>{

@@ -349,7 +349,7 @@ class NativeBrowser:
                     self.state.update(running=False, loading=False, error=str(exc)[:400])
             raise
 
-    def dispatch(self, action, data=None):
+    def dispatch(self, action, data=None, *, context=None, check=None):
         data = {} if data is None else data
         if not isinstance(data, dict):
             raise ValueError('Expected browser controls object.')
@@ -361,9 +361,59 @@ class NativeBrowser:
             self._revoke_pane()
         with self.lock:
             generation = self._pane_generation
-        return self._submit(self._manual, action, deepcopy(data), generation).result(timeout=45)
+        return self._submit(self._manual, action, deepcopy(data), generation, context, check).result(timeout=45)
 
-    def _manual(self, action, data, generation):
+    def wait_ready(self, context=None, *, check=None, timeout=20):
+        """Observe the opened document; never navigate, focus or repeat an action."""
+        if type(timeout) not in (int, float) or not 0 < timeout <= 20:
+            raise ValueError('Browser readiness requires a timeout of at most 20 seconds.')
+        deadline = time.monotonic() + timeout
+        with self.lock:
+            view, pane = self.view, self._pane_generation
+        navigation = getattr(view, '_navigation_id', None)
+
+        def guard():
+            nonlocal navigation
+            self._pane_check(pane, context)
+            if check: check()
+            with self.lock:
+                if view is None or self.view is not view or not self.state['running']:
+                    raise BrowserGuard('Browser view changed while opening. Open the preview again.')
+                current = getattr(view, '_navigation_id', None)
+                if navigation is None:
+                    navigation = current  # First Starting may arrive after Navigate returns.
+                elif current != navigation:
+                    raise BrowserGuard('Browser navigation changed while opening. Inspect the preview again.')
+
+        def wait():
+            while True:
+                guard()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('Browser navigation did not become ready within its opening timeout.')
+                with self.lock:
+                    loading, error, generation = self.state['loading'], self.state['error'], self.generation
+                if error:
+                    raise BrowserGuard('Browser navigation failed. Check the preview and reload it.')
+                if not loading:
+                    if getattr(view, 'embedded', False) and not getattr(view, 'visible', True):
+                        raise BrowserGuard('The Builder preview is hidden. Open its pane before using preview tools.')
+                    if hasattr(view, 'preflight'):
+                        self._view_call('preflight', check=guard)
+                    guard()
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('Browser navigation did not become ready within its opening timeout.')
+                    with self.lock:
+                        ready = generation == self.generation and not self.state['loading'] and not self.state['error']
+                    if ready:
+                        return {'ok': True, **self.status()}
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    # Stop wakes this wait without waiting for another UI round.
+                    self.cancelled.wait(min(.05, remaining))
+
+        return self._submit(wait).result(timeout=timeout + 5)
+
+    def _manual(self, action, data, generation, context=None, check=None):
         if action in ('close', 'hide'):
             self._clear_indicator()
             if self.view:
@@ -375,17 +425,24 @@ class NativeBrowser:
             with self.lock:
                 if generation != self._pane_generation:
                     raise BrowserGuard('The Browser pane changed. Open Browser and inspect again.', 'browser_owner_changed')
+        cancel = (context or {}).get('cancel')
+        if hasattr(cancel, 'is_set') and cancel.is_set():
+            raise BrowserGuard('Browser action cancelled.')
+        if check: check()
         self.cancelled.clear()
-        self._check()
+        self._check(context)
         self._start()
         self._clear_indicator()
-        guard = lambda: self._pane_check(generation, require=False)
+        def guard():
+            self._pane_check(generation, context, require=False)
+            if check: check()
         guard()
         if action in ('show', 'resize') and data.get('rect') is not None:
             if not hasattr(self.view, 'bind'): raise BrowserGuard('This browser does not support an embedded pane.')
             self._view_call('bind', data, check=guard)
         elif action != 'open' or not getattr(self.view, 'embedded', False):
-            self._view_call('show', check=guard)
+            explicit_preview = action == 'show' and self.panel_id == 'forge-preview-panel' and hasattr(self.view, 'open_pane')
+            self._view_call('open_pane' if explicit_preview else 'show', check=guard)
         with self.lock:
             if self.panel_id == 'forge-browser-panel' and generation == self._pane_generation:
                 if action in ('show', 'resize') or not getattr(self.view, 'embedded', False):

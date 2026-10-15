@@ -1,0 +1,41 @@
+.task-context-panel {display:flex;flex-direction:column;gap:16px;padding:0;font-size:12px;}
+.task-context-panel h3 {display:flex;align-items:center;gap:7px;font-size:12px;font-weight:550;line-height:1.5;color:var(--secondary);margin:0 0 7px;}
+.task-context-panel h3>svg {color:var(--icon-violet,var(--accent));}
+.task-context-panel .context-notes h3>svg {color:var(--icon-amber,var(--accent));}
+.task-context-panel .context-attachment-summary {min-height:0;font-size:12px;color:var(--secondary);margin-bottom:5px;}
+.task-context-panel .context-attachment-summary strong {font-weight:550;}
+.context-attached-items {min-width:0;}
+.task-context-panel .context-search {display:flex;align-items:center;gap:7px;min-height:34px;padding:7px 9px;border:1px solid var(--border);border-radius:6px;background:var(--surface);}
+.task-context-panel .context-search:focus-within {outline:2px solid var(--accent);outline-offset:1px;box-shadow:none;}
+.task-context-panel .context-search>svg {flex-shrink:0;color:var(--muted);}
+.task-context-panel .context-search input {min-width:0;width:100%;border:0;border-radius:0;box-shadow:none;background:transparent;padding:0;font-size:12px;line-height:1.5;}
+.task-context-panel .context-search input:focus {outline:none;box-shadow:none;}
+.task-context-panel .context-search>button {display:flex;align-items:center;justify-content:center;min-width:24px;min-height:24px;margin:-3px;color:var(--muted);background:transparent;border:0;border-radius:4px;}
+.context-bundle {--context-icon:var(--icon-violet,var(--accent));margin:2px 0;}
+.context-tone-blue {--context-icon:var(--icon-blue,var(--accent));}
+.context-tone-green {--context-icon:var(--icon-green,var(--accent));}
+.context-tone-amber {--context-icon:var(--icon-amber,var(--accent));}
+.task-context-panel .context-bundle-toggle {display:flex;align-items:center;gap:8px;min-height:36px;width:100%;padding:7px 5px;border:0;border-radius:6px;background:transparent;color:var(--text);text-align:left;}
+.context-bundle-toggle>svg:first-child {flex-shrink:0;color:var(--context-icon);}
+.context-bundle-toggle>strong {min-width:0;flex:1;overflow-wrap:anywhere;font-size:12px;font-weight:500;}
+.context-bundle-toggle>span {color:var(--muted);font-size:11px;}
+.context-bundle-toggle>svg:last-child {flex-shrink:0;color:var(--muted);transition:transform .12s ease;}
+.context-bundle-toggle[aria-expanded=true]>svg:last-child {transform:rotate(180deg);}
+.context-bundle-items {padding:2px 0 5px 13px;}
+.task-context-panel .context-item {display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:start;gap:0 2px;border:0;border-radius:5px;}
+.task-context-panel .context-choice {display:flex;align-items:flex-start;gap:8px;min-height:36px;padding:8px 3px;border:0;margin:0;font-size:12px;line-height:1.5;}
+.task-context-panel .context-choice input {flex-shrink:0;width:14px;height:14px;margin:2px 0 0;accent-color:var(--accent);}
+.task-context-panel .context-choice>span {display:grid;gap:1px;min-width:0;}
+.task-context-panel .context-choice strong {font-weight:500;overflow-wrap:anywhere;}
+.task-context-panel .context-choice small {font-size:11px;line-height:1.5;color:var(--muted);}
+.context-item-disabled .context-choice {cursor:default;color:var(--muted);}
+.context-item-actions {display:flex;align-items:center;gap:0;}
+.task-context-panel .context-row-action {position:relative;display:flex;align-items:center;justify-content:center;min-height:32px;min-width:28px;padding:4px;border:0;border-radius:5px;background:transparent;color:var(--muted);}
+.context-row-action>svg {transition:transform .12s ease;}
+.context-row-action[aria-expanded=true]>svg {transform:rotate(180deg);}
+.task-context-panel .context-item-description {grid-column:1/-1;margin:0 5px 9px 25px;color:var(--secondary);font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;}
+.task-context-panel .context-empty,.task-context-panel .context-note-limit {margin:6px 2px;font-size:12px;color:var(--muted);line-height:1.6;}
+.context-bundle-toggle:hover,.context-row-action:hover,.context-search>button:hover {background:var(--hover);color:var(--text);}
+.context-bundle-toggle:focus-visible,.context-row-action:focus-visible,.context-search>button:focus-visible,.context-choice input:focus-visible {outline:2px solid var(--accent);outline-offset:1px;}
+[data-motion=reduced] .context-bundle-toggle>svg,[data-motion=reduced] .context-row-action>svg {transition:none!important;}
+@media(prefers-reduced-motion:reduce) {.context-bundle-toggle>svg,.context-row-action>svg {transition:none!important;}}

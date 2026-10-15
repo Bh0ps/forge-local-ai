@@ -32,8 +32,8 @@ def service(tmp_path,engine=None):
     svc.store.update_settings({'model':'fixture','context':8192})
     return svc
 
-def finished(svc,run):
-    deadline=time.monotonic()+15
+def finished(svc,run,*,timeout=15):
+    deadline=time.monotonic()+timeout
     committed=threading.Event()
     def observe(event):
         if event.get('run_id')==run['id'] and event.get('type')=='done': committed.set()

@@ -1,37 +1,36 @@
 <p align="center"><img src="assets/forge.svg" width="88" alt="Forge"></p>
 
-# Forge 5.1.29
+# Forge 5.2.2
 
-This Windows preview prevents HTTP error responses from exposing exception details
-and uses the framework static-file containment checks. It retains the Library,
-connected-workflow recovery, Usage, XML and Windows lifecycle fixes. It preserves Forge's warm palettes, compact tabs, grouped composer and
-searchable Settings. Read [the security follow-up](docs/FORGE_5129.md) and [combined patch notes](docs/FORGE_5128.md).
-Desktop actions share your Windows focus and pointer; this preview does not
-provide an isolated desktop. Read [the patch notes](docs/FORGE_5127.md),
-[the computer-tool guide](docs/FORGE_5110.md), [the chat and engine guide](docs/FORGE_514.md) and
-[5.1 recovery guidance](docs/FORGE_51.md).
+This Windows preview brings Settings over your workspace, groups skills and notes,
+and improves native replies and OpenRouter helper recovery. Five accent previews show how each palette
+changes Forge. Read [the 5.2.2 notes](docs/FORGE_522.md).
 
-Delivery recovery and update checks from [5.1.26](docs/FORGE_5126.md) are retained.
-
-Your models. Your projects. Your workspace.
+GGUF models run with Forge-owned, bundled llama.cpp workers. Optional Strata Coder
+includes an explicitly selected uncensored variant. Model files stay in your chosen
+Forge directory, independently of app updates. Existing Ollama and compatible
+endpoints remain optional. Read [the native model guide](docs/FORGE_520.md) and
+[native preview fixes](docs/FORGE_521.md). Desktop computer actions share Windows
+focus and pointer; they do not provide an isolated desktop.
 
 Forge is a local AI workspace for building apps, exploring ideas and working with
 files on your computer. It brings chat, Builder, previews and project tools into
 one Windows app. Optional OpenRouter guidance helps with planning and review.
 
-**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.29/Forge-5.1.29-Setup.exe)**
-· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.29)
-· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.29/Forge-5.1.29-Portable.zip)
-· [Publisher record](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.29/Forge-update-proof.json)
-· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.1.29/SHA256SUMS.txt)
+**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.2/Forge-5.2.2-Setup.exe)**
+· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.2.2)
+· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.2/Forge-5.2.2-Portable.zip)
+· [Publisher record](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.2/Forge-update-proof.json)
+· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.2/SHA256SUMS.txt)
 
-The [previous 5.1.24 preview](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.24) remains available.
+The [previous 5.1.29 preview](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.29) remains available.
 
 ## Install
 
-1. Install [Ollama](https://ollama.com/download/windows) and choose a local model.
-2. Download **Forge-5.1.29-Setup.exe** and run it after closing Forge.
-3. Open Forge and follow the setup wizard to connect your model.
+1. Install **Forge-5.2.2-Setup.exe** after closing Forge.
+2. Open **Settings → Models & engines → Forge models** and choose your model directory.
+3. Import GGUF files, import existing Ollama models, or explicitly download Strata Coder.
+4. Select **Use** beside your model. Forge starts its bundled worker when needed.
 
 Windows 10/11, 64-bit, with WebView2 is required. Python, Node.js and the source
 repository are not needed. The installer creates shortcuts and updates the app
@@ -44,7 +43,7 @@ commit and complete application file set. The first installation from an older
 preview is manual. Forge checks GitHub automatically and verifies downloads.
 In-app installation confirms saved drafts and blocks on unfinished work before
 an authenticated helper restarts Forge. Restore uses a verified previous backup.
-Ollama and model downloads are separate. No cloud account is required.
+Model weights download separately; a separately installed inference application is not required. No cloud account is required.
 
 ## Make it your own
 
@@ -62,11 +61,11 @@ Ollama and model downloads are separate. No cloud account is required.
 
 ## A look inside
 
-These Usage screenshots use an isolated workspace with synthetic data.
+These model-management screenshots use an isolated workspace with synthetic data.
 
-![Scoped token totals and daily usage in the dark workspace](assets/demos/forge-5.1.27-usage-dark.png)
+![Forge Settings and workspace accent previews in dark appearance](assets/demos/forge-5.2.2-settings-dark.png)
 
-![Usage controls in a narrow light window with text enlarged to 150%](assets/demos/forge-5.1.27-usage-narrow-light.png)
+![Forge Settings and workspace accent previews in light appearance](assets/demos/forge-5.2.2-settings-light.png)
 
 ## Connect a browser or Telegram
 

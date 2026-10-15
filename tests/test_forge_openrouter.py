@@ -1,5 +1,6 @@
 """OpenRouter fixtures never authenticate a real key or perform cloud inference."""
 import asyncio
+import gzip
 import json
 import threading
 import time
@@ -10,7 +11,7 @@ import httpx
 import pytest
 
 from forge_openrouter import (FREE_ROUTER, OPENROUTER_URL, OpenRouterConnection,
-                              OpenRouterProvider, free_catalog, zero_pricing)
+                              OpenRouterProvider, OpenRouterFailure, free_catalog, zero_pricing)
 from test_forge_channels import env
 from test_inference_timeouts import TimedBody, transport
 from tool_calls import ToolCallAccumulator
@@ -101,6 +102,92 @@ def test_connection_test_uses_account_and_catalog_only_and_redacts_account_label
     assert 'private@example.invalid' not in serialized and 'limit_remaining' not in serialized and 'synthetic_openrouter_fixture_key' not in serialized
     assert [m['name'] for m in result['models']] == [FREE_ROUTER, 'fixture/coder:free']
     client.close()
+
+
+class EncodedMetadataBody(httpx.SyncByteStream):
+    def __init__(self, encoded): self.encoded=encoded; self.closed=False
+    def __iter__(self):
+        for offset in range(0,len(self.encoded),17):yield self.encoded[offset:offset+17]
+    def close(self):self.closed=True
+
+
+@pytest.mark.parametrize('endpoint',['models','account'])
+def test_gzip_metadata_stream_decodes_once_and_keeps_public_projection(env,endpoint):
+    _,provider,fixture,original=connected(env)
+    data=({'data':fixture.models} if endpoint=='models' else
+        {'data':{'label':'synthetic-private-account','usage':123,'limit_remaining':456,
+                 'is_free_tier':True,'free_model_daily_requests':{'used':7,'limit':50,'remaining':43}}})
+    body=EncodedMetadataBody(gzip.compress(json.dumps(data).encode()))
+    calls=[]
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200,headers={'Content-Encoding':'gzip','Content-Length':str(len(body.encoded))},stream=body)
+    try:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            provider.http_client=client
+            value=provider.models(refresh=True) if endpoint=='models' else provider.account()
+        if endpoint=='models':assert [item['name'] for item in value]==[FREE_ROUTER,'fixture/coder:free']
+        else:
+            assert value['free_model_daily_requests']=={'used':7,'limit':50,'remaining':43}
+            assert value['is_free_tier'] is True
+            assert 'synthetic-private-account' not in json.dumps(value) and 'limit_remaining' not in json.dumps(value)
+        assert len(calls)==1 and calls[0].url.path==('/api/v1/models' if endpoint=='models' else '/api/v1/key')
+        assert body.closed
+    finally:original.close()
+
+
+@pytest.mark.parametrize('status,metadata,category',[
+    (403,{'error_type':'refusal'},'refusal'),
+    (429,{'error_type':'provider_overloaded','limit_source':'upstream_provider_shared_pool'},'provider_overloaded')])
+def test_gzip_metadata_errors_preserve_status_retry_after_and_safe_types(env,status,metadata,category):
+    _,provider,_,original=connected(env)
+    canary='synthetic-private-error-and-credential'
+    data={'error':{'code':status,'message':canary,'metadata':{**metadata,'raw':canary}}}
+    body=EncodedMetadataBody(gzip.compress(json.dumps(data).encode()));calls=[]
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(status,headers={'content-encoding':'gzip','content-length':str(len(body.encoded)),
+            'Retry-After':'5'},stream=body)
+    try:
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            provider.http_client=client
+            with pytest.raises(OpenRouterFailure) as error:provider.models(refresh=True)
+        assert error.value.category==category and error.value.http_status==status
+        assert error.value.diagnostics()['retry_after_seconds']==5
+        assert error.value.diagnostics()['error_type']==metadata['error_type']
+        assert canary not in str(error.value) and canary not in json.dumps(error.value.diagnostics())
+        assert len(calls)==1 and body.closed
+    finally:original.close()
+
+
+@pytest.mark.parametrize('encoding',['unsupported-gzip-method','invalid-gzip','truncated-gzip'])
+def test_invalid_compressed_metadata_never_becomes_a_successful_catalog(env,encoding):
+    _,provider,fixture,original=connected(env)
+    encoded=gzip.compress(json.dumps({'data':fixture.models}).encode())
+    if encoding=='unsupported-gzip-method':encoded=encoded[:2]+b'\x00'+encoded[3:]
+    elif encoding=='invalid-gzip':encoded=b'not a valid gzip stream'
+    else:encoded=encoded[:len(encoded)//2]
+    body=EncodedMetadataBody(encoded)
+    try:
+        with httpx.Client(transport=httpx.MockTransport(lambda request:httpx.Response(200,
+                headers={'content-encoding':'gzip'},stream=body))) as client:
+            provider.http_client=client
+            with pytest.raises(OpenRouterFailure) as error:provider.models(refresh=True)
+        assert error.value.category in ('network','metadata') and provider.catalog is None and body.closed
+    finally:original.close()
+
+
+@pytest.mark.parametrize('status,bound',[(200,8*1024*1024),(429,65536)])
+def test_compressed_metadata_size_bound_applies_after_decompression(env,status,bound):
+    _,provider,_,original=connected(env)
+    body=EncodedMetadataBody(gzip.compress(b' '*(bound+1)))
+    try:
+        with httpx.Client(transport=httpx.MockTransport(lambda request:httpx.Response(status,
+                headers={'content-encoding':'gzip'},stream=body))) as client:
+            provider.http_client=client
+            with pytest.raises(OpenRouterFailure) as error:provider.models(refresh=True)
+        assert error.value.category=='metadata' and 'oversized' in str(error.value) and body.closed
+    finally:original.close()
 
 
 @pytest.mark.parametrize('pricing', [{**ZERO, 'request': '0.01'}, {**ZERO, 'image': '0.001'}, {**ZERO, 'internal_reasoning': '0.1'}, {**ZERO, 'prompt': '-1'}, {**ZERO, 'completion': 'NaN'}, {**ZERO, 'overrides': [{'min_prompt_tokens': 50000, 'prompt': '0.01'}]}, {'prompt': '0'}])

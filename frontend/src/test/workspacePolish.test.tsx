@@ -34,11 +34,39 @@ describe('calm workspace navigation and appearance',()=>{
   it('saves an explicit workspace name, palette and motion preference',async()=>{
     const change=vi.fn(async()=>{});render(<AppearanceSettings settings={DEFAULT_SETTINGS} onChange={change}/>);const name=screen.getByRole('textbox',{name:'Workspace name'});await userEvent.clear(name);await userEvent.type(name,'Harbor studio');await userEvent.click(screen.getByRole('button',{name:'Save name'}));expect(change).toHaveBeenCalledWith({ui_appearance:{name:'Harbor studio',accent:'copper',motion:'system'}});await userEvent.click(screen.getByRole('button',{name:'Sage'}));expect(change).toHaveBeenCalledWith({ui_appearance:{name:'Forge',accent:'sage',motion:'system'}});await userEvent.selectOptions(screen.getByLabelText('Motion'),'reduced');expect(change).toHaveBeenCalledWith({ui_appearance:{name:'Forge',accent:'copper',motion:'reduced'}});
   });
+  it('shows all five accurate palette miniatures without adding controls inside each preset',()=>{
+    render(<AppearanceSettings settings={DEFAULT_SETTINGS} onChange={async()=>{}}/>);
+    const group=screen.getByRole('group',{name:'Accent colour'});
+    expect(within(group).getAllByRole('button')).toHaveLength(5);
+    expect(within(group).getAllByRole('img')).toHaveLength(5);
+    for(const name of ['Copper','Sage','Blue','Violet','Rose']){
+      const option=within(group).getByRole('button',{name});
+      expect(option.getAttribute('data-accent')).toBe(name.toLowerCase());
+      expect(within(option).getByRole('img',{name:`${name} workspace preview`})).toBeTruthy();
+      expect(option.getAttribute('aria-pressed')).toBe(String(name==='Copper'));
+    }
+  });
+  it('edits workspace appearance under its own accent while retaining the project override',async()=>{
+    const customized={...project,appearance:{icon:'code' as const,accent:'sage' as const}};
+    const initial={...DEFAULT_SETTINGS,model:'fixture',ui_appearance:{name:'My workspace',accent:'blue' as const,motion:'reduced' as const}};
+    const {call}=bridge({bootstrap:{settings:initial,projects:[customized],chats:[chat],runs:[],capabilities:{}},projects:{projects:[customized]},settings:(delta:Record<string,unknown>)=>({...initial,...delta})});
+    await app();expect(screen.queryByRole('button',{name:'Notifications'})).toBeNull();
+    await userEvent.click(screen.getByRole('button',{name:'Settings'}));
+    const dialog=await screen.findByRole('dialog',{name:'Settings'});await screen.findByRole('button',{name:'Violet'});
+    expect(dialog.querySelector('.settings-dialog-body')?.getAttribute('data-accent')).toBe('blue');
+    await userEvent.click(within(dialog).getByRole('button',{name:'Violet'}));
+    await waitFor(()=>expect(document.documentElement.dataset.accent).toBe('violet'));
+    expect(document.querySelector('.app')?.getAttribute('data-accent')).toBe('sage');
+    expect(document.querySelector('.sidebar')?.getAttribute('data-accent')).toBe('violet');
+    expect(dialog.querySelector('.settings-dialog-body')?.getAttribute('data-accent')).toBe('violet');
+    expect(document.querySelector('.app')?.getAttribute('data-motion')).toBe('reduced');
+    expect(call.mock.calls.some(([action])=>action==='project_appearance_save')).toBe(false);
+  });
   it('customizes only project appearance and publishes the returned project identity',async()=>{
     const {call}=bridge({project_appearance_save:{...project,appearance:{icon:'code',accent:'sage'}}}),changed=vi.fn();window.addEventListener('forge:project-appearance',changed);render(<ProjectActions project={project} onRemoved={async()=>{}}><button>Project</button></ProjectActions>);await userEvent.click(screen.getByRole('button',{name:'Project actions for Studio'}));await userEvent.click(screen.getByRole('menuitem',{name:'Customize appearance'}));await userEvent.click(screen.getByRole('button',{name:'code'}));await userEvent.click(screen.getByRole('button',{name:'Sage'}));await userEvent.click(screen.getByRole('button',{name:'Save appearance'}));await waitFor(()=>expect(call).toHaveBeenCalledWith('project_appearance_save',{project_id:'p',appearance:{icon:'code',accent:'sage'}}));expect(changed.mock.calls[0][0].detail.path).toBe(project.path);window.removeEventListener('forge:project-appearance',changed);
   });
   it('does not offer chat renaming through a non-chat page title',async()=>{
-    bridge();await app();await userEvent.click(screen.getByRole('button',{name:'Settings'}));await screen.findByRole('heading',{name:'Workspace appearance'});const title=document.querySelector<HTMLButtonElement>('.header-title')!;expect(title.disabled).toBe(true);await userEvent.click(title);expect(screen.queryByRole('dialog')).toBeNull();
+    bridge();await app();await userEvent.click(screen.getByRole('button',{name:'Projects'}));await screen.findByRole('heading',{name:'Projects'});const title=document.querySelector<HTMLButtonElement>('.header-title')!;expect(title.disabled).toBe(true);await userEvent.click(title);expect(screen.queryByRole('dialog')).toBeNull();
   });
   it('explains that the reasoning toggle requests and displays supported model reasoning',async()=>{
     const {call}=bridge({settings:({thinking}:Record<string,unknown>)=>({...DEFAULT_SETTINGS,model:'fixture',thinking})});await app();await userEvent.click(screen.getByRole('button',{name:'Settings'}));await screen.findByText('Request and display reasoning when the model supports this control.');await userEvent.click(screen.getByRole('switch',{name:'Model reasoning'}));await waitFor(()=>expect(call).toHaveBeenCalledWith('settings',{thinking:false}));

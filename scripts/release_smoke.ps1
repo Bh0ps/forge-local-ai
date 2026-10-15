@@ -96,6 +96,10 @@ function Write-ForgeSmokeDiagnostics {
         'Browser action cancelled.' = 'browser-cancelled'
         'Open Forge Browser or use browser_navigate before inspecting this page.' = 'browser-not-open'
         'Browser page is still loading. Inspect again when navigation completes.' = 'browser-loading'
+        'Browser navigation did not become ready within its opening timeout.' = 'browser-opening-timeout'
+        'Browser view changed while opening. Open the preview again.' = 'browser-opening-owner'
+        'Browser navigation changed while opening. Inspect the preview again.' = 'browser-opening-navigation'
+        'Browser navigation failed. Check the preview and reload it.' = 'browser-opening-failed'
         'Browser page could not be inspected.' = 'browser-inspection'
         'Browser navigated while inspecting. Inspect again.' = 'browser-navigation-changed'
         'Start a ready preview before inspecting it.' = 'preview-not-ready'
@@ -123,7 +127,7 @@ function Write-ForgeSmokeDiagnostics {
     $phases = @('workspace-ready','workspace-size','handoff-floor','library','host-lifecycle','research-start','research-navigate',
         'research-load','research-input-target','research-type','research-button-target','research-click','research-verify',
         'research-screenshot','builder-start','builder-navigation','builder-input-target','builder-button-target',
-        'builder:preview_inspect','builder:preview_type','builder:preview_click','builder:preview_viewport',
+        'builder:preview_open','builder-layout','builder:preview_inspect','builder:preview_type','builder:preview_click','builder:preview_viewport',
         'builder:preview_diagnostics','builder:preview_screenshot','standalone-start','standalone-open','standalone-layout','standalone-viewport',
         'standalone-input-target','standalone-button-target','standalone-screenshot')
     $checkpointPhases = $phases + @('startup-imports','startup-imports-ready','logging-start','logging-ready',
@@ -164,7 +168,8 @@ function Write-ForgeSmokeDiagnostics {
         $standaloneReadiness=[ordered]@{}
         foreach ($name in @('view_present','owner_same','snapshot_observed','native_observed',
                 'owner_visible','view_visible','status_visible','loading_complete','dom_visible','dom_hud',
-                'dom_modal','layout_valid','native_bound_present','bounds_match','same_sample','deadline_expired')) {
+                'dom_modal','layout_valid','native_bound_present','bounds_match','same_sample','deadline_expired',
+                'layout_left','layout_top','layout_right','layout_bottom','layout_scale')) {
             $standaloneReadiness[$name]=$null
             if ($observation.$name -is [bool]) { $standaloneReadiness[$name]=$observation.$name }
         }
@@ -184,6 +189,7 @@ function Write-ForgeSmokeDiagnostics {
     $summary = [ordered]@{ gate=$Gate; phase=$phase; process_exit=$ExitCode; error_present=$hasError;
         error_category=$category; error_type=$errorType; safe_error=$message; report_state=$ReportState;
         tool_failure=$toolFailure; research_view_created=$researchViewCreated;
+        tool_refusal=$(if (@('stale-snapshot','snapshot-expired','navigating','target-changed','navigated','preview-hidden','panel-changed','panel-layout','panel-hidden','cancelled','desktop-locked') -contains $SmokeData.tool_refusal) { $SmokeData.tool_refusal } else { 'unrecorded' });
         smoke_standalone_readiness=$standaloneReadiness;
         handoff_feature_available=$handoffFeature; handoff_reason=$handoffReason; handoff_phase=$handoffPhase;
         handoff_participant_count=$handoffParticipants;
@@ -218,7 +224,14 @@ function Write-ForgeSmokeDiagnostics {
             preview_builder_page=(Check-Status $SmokeData.smoke_preview_state.builder ($SmokeData.smoke_preview_state.builder -eq $true))
             preview_pane=(Check-Status $SmokeData.smoke_preview_state.pane ($SmokeData.smoke_preview_state.pane -eq $true))
             preview_pane_visible=(Check-Status $SmokeData.smoke_preview_state.pane_visible ($SmokeData.smoke_preview_state.pane_visible -eq $true))
+            preview_pane_contained=(Check-Status $SmokeData.smoke_preview_state.contained ($SmokeData.smoke_preview_state.contained -eq $true))
+            preview_clip_top=(Check-Status $SmokeData.smoke_preview_state.clip_top ($SmokeData.smoke_preview_state.clip_top -eq $true))
+            preview_clip_bottom=(Check-Status $SmokeData.smoke_preview_state.clip_bottom ($SmokeData.smoke_preview_state.clip_bottom -eq $true))
+            preview_clip_left=(Check-Status $SmokeData.smoke_preview_state.clip_left ($SmokeData.smoke_preview_state.clip_left -eq $true))
+            preview_clip_right=(Check-Status $SmokeData.smoke_preview_state.clip_right ($SmokeData.smoke_preview_state.clip_right -eq $true))
+            preview_pane_viewport=(Check-Status $SmokeData.smoke_preview_state.viewport ($SmokeData.smoke_preview_state.viewport -eq $true))
             preview_modal_closed=(Check-Status $SmokeData.smoke_preview_state.modal ($SmokeData.smoke_preview_state.modal -eq $false))
+            preview_hud_closed=(Check-Status $SmokeData.smoke_preview_state.hud ($SmokeData.smoke_preview_state.hud -eq $false))
             preview_controller=(Check-Status $SmokeData.native_preview.separate_controller ($SmokeData.native_preview.separate_controller -eq $true))
             preview_profile=(Check-Status $SmokeData.native_preview.separate_profile ($SmokeData.native_preview.separate_profile -eq $true))
             preview_bridge=(Check-Status $SmokeData.native_preview.bridge_exposed ($SmokeData.native_preview.bridge_exposed -eq 'undefined'))

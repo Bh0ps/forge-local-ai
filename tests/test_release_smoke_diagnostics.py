@@ -308,16 +308,49 @@ def test_standalone_viewport_phase_precedes_one_checked_call_and_both_new_phases
     tree = ast.parse(Path(desktop.__file__).read_bytes())
     starts = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name) and node.func.id == '_smoke_preview_ready']
-    assert len(starts) == 1
-    assert any(keyword.arg == 'diagnostics' and isinstance(keyword.value, ast.Name)
-               and keyword.value.id == 'result' for keyword in starts[0].keywords)
+    assert len(starts) == 2
+    assert all(any(keyword.arg == 'diagnostics' and isinstance(keyword.value, ast.Name)
+                   and keyword.value.id == 'result' for keyword in start.keywords) for start in starts)
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name) and node.func.id == '_smoke_preview_tool'
         and any(isinstance(arg, ast.Constant) and arg.value == 'preview_viewport' for arg in node.args)]
-    assert len(calls) == 1 and starts[0].lineno < calls[0].lineno
+    assert len(calls) == 1 and max(start.lineno for start in starts) < calls[0].lineno
     script = (Path(desktop.__file__).parent / 'scripts/release_smoke.ps1').read_text()
-    for phase in ('standalone-layout', 'standalone-viewport'):
+    for phase in ('builder:preview_open', 'builder-layout', 'standalone-layout', 'standalone-viewport'):
         assert phase in desktop.SMOKE_PHASES and "'" + phase + "'" in script
+
+
+def test_preview_open_failure_records_safe_attachment_facts_before_cleanup():
+    private = 'synthetic-private-path-key-page-content'
+    state = {'running': True, 'loading': False, 'visible': False, 'url': private}
+    previews = SimpleNamespace(browser=SimpleNamespace(status=lambda: state, view=object()),
+        status=lambda identifier: {'status': 'ready', 'url': private})
+    observed = []
+    def evaluate(script):
+        observed.append(script)
+        return {'builder': True, 'pane': True, 'pane_visible': True, 'contained': False,
+            'clip_top': True, 'clip_bottom': False, 'clip_left': True, 'clip_right': True,
+            'viewport': False, 'modal': False, 'hud': False, 'private': private}
+    result = desktop._smoke_preview_failure_state(SimpleNamespace(previews=previews), 'fixture',
+        SimpleNamespace(evaluate_js=evaluate))
+    assert result == dict(available=True, running=True, loading=False, visible=False,
+        view_present=True, record_ready=True, builder=True, pane=True, pane_visible=True,
+        clip_top=True, clip_bottom=False, clip_left=True, clip_right=True,
+        contained=False, viewport=False, modal=False, hud=False)
+    assert len(observed) == 1 and private not in json.dumps(result)
+    # The report must remain primitive-only even if an untrusted page returns
+    # strings or object values for every expected flag.
+    bad = {key: private for key in ('builder', 'pane', 'pane_visible', 'contained', 'clip_top',
+        'clip_bottom', 'clip_left', 'clip_right', 'viewport', 'modal', 'hud')}
+    result = desktop._smoke_preview_failure_state(SimpleNamespace(previews=previews), 'fixture',
+        SimpleNamespace(evaluate_js=lambda script: bad))
+    assert all(result[key] is False for key in bad) and private not in json.dumps(result)
+
+
+def test_preview_failure_diagnostics_do_not_mask_original_open_error():
+    def fail(): raise RuntimeError('synthetic-private-path-key-page-content')
+    previews = SimpleNamespace(browser=SimpleNamespace(status=fail))
+    assert desktop._smoke_preview_failure_state(SimpleNamespace(previews=previews), 'fixture', None) == {'available': False}
 
 
 def checkpoint(tmp_path):
@@ -550,7 +583,8 @@ $script:ForgeSmokeDiagnosticPath=Join-Path $env:FORGE_READINESS_TEST_ROOT 'safe.
 $secret='synthetic-private-path-key-opaque-value'
 $names=@('view_present','owner_same','snapshot_observed','native_observed',
     'owner_visible','view_visible','status_visible','loading_complete','dom_visible','dom_hud',
-    'dom_modal','layout_valid','native_bound_present','bounds_match','same_sample','deadline_expired')
+    'dom_modal','layout_valid','native_bound_present','bounds_match','same_sample','deadline_expired',
+    'layout_left','layout_top','layout_right','layout_bottom','layout_scale')
 function Project-Readiness($record) {
     $data=[pscustomobject]@{smoke_phase='standalone-layout';smoke_standalone_readiness=$record;private=$secret}
     Write-ForgeSmokeDiagnostics $data 'standalone-preview' $null 'ready'
@@ -565,7 +599,7 @@ $record=[pscustomobject]@{iterations=512;private=$secret;rect=@(1,2,3,4);url=$se
 foreach ($name in $names) { $record|Add-Member -NotePropertyName $name -NotePropertyValue $true }
 $record.dom_hud=$false
 $safe=Project-Readiness $record
-if (@($safe.PSObject.Properties).Count -ne 17 -or $safe.iterations -ne 512 -or $safe.dom_hud -isnot [bool] -or $safe.dom_hud) { throw 'Fixed scalar record was not preserved.' }
+if (@($safe.PSObject.Properties).Count -ne ($names.Count+1) -or $safe.iterations -ne 512 -or $safe.dom_hud -isnot [bool] -or $safe.dom_hud) { throw 'Fixed scalar record was not preserved.' }
 foreach ($name in $names) { if ($safe.$name -isnot [bool]) { throw 'A boolean observation changed type.' } }
 foreach ($number in @(0,512,[long]5)) {
     $record.iterations=$number

@@ -36,7 +36,7 @@ class SettingsBoundary extends Component<{ children: ReactNode; fallback: (categ
   render() { return this.state.failure ? this.props.fallback(this.state.failure) : this.props.children; }
 }
 
-function Recovery({ failed, exhausted, waiting, locked, retry, onReturn }: { failed?: boolean; exhausted?: boolean; waiting?: boolean; locked: boolean; retry: () => void; onReturn: () => void }) {
+function Recovery({ failed, exhausted, waiting, locked, retry, onReturn, returnLabel }: { failed?: boolean; exhausted?: boolean; waiting?: boolean; locked: boolean; retry: () => void; onReturn: () => void; returnLabel: string }) {
   const focus = useRef<HTMLHeadingElement>(null);
   useLayoutEffect(() => {
     const active = document.activeElement;
@@ -49,7 +49,7 @@ function Recovery({ failed, exhausted, waiting, locked, retry, onReturn }: { fai
     <p role={failed ? 'alert' : 'status'}>{exhausted ? 'Your chat is still available. Reopen Forge when you’re ready to try Settings again.' : failed ? 'Try again, or return to your conversation.' : waiting ? 'Finish the restart check before opening Settings.' : 'Your conversation stays available while this page loads.'}</p>
     <div className="settings-page-load-actions">
       {failed && !exhausted && <button className="primary" disabled={locked} onClick={retry}>Retry Settings</button>}
-      <button className="secondary" disabled={locked} onClick={onReturn}>Return to chat</button>
+      <button className="secondary" disabled={locked} onClick={onReturn}>{returnLabel}</button>
     </div>
   </section>;
 }
@@ -59,25 +59,25 @@ function SettingsContent({ Page, pageProps, committed }: { Page: ComponentType<S
   useLayoutEffect(() => {
     committed.current = true;
     // A delayed page must not take focus back from navigation elsewhere.
-    if (updateReadiness.canEdit() && document.activeElement === document.body) root.current?.querySelector<HTMLInputElement>('input[aria-label="Find a setting"]')?.focus();
+    if (updateReadiness.canEdit() && (document.activeElement === document.body || document.activeElement?.closest('.settings-page-load'))) root.current?.querySelector<HTMLInputElement>('input[aria-label="Find a setting"]')?.focus();
   }, [committed]);
   return <div ref={root}><Page {...pageProps} /></div>;
 }
 
 /** Only the requested Settings page suspends; App owns the live workspace. */
-export function SettingsPageLoader({ load, pageProps, onReturn }: { load: Loader; pageProps: SettingsProps; onReturn: () => void }) {
+export function SettingsPageLoader({ load, pageProps, onReturn, returnLabel = 'Return to chat' }: { load: Loader; pageProps: SettingsProps; onReturn: () => void; returnLabel?: string }) {
   const [attempt, setAttempt] = useState(0);
   const committed = useRef(false);
   const state = useUpdateReadiness();
   const locked = ['checking', 'locked', 'prepared', 'aborting'].includes(state.phase);
   const Page = useMemo(() => lazy(load), [load, attempt]);
   const retry = () => { if (updateReadiness.canEdit()) { committed.current = false; setAttempt(previous => previous + 1); } };
-  const recovery = (category: SettingsLoadFailureCategory) => <Recovery failed exhausted={category === 'retry_exhausted'} locked={locked} retry={retry} onReturn={onReturn} />;
+  const recovery = (category: SettingsLoadFailureCategory) => <Recovery failed exhausted={category === 'retry_exhausted'} locked={locked} retry={retry} onReturn={onReturn} returnLabel={returnLabel} />;
   // Do not introduce Settings effects or readiness owners during a saved-work check.
   // An already mounted page remains mounted and is fenced by the workspace.
-  if (locked && !committed.current) return <Recovery waiting locked retry={retry} onReturn={onReturn} />;
+  if (locked && !committed.current) return <Recovery waiting locked retry={retry} onReturn={onReturn} returnLabel={returnLabel} />;
   return <SettingsBoundary key={attempt} fallback={recovery}>
-    <Suspense fallback={<Recovery locked={locked} retry={retry} onReturn={onReturn} />}>
+    <Suspense fallback={<Recovery locked={locked} retry={retry} onReturn={onReturn} returnLabel={returnLabel} />}>
       <SettingsContent Page={Page} pageProps={pageProps} committed={committed} />
     </Suspense>
   </SettingsBoundary>;

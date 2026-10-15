@@ -17,7 +17,10 @@ def validate_bounds(request, snapshot, client, panel_id=PANEL_ID):
     if panel_id not in (PANEL_ID, 'forge-preview-panel') or not isinstance(request, dict) or request.get('panel_id', panel_id) != panel_id:
         raise BrowserGuard('Unknown native browser panel.')
     if not isinstance(snapshot, dict) or not snapshot.get('visible') or snapshot.get('hud') or snapshot.get('modal'):
-        raise BrowserGuard('Open the Browser panel in the full Forge workspace.')
+        transient = (isinstance(snapshot, dict) and snapshot.get('present') is True
+            and snapshot.get('displayed') is True and not snapshot.get('hud') and not snapshot.get('modal'))
+        raise BrowserGuard('Open the Browser panel in the full Forge workspace.',
+            'browser_layout_pending' if transient else None)
     actual, viewport = snapshot.get('rect') or {}, snapshot.get('viewport') or {}
     claimed, claimed_viewport = request.get('rect', actual), request.get('viewport', viewport)
     def numbers(value, names):
@@ -29,9 +32,9 @@ def validate_bounds(request, snapshot, client, panel_id=PANEL_ID):
     cx, cy, cw, ch = numbers(claimed, ('x','y','width','height'))
     cvw, cvh = numbers(claimed_viewport, ('width','height'))
     if min(vw, vh, width, height) <= 0 or x < 0 or y < 0 or x+width > vw+.5 or y+height > vh+.5:
-        raise BrowserGuard('Browser panel falls outside the workspace viewport.')
+        raise BrowserGuard('Browser panel falls outside the workspace viewport.', 'browser_layout_pending')
     if any(abs(a-b) > 2 for a,b in zip((x,y,width,height),(cx,cy,cw,ch))) or abs(vw-cvw)>1 or abs(vh-cvh)>1:
-        raise BrowserGuard('Browser layout changed. Refresh its panel bounds.')
+        raise BrowserGuard('Browser layout changed. Refresh its panel bounds.', 'browser_layout_pending')
     if not isinstance(client, (tuple, list)) or len(client) != 4 or min(client[2:]) <= 0:
         raise BrowserGuard('Native workspace viewport is unavailable.')
     left, top, native_width, native_height = client
@@ -105,27 +108,38 @@ class EmbeddedWebView2Page(WebView2Page):
     def _layout(self):
         return self._main_evaluate(r'''(() => {
          const id=__PANEL_ID__,panel=document.getElementById(id);
-         if(!panel||panel.getAttribute('data-forge-browser-panel')!==id)return {visible:false};
+         const hud=!!document.querySelector('.app.hud'),modal=!!document.querySelector('.modal-backdrop, dialog[open]');
+         if(!panel||panel.getAttribute('data-forge-browser-panel')!==id)return {present:false,visible:false,hud,modal};
          const r=panel.getBoundingClientRect(),s=getComputedStyle(panel);
-         return {visible:r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden',
-           hud:!!document.querySelector('.app.hud'),modal:!!document.querySelector('.modal-backdrop, dialog[open]'),
+         const clip=id==='forge-preview-panel'?panel.closest('.builder-page')?.getBoundingClientRect():null;
+         const contained=!clip||(r.top>=clip.top-.5&&r.bottom<=clip.bottom+.5&&r.left>=clip.left-.5&&r.right<=clip.right+.5);
+         const displayed=s.display!=='none'&&s.visibility!=='hidden'&&panel.getClientRects().length>0;
+         return {present:true,displayed,contained,visible:r.width>0&&r.height>0&&displayed&&contained,
+           preview_id:panel.getAttribute('data-forge-preview-id'),pane_token:panel.getAttribute('data-forge-pane-token'),
+           hud,modal,
            viewport:{width:innerWidth,height:innerHeight},rect:{x:r.x,y:r.y,width:r.width,height:r.height}};
         })()'''.replace('__PANEL_ID__', json.dumps(self.panel_id)))
 
     def bind(self, request=None, check=None):
         snapshot = self._layout()
+        try: self._preview_identity(snapshot, request)
+        except BrowserGuard:
+            self.hide()
+            raise
         def position(owner):
             from System.Drawing import Rectangle
+            if check: check()
+            if not owner.Visible:
+                raise BrowserGuard('Open the Browser panel in the visible Forge workspace.')
             main = owner.webview
             client = (main.Left, main.Top, main.ClientSize.Width, main.ClientSize.Height)
             bounds = validate_bounds(request or {'panel_id':self.panel_id}, snapshot, client, self.panel_id)
             if check: check()
-            if not owner.Visible:
-                raise BrowserGuard('Open the Browser panel in the visible Forge workspace.')
             self.container.Bounds = Rectangle(*bounds)
             self.container.BringToFront()
             self.container.Visible = bool(owner.Visible)
             self.bound, self.visible = bounds, bool(owner.Visible)
+            self.bound_pane_token = snapshot.get('pane_token')
             return bounds
         try: return self.ui(position)
         except BrowserGuard:
@@ -137,6 +151,10 @@ class EmbeddedWebView2Page(WebView2Page):
         if check: check()
         if not self.visible: return
         snapshot = self._layout()
+        try: self._preview_identity(snapshot, {'pane_token': getattr(self, 'bound_pane_token', None)})
+        except BrowserGuard:
+            self.hide()
+            raise
         def validate(owner):
             main = owner.webview
             bounds = validate_bounds({'panel_id':self.panel_id}, snapshot,
@@ -154,6 +172,7 @@ class EmbeddedWebView2Page(WebView2Page):
         snapshot = self._layout()
         viewport = snapshot.get('viewport') or {}
         try:
+            self._preview_identity(snapshot)
             # This only decides whether to request the frontend's open/scroll
             # action. bind still validates against the real native client/DPI.
             validate_bounds({'panel_id': self.panel_id}, snapshot,
@@ -162,19 +181,80 @@ class EmbeddedWebView2Page(WebView2Page):
         except (BrowserGuard, TypeError):
             return False
 
-    def show(self, activate=True, check=None):
+    def _preview_identity(self, snapshot, request=None):
+        if self.panel_id != 'forge-preview-panel':
+            return
+        expected = getattr(self, 'preview_id', None)
+        token = (request or {}).get('pane_token')
+        if ((expected is not None and snapshot.get('preview_id') != expected)
+                or (token is not None and snapshot.get('pane_token') != token)):
+            raise BrowserGuard('Browser panel changed. Inspect again after reopening it.')
+
+    def open_pane(self, check=None):
+        self.show(check=check, request_open=True)
+
+    def _attach_preview(self, deadline, check=None):
+        """Complete one opening despite transient geometry between DOM reads."""
+        token = None
+        def guard():
+            if check: check()
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Browser panel did not become ready within its opening timeout.')
+        try:
+            while True:
+                guard()
+                snapshot = self._layout()
+                guard()
+                if not isinstance(snapshot, dict) or snapshot.get('hud') or snapshot.get('modal'):
+                    raise BrowserGuard('Open the Browser panel in the full Forge workspace.')
+                if snapshot.get('present') is not True:
+                    if token is not None:
+                        raise BrowserGuard('Browser panel changed. Inspect again after reopening it.')
+                elif (token is None and getattr(self, 'preview_id', None) is not None
+                        and snapshot.get('preview_id') != self.preview_id):
+                    # React can still show the previous preview while mounting
+                    # this opening. Do not admit or position that foreign pane.
+                    pass
+                else:
+                    self._preview_identity(snapshot, {'pane_token': token})
+                    current = snapshot.get('pane_token')
+                    if not isinstance(current, str) or not current or snapshot.get('displayed') is not True:
+                        raise BrowserGuard('Open the Browser panel in the full Forge workspace.')
+                    token = current
+                    try:
+                        # bind re-reads live DOM and validates on the UI thread.
+                        # Only a geometry refusal before positioning can wait;
+                        # modal, visibility, identity and native-owner guards fail.
+                        self.bind({'panel_id': self.panel_id, 'pane_token': token}, check=guard)
+                        guard()
+                        return
+                    except BrowserGuard as exc:
+                        if exc.reason != 'browser_layout_pending':
+                            raise
+                time.sleep(min(.05, max(0, deadline - time.monotonic())))
+        except Exception:
+            self.hide()
+            raise
+
+    def show(self, activate=True, check=None, request_open=False):
         if check: check()
-        if not self._contained_layout():
+        attached = False
+        if request_open or not self._contained_layout():
             event = 'forge:preview-open' if self.panel_id == 'forge-preview-panel' else 'forge:browser-open'
             if check: check()
             self._main_evaluate('window.dispatchEvent(new CustomEvent('+json.dumps(event)+'));true')
-            deadline = time.monotonic()+3
-            while time.monotonic()<deadline:
-                if check: check()
-                if self._contained_layout(): break
-                time.sleep(.05)
-        if check:self.bind(check=check)
-        else:self.bind()
+            deadline = time.monotonic()+(10 if request_open else 3)
+            if self.panel_id == 'forge-preview-panel':
+                self._attach_preview(deadline, check)
+                attached = True
+            else:
+                while time.monotonic()<deadline:
+                    if check: check()
+                    if self._contained_layout(): break
+                    time.sleep(.05)
+        if not attached:
+            if check:self.bind(check=check)
+            else:self.bind()
         if activate:
             def reveal(owner):
                 if check: check()

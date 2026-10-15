@@ -97,7 +97,11 @@ async def bounded_error_response(response):
         if len(body) + len(chunk) > MAX_PACKET_BYTES:
             raise ValueError(f'The engine returned HTTP {response.status_code} with an oversized error response.')
         body.extend(chunk)
-    return httpx.Response(response.status_code, headers=response.headers, content=bytes(body), request=response.request)
+    # aiter_bytes() has decoded the body; preserve status and recovery headers
+    # without reapplying its original wire encoding or compressed length.
+    headers = response.headers.copy()
+    for name in ('Content-Encoding', 'Content-Length'): headers.pop(name, None)
+    return httpx.Response(response.status_code, headers=headers, content=bytes(body), request=response.request)
 
 
 def cancellable_inference(url, payload, cancel_event, consume, *, headers=None, timeouts=None,

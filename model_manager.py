@@ -16,6 +16,7 @@ from starlette.staticfiles import StaticFiles
 
 from core import BASE_DIR
 from forge_host import PairingAuthority
+from forge_version import VERSION
 
 
 def create_app(core=None, service=None, auth=None, assets_dir=None):
@@ -212,7 +213,7 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
 
     @app.get('/api/v1/health')
     def health():
-        return {'app': 'Forge', 'version': '5.1.29', 'pairing_required': not legacy}
+        return {'app': 'Forge', 'version': VERSION, 'pairing_required': not legacy}
 
     @app.get('/')
     def index():

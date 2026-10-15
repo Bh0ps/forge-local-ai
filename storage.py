@@ -17,7 +17,7 @@ from uuid import uuid4
 TASK_STATUSES = ('pending', 'in_progress', 'completed', 'cancelled')
 MESSAGE_STATUSES = ('complete', 'completed', 'partial', 'cancelled', 'error', 'interrupted', 'tool')
 MESSAGE_ROLES = ('user', 'assistant', 'tool', 'system')
-MESSAGE_FIELDS = frozenset(('thinking', 'sources', 'tool_calls', 'tool_name', 'images', 'status', 'steer_id', 'question_id', 'interaction_run_id'))
+MESSAGE_FIELDS = frozenset(('thinking', 'sources', 'tool_calls', 'tool_name', 'images', 'status', 'steer_id', 'question_id', 'interaction_run_id', 'native_turn_format'))
 MAX_MESSAGE_CHARACTERS = 1_000_000
 MAX_METADATA_BYTES = 24_000_000
 DEFAULT_CONTEXT = 32_768
@@ -173,6 +173,8 @@ class Store:
         try:
             metadata = json.loads(item.pop('metadata'))
             if not isinstance(metadata, dict) or set(metadata) - MESSAGE_FIELDS:
+                raise ValueError()
+            if 'native_turn_format' in metadata and (type(metadata['native_turn_format']) is not int or metadata['native_turn_format'] != 1):
                 raise ValueError()
         except (ValueError, TypeError):
             raise ValueError('A saved message contains invalid metadata.') from None
@@ -342,6 +344,8 @@ class Store:
                 raise ValueError(f'{key} must be a list.')
         if 'status' in kwargs and kwargs['status'] not in MESSAGE_STATUSES:
             raise ValueError('Invalid message status.')
+        if 'native_turn_format' in kwargs and (type(kwargs['native_turn_format']) is not int or kwargs['native_turn_format'] != 1):
+            raise ValueError('Invalid native turn format.')
         if len(kwargs.get('images', [])) > 4 or any(
                 not isinstance(item, str) or len(item) > 8_000_000 for item in kwargs.get('images', [])):
             raise ValueError('Invalid saved image attachments.')

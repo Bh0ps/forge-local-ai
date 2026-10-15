@@ -52,6 +52,22 @@ describe('everyday icon control labels', () => {
     expect(screen.getByRole('button',{name:'Attach files'})).toBe(button);expect(action).not.toHaveBeenCalled();
   });
 
+  it.each(['hover then focus','focus then hover'])('keeps an already positioned label visible through %s',sequence=>{
+    focusFrames();
+    vi.spyOn(HTMLElement.prototype,'getBoundingClientRect').mockImplementation(function(this:HTMLElement){
+      const width=this.classList.contains('control-label')?160:32;
+      return {x:1000,y:100,left:1000,top:100,right:1000+width,bottom:132,width,height:32,toJSON:()=>({})};
+    });
+    render(<IconButton label="Edge action" showLabel>+</IconButton>);
+    const button=screen.getByRole('button',{name:'Edge action'});
+    if(sequence==='hover then focus')fireEvent.mouseEnter(button);else act(()=>button.focus());
+    const hint=label()!,shift=hint.style.getPropertyValue('--control-label-shift');
+    expect(hint.style.visibility).toBe('visible');expect(Number.parseFloat(shift)).toBeLessThan(0);
+    if(sequence==='hover then focus')act(()=>button.focus());else fireEvent.mouseEnter(button);
+    expect(label()).toBe(hint);expect(hint.style.visibility).toBe('visible');
+    expect(hint.style.getPropertyValue('--control-label-shift')).toBe(shift);
+  });
+
   it('lets Escape dismiss a focused label without moving focus or invoking another action', async () => {
     const action=vi.fn(),escape=vi.fn();window.addEventListener('keydown',escape);
     render(<IconButton label="Send message" labelText="Send message (Enter)" showLabel onClick={action}><span aria-hidden="true">↑</span></IconButton>);
@@ -130,7 +146,7 @@ describe('composer foundation preserves control ownership', () => {
     expect(within(screen.getByRole('group',{name:'Model and permissions'})).getByRole('button',{name:'Ask'})).toBeTruthy();
     const calls=call.mock.calls.length;const attach=screen.getByRole('button',{name:'Attach files'});
     fireEvent.mouseEnter(attach);act(()=>attach.focus());fireEvent.keyDown(attach,{key:'Escape'});act(()=>prompt.focus());
-    const notification=screen.getByRole('button',{name:'Notifications'});act(()=>notification.focus());expect(label()?.textContent).toBe('Notifications');
+    const notification=screen.getByRole('button',{name:'Open Forge browser'});act(()=>notification.focus());expect(label()?.textContent).toBe('Open Forge browser');
     fireEvent.keyDown(notification,{key:'Escape'});act(()=>prompt.focus());expect(call.mock.calls.length).toBe(calls);
     expect(prompt).toHaveProperty('value','Keep this draft');expect(screen.getByRole('button',{name:'Send message'})).toBeTruthy();
   });

@@ -241,6 +241,11 @@ class CompatibleProvider:
         return result
     def estimate_tokens(self,messages,tools): return estimated_prompt_tokens(messages,tools,AGENT_SYSTEM_PROMPT)
     def prepare_body(self,data,body): return body
+    def response_error(self,response): response.raise_for_status()
+    def stream_error(self,error,response):
+        code=error.get('code') if isinstance(error,dict) else None
+        raise ProviderStreamFailure('Provider rejected the streamed response.',category='provider_error',
+            http_status=code if type(code) is int and 400<=code<=599 else None)
     def generate(self,data,cancel):
         # Validate the same context and tool contract before adapting protocols.
         cancel = cancel if cancel is not None else threading.Event()
@@ -350,10 +355,7 @@ class CompatibleProvider:
                 if isinstance(packet.get('provider'),str) and len(packet['provider'])<=300: final['response_provider']=packet['provider']
                 if isinstance(packet.get('id'),str) and len(packet['id'])<=300:final['provider_generation_id']=packet['id']
                 if packet.get('error'):
-                    error=packet['error']
-                    code=error.get('code') if isinstance(error,dict) else None
-                    raise ProviderStreamFailure('Provider rejected the streamed response.',category='provider_error',
-                        http_status=code if type(code) is int and 400<=code<=599 else None)
+                    self.stream_error(packet['error'],response)
                 usage=packet.get('usage')
                 if usage is not None and not isinstance(usage,dict): raise ValueError('Provider returned invalid usage counters.')
                 if usage:
@@ -439,7 +441,7 @@ class CompatibleProvider:
         try:
             yield from cancellable_inference(url,body,cancel,consume,
                                              headers_factory=headers,timeouts=Core._inference_timeouts(connect=10),
-                                             provider='Local provider',require_success=True)
+                                             provider='Local provider',require_success=True,response_error=self.response_error)
         except httpx.ConnectError:
             raise ValueError('The local provider is offline. Start its engine, then resume the run.') from None
         except httpx.TimeoutException:
@@ -461,6 +463,18 @@ class ProviderPool:
         self.authority_epoch=0;self.authority_revisions={}
         self.metadata_wait_seconds=15
         self.stopped=stopped or (lambda: False)
+        self.native_runtime=None
+
+    def native(self):
+        with self.lock:
+            if self.native_runtime is None:
+                from forge_native import NativeRuntime
+                def busy():
+                    return any(r.get('status') not in ('completed','cancelled','failed','paused','interrupted')
+                        and r.get('settings',{}).get('provider_id','ollama') not in ('forge-native','openrouter')
+                        for r in self.store.runs())
+                self.native_runtime=NativeRuntime(self.store.home,busy=busy)
+            return self.native_runtime
 
     def models(self,identifier='ollama',refresh=False):
         return self._metadata(identifier or 'ollama', None, refresh)
@@ -572,7 +586,10 @@ class ProviderPool:
             previous=self.instances.get(identifier,{})
             if previous.get('signature')!=signature or previous.get('binding_generation',generation)!=generation:
                 base=config['url'].rstrip('/')
-                if config.get('kind')=='openrouter':
+                if config.get('kind')=='forge-native':
+                    from forge_native import NativeProvider
+                    provider=NativeProvider(self.native())
+                elif config.get('kind')=='openrouter':
                     from forge_openrouter import OpenRouterProvider
                     auth=BoundSavedProviderAuth(self.store,self.vault,identifier,config,revision=revision,
                         current_generation=lambda:self._generation_current(identifier,generation),stopped=self.stopped)
@@ -639,6 +656,8 @@ class ProviderPool:
                     cloud_guard()
                     data={**data,'_request_guard':cloud_guard}
                 if cancel.is_set(): raise ValueError('Inference cancelled before sending the request.')
+                if self.native_runtime is not None and provider_id!='forge-native' and not getattr(provider,'remote_inference',False):
+                    self.native_runtime.stop()
                 start=time.monotonic()
                 for packet in provider.generate(data,cancel):
                     message=packet.get('message',{})

@@ -17,7 +17,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge_updates import authenticode, file_hash, regular_tree, require_trust, safe_relative, version
 from forge_update_keys import TRUSTED_UPDATE_KEYS
-from forge_update_proof import (BUILD_NAME, RELEASE_NAME, MAX_EXPANDED_BYTES, MAX_RECORD_BYTES,
+from forge_update_proof import (BUILD_NAME, RELEASE_NAME, MAX_EXPANDED_BYTES, MAX_RECORD_BYTES, MAX_ARTIFACT_BYTES,
     bind_release_build, normalize_keys, plain_root, read_record, relative_path,
     strict_json, tree_files, validated_build_manifest, verify_artifact, verify_build, verify_release)
 
@@ -59,19 +59,29 @@ def build(args):
     if not (source / 'frontend/dist/index.html').is_file(): raise ValueError('Build the frontend before packaging.')
     shutil.copytree(source / 'frontend/dist', stage / 'frontend/dist')
     (stage / 'forge_release_policy.py').write_text('TRUSTED_PUBLISHERS = ' + repr(publisher()) + '\n', encoding='utf-8')
+    from scripts.fetch_native_runtimes import fetch as fetch_native
+    fetch_native(json.loads((stage/'native-runtime.lock.json').read_text(encoding='utf-8')),
+                 stage/'native-runtimes',work/'native-downloads')
     parts = (*version(args.version), 0)
     text = "VSVersionInfo(ffi=FixedFileInfo(filevers=%r,prodvers=%r,mask=0x3f,flags=0,OS=0x40004,fileType=0x1,subtype=0,date=(0,0)),kids=[StringFileInfo([StringTable('040904b0',[StringStruct('ProductName','Forge'),StringStruct('ProductVersion',%r),StringStruct('FileVersion',%r),StringStruct('FileDescription','Forge local AI workspace')])]),VarFileInfo([VarStruct('Translation',[1033,1200])])])" % (parts, parts, args.version, args.version)
     (stage / 'version-info.py').write_text(text, encoding='utf-8')
     common = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--noupx', '--distpath', work / 'dist',
               '--workpath', work / 'build', '--specpath', stage, '--version-file', stage / 'version-info.py']
     command = common + ['--onedir', '--windowed', '--name', 'Forge', '--icon', 'assets/forge.ico']
-    for value in ('frontend/dist;frontend/dist', 'assets;assets', 'browser-extension;browser-extension', 'LICENSE;.', 'THIRD_PARTY_NOTICES.md;.'):
+    for value in ('frontend/dist;frontend/dist', 'assets;assets', 'browser-extension;browser-extension', 'LICENSE;.', 'THIRD_PARTY_NOTICES.md;.',
+                  'native-runtimes;native-runtimes','native-models.lock.json;.',
+                  'forge_vendor/strata/LICENSE;forge_vendor/strata','forge_vendor/strata/ORIGIN.json;forge_vendor/strata',
+                  'forge_vendor/strata/expert-profile-coder.bin;forge_vendor/strata',
+                  'forge_vendor/strata/draft_vocab.bin;forge_vendor/strata',
+                  'forge_vendor/strata/QWEN_MTP_LICENSE;forge_vendor/strata'):
         command += ['--add-data', value]
-    for module in ('ddgs', 'tzdata', 'faster_whisper', 'av', 'huggingface_hub', 'hf_xet', 'gguf', 'sounddevice', 'pystray', 'webview', 'playwright'):
+    for module in ('ddgs', 'tzdata', 'faster_whisper', 'av', 'huggingface_hub', 'hf_xet', 'gguf', 'sounddevice', 'pystray', 'webview', 'playwright','jinja2','regex'):
         command += ['--collect-all', module]
     command += ['--copy-metadata', 'huggingface-hub', '--copy-metadata', 'mcp', '--collect-submodules', 'mcp.client',
                 '--collect-submodules', 'mcp.shared', '--hidden-import', 'forge_release_policy', '--hidden-import', 'forge_updates',
-                '--hidden-import', 'webview.platforms.edgechromium', '--hidden-import', 'pywinauto', '--hidden-import', 'forge_service', 'desktop.py']
+                '--hidden-import', 'webview.platforms.edgechromium', '--hidden-import', 'pywinauto', '--hidden-import', 'forge_service',
+                '--hidden-import', 'forge_native_variants', '--hidden-import', 'forge_openrouter_errors',
+                '--hidden-import', 'forge_helper_findings', '--hidden-import', 'forge_version', 'desktop.py']
     run(command, stage)
     run(common + ['--onefile', '--console', '--name', 'ForgeBrowserHost', '--exclude-module', 'playwright', 'browser_tools.py'], stage)
     app = work / 'dist/Forge'
@@ -79,6 +89,8 @@ def build(args):
     for name in ('LICENSE', 'THIRD_PARTY_NOTICES.md'): shutil.copy2(stage / name, app / name)
     run([sys.executable, source / 'scripts/collect_licenses.py', '--output', app / 'third-party-licenses'], source)
     run([sys.executable, source / 'scripts/prune_license_cache.py', '--app', app], source)
+    from scripts.prune_native_runtime_aliases import prune as prune_native_aliases
+    print('Native runtime packaging:', prune_native_aliases(app))
     verify_app(app, args.version, False)
     print('Application built. Sign Forge.exe and ForgeBrowserHost.exe before the installer stage for a public signed release.')
 
@@ -102,6 +114,8 @@ def package(args):
     verify_app(app, args.version, args.require_signed, require_proof=getattr(args, 'require_publisher_proof', False))
     setup = output / ('Forge-' + args.version + '-Setup.exe')
     if not setup.is_file(): raise ValueError('Build the installer first.')
+    if not 0 < setup.stat().st_size <= MAX_ARTIFACT_BYTES:
+        raise ValueError('Installer exceeds the supported authenticated-artifact size bound.')
     if args.require_signed: require_trust(setup, args.version, publisher())
     if args.require_signed:
         policy = (work / 'source/forge_release_policy.py').read_text(encoding='utf-8')
@@ -115,6 +129,8 @@ def package(args):
             info = zipfile.ZipInfo(entry['path'], date_time=(2020, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED; info.external_attr = 0o100644 << 16
             target.writestr(info, data)
+    if not 0 < archive.stat().st_size <= MAX_ARTIFACT_BYTES:
+        raise ValueError('Portable archive exceeds the supported authenticated-artifact size bound.')
     manifest = {'schema': 1, 'version': args.version, 'repository': 'Bh0ps/forge-local-ai',
         'signing': 'verified-authenticode' if args.require_signed else 'unsigned-development-preview',
         'publisher_policy_embedded': bool(args.require_signed),
@@ -216,7 +232,7 @@ def verify_downloaded(args):
             if entry.filename.casefold() in seen or (entry.external_attr >> 16) & 0o170000 == 0o120000:
                 raise ValueError('Archive contains duplicate paths or symbolic links.')
             seen.add(entry.filename.casefold()); total += entry.file_size
-            if total > 2 * 1024**3: raise ValueError('Archive expands beyond its permitted size.')
+            if total > MAX_EXPANDED_BYTES: raise ValueError('Archive expands beyond its permitted size.')
             target = destination / path
             if entry.is_dir(): target.mkdir(parents=True, exist_ok=True)
             else:

@@ -39,7 +39,8 @@ export function useControlLabel(text: string, enabled = true) {
   const reveal = (element: HTMLElement) => {
     if (!enabled) return;
     target.current = element;
-    setPlacement({shift: 0, below: false, ready: false});
+    // Hover and focus can overlap without starting another visibility cycle.
+    if (!visible) setPlacement({shift: 0, below: false, ready: false});
     setShown(true);
   };
   useLayoutEffect(() => {
@@ -100,11 +101,28 @@ export function IconButton({ label, children, onClick, disabled, active, classNa
   return <button type="button" className={`icon-button ${showLabel ? 'labeled-control' : ''} ${active ? 'selected' : ''} ${className}`} aria-label={label} title={!showLabel || disabled ? label : undefined} aria-pressed={active}
     {...hint.events} onClick={() => { hint.dismiss(); onClick?.(); }} disabled={disabled}>{children}{hint.content}</button>;
 }
-export function Modal({ title, children, close, wide = false }: { title: string; children: React.ReactNode; close: () => void; wide?: boolean }) {
+export function Modal({ title, children, close, wide = false, className = '', dismissible = true, initialFocus, backgroundSelector }: { title: string; children: React.ReactNode; close: () => void; wide?: boolean; className?: string; dismissible?: boolean; initialFocus?: string; backgroundSelector?: string }) {
   useDialogReadiness();
   const ref = useRef<HTMLDialogElement>(null), titleId = useId();
-  useEffect(() => { const trigger = document.activeElement as HTMLElement | null; ref.current?.showModal(); return () => {ref.current?.close(); if (trigger?.isConnected) trigger.focus();}; }, []);
-  return <dialog ref={ref} aria-labelledby={titleId} className={`modal ${wide ? 'wide' : ''}`} onCancel={close} onClick={e => { if (e.target === e.currentTarget) close(); }}><header><h2 id={titleId}>{title}</h2><IconButton label="Close dialog" onClick={close}><X size={18} /></IconButton></header>{children}</dialog>;
+  const trigger = useRef(document.activeElement as HTMLElement | null);
+  useLayoutEffect(() => {
+    const dialog = ref.current;
+    dialog?.showModal();
+    if (initialFocus) dialog?.querySelector<HTMLElement>(initialFocus)?.focus();
+    // The native dialog handles focus/inertness. Mirror its accessibility boundary
+    // only after focus has left the background, including for delayed content.
+    const background = backgroundSelector ? Array.from(dialog?.parentElement?.children || []).filter(element=>element.matches(backgroundSelector)) : [];
+    const hidden = background.map(element=>[element,element.getAttribute('aria-hidden')] as const);
+    for(const [element] of hidden)element.setAttribute('aria-hidden','true');
+    return () => {
+      const restore = document.activeElement === document.body || Boolean(dialog?.contains(document.activeElement));
+      for(const [element,value] of hidden) {if(value===null)element.removeAttribute('aria-hidden');else element.setAttribute('aria-hidden',value);}
+      dialog?.close();
+      // Explicit navigation may already have focused the new conversation.
+      if (restore && trigger.current?.isConnected) trigger.current.focus();
+    };
+  }, []);
+  return <dialog ref={ref} aria-labelledby={titleId} className={`modal ${wide ? 'wide' : ''} ${className}`} onCancel={event => { event.preventDefault(); event.stopPropagation(); if (dismissible) close(); }} onClick={e => { if (dismissible && e.target === e.currentTarget) close(); }}><header><h2 id={titleId}>{title}</h2><IconButton label="Close dialog" disabled={!dismissible} onClick={close}><X size={16} /></IconButton></header>{children}</dialog>;
 }
 export function Field({ label, children, hint }: { label: string; children: React.ReactNode; hint?: string }) {
   const id = useId();
@@ -184,7 +202,7 @@ export function ModelPicker({ models, value, select, open, setOpen, refresh, pro
       setMetadata(prev => ({ ...prev, [key]: { ...(Array.isArray(result.capabilities)?{capabilities:result.capabilities}:{}), ...(typeof limit==='number'?{context_length:limit}:{}) } }));
     } catch { /* Failed probes remain retryable, without advertising support. */ }finally{if(generation===metadataGeneration.current)pendingMetadata.current.delete(key);}
   }
-  useEffect(() => { if (open) { for (const model of models.filter(m => m.name.toLowerCase().includes(search.toLowerCase())).slice(0, 6)) void inspect(model); } }, [open, providerId, search, models]);
+  useEffect(() => { if (open) { for (const model of models.filter(m => (m.display_name||m.name).toLowerCase().includes(search.toLowerCase())).slice(0, 6)) void inspect(model); } }, [open, providerId, search, models]);
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
@@ -192,7 +210,7 @@ export function ModelPicker({ models, value, select, open, setOpen, refresh, pro
     document.addEventListener('mousedown', close); document.addEventListener('keydown', escape);
     return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', escape); };
   }, [open, setOpen]);
-  return <div className="model-picker" ref={ref}><button ref={trigger} className="model-trigger" aria-haspopup="dialog" aria-expanded={open} onClick={() => { setSearch(''); setOpen(!open); }} title={value || 'Select model'}><span>{value ? friendlyModel(value) : 'Select model'}</span><ChevronDown size={13} /></button>{open && <div className="model-popover" role="dialog" aria-label="Choose model"><div className="search-input"><Search size={16} /><input autoFocus placeholder="Search models…" aria-label="Search models" value={search} onChange={e => setSearch(e.target.value)} /></div><div className="model-list">{models.filter(m => m.name.toLowerCase().includes(search.toLowerCase())).map(item => { const model = { ...item, ...metadata[`${providerId}:${item.name}`] },reasoning=reasoningCapability(model,providerId); return <button className={`model-option ${model.name === value ? 'selected' : ''}`} key={model.name} onMouseEnter={() => void inspect(item)} onFocus={() => void inspect(item)} onClick={() => { select(model.name); setOpen(false);trigger.current?.focus(); }}><div><strong>{friendlyModel(model.name)}</strong>{model.name === value && <Check size={15} />}</div><small>{model.name}</small><div className="model-tags">{model.capabilities?.includes('vision') && <span><Eye size={11} />Vision</span>}{model.capabilities?.includes('tools') && <span><Wrench size={11} />Tools</span>}{reasoning && <span><Brain size={11}/>{reasoning}</span>}{(model.context_length || model.max_context) && <span>{tokenLabel(model.context_length || model.max_context || 0)} context</span>}{model.size ? <span>{bytesLabel(model.size)}</span> : null}</div></button>; })}{!models.length && <div className="popover-empty">No models found. Connect an engine in Settings.</div>}</div><button className="popover-footer" onClick={()=>{metadataGeneration.current++;inspected.current.clear();pendingMetadata.current.clear();setMetadata({});for(const model of models.filter(item=>item.name.toLowerCase().includes(search.toLowerCase())).slice(0,6))void inspect(model);refresh();}}>Refresh models</button></div>}</div>;
+  return <div className="model-picker" ref={ref}><button ref={trigger} className="model-trigger" aria-haspopup="dialog" aria-expanded={open} onClick={() => { setSearch(''); setOpen(!open); }} title={value || 'Select model'}><span>{value ? friendlyModel(value,models.find(model=>model.name===value)?.display_name) : 'Select model'}</span><ChevronDown size={13} /></button>{open && <div className="model-popover" role="dialog" aria-label="Choose model"><div className="search-input"><Search size={16} /><input autoFocus placeholder="Search models…" aria-label="Search models" value={search} onChange={e => setSearch(e.target.value)} /></div><div className="model-list">{models.filter(m => (m.display_name||m.name).toLowerCase().includes(search.toLowerCase())).map(item => { const model = { ...item, ...metadata[`${providerId}:${item.name}`] },reasoning=reasoningCapability(model,providerId); return <button className={`model-option ${model.name === value ? 'selected' : ''}`} key={model.name} onMouseEnter={() => void inspect(item)} onFocus={() => void inspect(item)} onClick={() => { select(model.name); setOpen(false);trigger.current?.focus(); }}><div><strong>{friendlyModel(model.name,model.display_name)}</strong>{model.name === value && <Check size={15} />}</div><small>{model.name}</small><div className="model-tags">{model.capabilities?.includes('vision') && <span><Eye size={11} />Vision</span>}{model.capabilities?.includes('tools') && <span><Wrench size={11} />Tools</span>}{reasoning && <span><Brain size={11}/>{reasoning}</span>}{(model.context_length || model.max_context) && <span>{tokenLabel(model.context_length || model.max_context || 0)} context</span>}{model.size ? <span>{bytesLabel(model.size)}</span> : null}</div></button>; })}{!models.length && <div className="popover-empty">No models found. Connect an engine in Settings.</div>}</div><button className="popover-footer" onClick={()=>{metadataGeneration.current++;inspected.current.clear();pendingMetadata.current.clear();setMetadata({});for(const model of models.filter(item=>(item.display_name||item.name).toLowerCase().includes(search.toLowerCase())).slice(0,6))void inspect(model);refresh();}}>Refresh models</button></div>}</div>;
 }
 export const slashCommands = [
   ['builder', 'Explore ideas and shape a project together'], ['build', 'Accept the Builder brief and start building'], ['plan', 'Inspect and prepare a plan'], ['todo', 'Run the saved plan as a Markdown checklist'], ['goal', 'Work through a goal with checkpoints'], ['do', 'Run a task with tools'], ['pause', 'Pause the active run'], ['resume', 'Continue a paused run'], ['status', 'Show run and goal progress'], ['compact', 'Compact context and keep your history'], ['new', 'Start a new conversation'], ['project', 'Choose a project'], ['model', 'Choose a local model'], ['agents', 'Configure or launch sub-agents'], ['worktree', 'Create an isolated Git workspace'], ['skill', 'Choose an installed skill'], ['mcp', 'Manage tool connections'], ['schedule', 'Schedule a task'], ['help', 'Show available commands'],

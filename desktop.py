@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import logging
+import math
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
@@ -27,16 +28,38 @@ SMOKE_PHASES = frozenset({'startup-imports', 'startup-imports-ready', 'logging-s
     'workspace-ready', 'workspace-size', 'handoff-floor', 'library', 'host-lifecycle', 'research-start', 'research-navigate',
     'research-load', 'research-input-target', 'research-type', 'research-button-target', 'research-click',
     'research-verify', 'research-screenshot', 'builder-start', 'builder-navigation', 'builder-input-target',
-    'builder-button-target', 'builder:preview_inspect', 'builder:preview_type', 'builder:preview_click',
+    'builder-button-target', 'builder:preview_open', 'builder-layout', 'builder:preview_inspect', 'builder:preview_type', 'builder:preview_click',
     'builder:preview_viewport', 'builder:preview_diagnostics', 'builder:preview_screenshot',
     'standalone-start', 'standalone-open', 'standalone-layout', 'standalone-viewport',
-    'standalone-input-target', 'standalone-button-target', 'standalone-screenshot'})
+    'standalone-input-target', 'standalone-button-target', 'standalone-screenshot', 'native-model'})
 SMOKE_ERROR_TYPES = frozenset({'ValueError', 'RuntimeError', 'TimeoutError', 'StopIteration', 'KeyError',
     'TypeError', 'AttributeError', 'OSError', 'FileNotFoundError', 'PermissionError', 'BrowserGuard',
     'JavascriptException', 'WebViewException', 'ImportError', 'ModuleNotFoundError'})
 SMOKE_STANDALONE_READINESS_FLAGS = ('view_present', 'owner_same', 'snapshot_observed', 'native_observed',
     'owner_visible', 'view_visible', 'status_visible', 'loading_complete', 'dom_visible', 'dom_hud',
-    'dom_modal', 'layout_valid', 'native_bound_present', 'bounds_match', 'same_sample', 'deadline_expired')
+    'dom_modal', 'layout_valid', 'native_bound_present', 'bounds_match', 'same_sample', 'deadline_expired',
+    'layout_left', 'layout_top', 'layout_right', 'layout_bottom', 'layout_scale')
+
+
+def _smoke_layout_flags(snapshot, client):
+    """Containment facts only; never emit coordinates, paths, URLs or content."""
+    flags = dict.fromkeys(('layout_left', 'layout_top', 'layout_right', 'layout_bottom', 'layout_scale'), False)
+    if type(snapshot) is not dict or type(client) not in (tuple, list) or len(client) != 4:
+        return flags
+    rect, viewport = dict.get(snapshot, 'rect'), dict.get(snapshot, 'viewport')
+    if type(rect) is not dict or type(viewport) is not dict:
+        return flags
+    values = [dict.get(rect, key) for key in ('x', 'y', 'width', 'height')]
+    values += [dict.get(viewport, key) for key in ('width', 'height')] + list(client[2:])
+    if any(type(value) not in (int, float) or not -32768 <= value <= 32768 or not math.isfinite(value) for value in values):
+        return flags
+    x, y, width, height, vw, vh, nw, nh = values
+    if min(width, height, vw, vh, nw, nh) <= 0:
+        return flags
+    flags.update(layout_left=x >= 0, layout_top=y >= 0, layout_right=x+width <= vw+.5,
+                 layout_bottom=y+height <= vh+.5,
+                 layout_scale=.5 <= nw/vw <= 5 and .5 <= nh/vh <= 5 and abs(nw/vw-nh/vh) <= .08)
+    return flags
 
 
 def _smoke_preview_tool(manager, run, cancel, result, name, args):
@@ -58,6 +81,23 @@ def _smoke_preview_tool(manager, run, cancel, result, name, args):
             elif outcome.get('ok') is False:
                 category = 'refused'
         result['tool_failure'] = category
+        if isinstance(outcome, dict):
+            # Fixed diagnostic labels only; never copy page/tool output into CI.
+            reasons = {
+                'Stale browser snapshot. Inspect this page again.': 'stale-snapshot',
+                'Browser page changed or snapshot expired. Inspect again.': 'snapshot-expired',
+                'Browser page is navigating or closed. Inspect again.': 'navigating',
+                'Browser target changed. Inspect again.': 'target-changed',
+                'Browser navigated. Inspect again.': 'navigated',
+                'The Builder preview is hidden. Open its pane before using preview tools.': 'preview-hidden',
+                'Browser panel changed. Inspect again after reopening it.': 'panel-changed',
+                'Browser layout changed. Refresh its panel bounds.': 'panel-layout',
+                'Open the Browser panel in the full Forge workspace.': 'panel-hidden',
+                'Browser action cancelled.': 'cancelled',
+                'Windows desktop session is unavailable. Unlock Windows before continuing browser work.': 'desktop-locked',
+            }
+            if outcome.get('error') in reasons:
+                result['tool_refusal'] = reasons[outcome['error']]
         raise ValueError('Standalone preview tool did not complete successfully.')
     return outcome
 
@@ -65,6 +105,35 @@ def _smoke_preview_tool(manager, run, cancel, result, name, args):
 def _smoke_preview_readiness_report(diagnostics, observation):
     if type(diagnostics) is dict:
         dict.__setitem__(diagnostics, 'smoke_standalone_readiness', observation.copy())
+
+
+def _smoke_preview_failure_state(manager, identifier, window):
+    """Fixed observations for failures before inspect, without page content."""
+    result = {'available': False}
+    try:
+        state = manager.previews.browser.status()
+        result.update(available=True, running=state.get('running') is True,
+            loading=state.get('loading') is True, visible=state.get('visible') is True,
+            view_present=manager.previews.browser.view is not None,
+            record_ready=manager.previews.status(identifier).get('status') == 'ready')
+        ui = window.evaluate_js("""(() => {
+          const p=document.getElementById('forge-preview-panel'),r=p?.getBoundingClientRect(),
+            s=p&&getComputedStyle(p),clip=p?.closest('.builder-page')?.getBoundingClientRect();
+          return {builder:!!document.querySelector('nav[aria-label="Builder sections"]'),pane:!!p,
+            pane_visible:!!r&&r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden',
+            contained:!!r&&!!clip&&r.top>=clip.top-.5&&r.bottom<=clip.bottom+.5&&r.left>=clip.left-.5&&r.right<=clip.right+.5,
+            clip_top:!!r&&!!clip&&r.top>=clip.top-.5,clip_bottom:!!r&&!!clip&&r.bottom<=clip.bottom+.5,
+            clip_left:!!r&&!!clip&&r.left>=clip.left-.5,clip_right:!!r&&!!clip&&r.right<=clip.right+.5,
+            viewport:!!r&&r.left>=0&&r.top>=0&&r.right<=innerWidth+.5&&r.bottom<=innerHeight+.5,
+            modal:!!document.querySelector('dialog[open],.modal-backdrop'),hud:!!document.querySelector('.app.hud')};
+        })()""")
+        if type(ui) is dict:
+            result.update({key: dict.get(ui, key) is True for key in
+                ('builder', 'pane', 'pane_visible', 'contained', 'clip_top', 'clip_bottom',
+                 'clip_left', 'clip_right', 'viewport', 'modal', 'hud')})
+    except Exception:
+        pass
+    return result
 
 
 def _smoke_preview_ready(manager, identifier, *, deadline, clock=time.monotonic, pause=time.sleep, diagnostics=None):
@@ -116,6 +185,7 @@ def _smoke_preview_ready(manager, identifier, *, deadline, clock=time.monotonic,
                 return (bool(owner.Visible), bool(view.visible), view.bound,
                         (main.Left, main.Top, main.ClientSize.Width, main.ClientSize.Height))
             visible, bound_visible, bound, client = view.ui(native)
+            observation.update(_smoke_layout_flags(snapshot, client))
             observation.update(native_observed=True, owner_visible=visible is True,
                                view_visible=bound_visible is True, native_bound_present=bound is not None)
             if not owned() or after_deadline(clock() >= deadline):
@@ -1146,6 +1216,25 @@ class Bridge:
         except Exception as exc:
             return {'error': str(exc)}
 
+    def choose_model_directory(self):
+        try:
+            import webview
+            with self._native_operation():
+                paths=self._window.create_file_dialog(webview.FileDialog.FOLDER)
+            return {'path':str(paths[0])} if paths else {'cancelled':True}
+        except Exception:
+            return {'error':'The model directory chooser could not open. Enter its path and retry.'}
+
+    def choose_model_files(self):
+        try:
+            import webview
+            with self._native_operation():
+                paths=self._window.create_file_dialog(webview.FileDialog.OPEN,allow_multiple=True,
+                    file_types=('GGUF models (*.gguf)',))
+            return {'paths':list(map(str,paths))} if paths else {'cancelled':True}
+        except Exception:
+            return {'error':'The model file chooser could not open. Enter the GGUF paths and retry.'}
+
     def dictation(self, action, data=None):
         return self.call('dictation_' + str(action), data)
 
@@ -1734,6 +1823,11 @@ def main():
                         result['smoke_phase'] = 'handoff-floor'
                         _smoke_checkpoint(result['smoke_phase'])
                         result['handoff_seed'] = _smoke_handoff_floor(api)
+                    if '--native-model-smoke' in sys.argv:
+                        result['smoke_phase']='native-model'
+                        _smoke_checkpoint(result['smoke_phase'])
+                        from forge_native_smoke import frozen_native_smoke
+                        result['native_model']=frozen_native_smoke(service)
                     result['smoke_phase'] = 'library'
                     _smoke_checkpoint(result['smoke_phase'])
                     starters = [skill for skill in api.call('skills')['skills'] if skill.get('builtin')]
@@ -1912,11 +2006,6 @@ def main():
                             # below its native owner's viewport. Scroll as a user
                             # would; the frontend still validates/binds real bounds.
                             api._window.evaluate_js("document.getElementById('forge-preview-panel')?.scrollIntoView({block:'start',inline:'nearest',behavior:'instant'});true")
-                            # The actual frontend sizes and binds the child to
-                            # host-inspected viewport bounds.
-                            deadline = time.monotonic()+20
-                            while (not manager.previews.browser.status().get('visible') or manager.previews.browser.status().get('loading')) and time.monotonic()<deadline:
-                                time.sleep(.1)
                             preview_run = {'id': 'preview-native-smoke', 'project_id': project['id'], 'settings': service.store.get_settings()}
                             def preview_tool(name, arguments):
                                 result['smoke_phase'] = 'builder:' + name
@@ -1926,22 +2015,15 @@ def main():
                                     if outcome.get('ok') is False: raise ValueError(outcome.get('error', 'Preview fixture failed.'))
                                     return outcome
                                 except Exception:
-                                    if name == 'preview_inspect':
-                                        try:
-                                            state = manager.previews.browser.status()
-                                            result['smoke_preview_state'] = {
-                                                'available': True, 'running': bool(state.get('running')),
-                                                'loading': bool(state.get('loading')), 'visible': bool(state.get('visible')),
-                                                'view_present': manager.previews.browser.view is not None,
-                                                'record_ready': manager.previews.status(preview['id']).get('status') == 'ready'}
-                                            ui = api._window.evaluate_js("(()=>{const p=document.getElementById('forge-preview-panel'),r=p?.getBoundingClientRect(),s=p&&getComputedStyle(p);return {builder:!!document.querySelector('nav[aria-label=\"Builder sections\"]'),pane:!!p,pane_visible:!!r&&r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden',modal:!!document.querySelector('dialog[open],.modal-backdrop')};})()")
-                                            if isinstance(ui, dict):
-                                                result['smoke_preview_state'].update({
-                                                    'builder': bool(ui.get('builder')), 'pane': bool(ui.get('pane')),
-                                                    'pane_visible': bool(ui.get('pane_visible')), 'modal': bool(ui.get('modal'))})
-                                        except Exception:
-                                            result.setdefault('smoke_preview_state', {'available': False})
+                                    result['smoke_preview_state'] = _smoke_preview_failure_state(manager, preview['id'], api._window)
                                     raise
+                            # Await the same explicit opening used by an agent.
+                            # A React bind may still be initializing WebView2;
+                            # do not spend navigation's budget on that startup.
+                            preview_tool('preview_open', {})
+                            result['smoke_phase'] = 'builder-layout'
+                            _smoke_checkpoint(result['smoke_phase'])
+                            _smoke_preview_ready(manager,preview['id'],deadline=time.monotonic()+10,diagnostics=result)
                             inspected = preview_tool('preview_inspect', {})
                             result['smoke_phase'] = 'builder-input-target'
                             _smoke_checkpoint(result['smoke_phase'])

@@ -9,7 +9,7 @@ import App, { applyEvents } from '../App';
 import { DEFAULT_SETTINGS } from '../types';
 import type { Goal, Settings } from '../types';
 
-const connection = { enabled: true, connected: true, remote_consent: true, data_collection: 'deny', models: [{ name: 'fixture/reviewer:free' }], account: { free_model_daily_requests: { used: 4, limit: 50, remaining: 46 } } };
+const connection = { enabled: true, connected: true, remote_consent: true, data_collection: 'deny', free_capacity: {state:'available',used:4,limit:50,remaining:46,checked_at:new Date().toISOString(),expires_at:new Date(Date.now()+300000).toISOString()}, models: [{ name: 'fixture/reviewer:free' }], account: { free_model_daily_requests: { used: 4, limit: 50, remaining: 46 } } };
 function bridge(overrides: Record<string, unknown> = {}) {
   const responses: Record<string, unknown> = { openrouter_status: { provider: connection }, ...overrides };
   const call = vi.fn(async (action: string, data: Record<string, unknown> = {}) => {
@@ -28,6 +28,37 @@ function settingsPage(initial: Partial<Settings> = {}) {
 }
 
 describe('OpenRouter helpers and independent review setup', () => {
+  it('does not display an expired daily counter as current exhaustion',async()=>{
+    const {call}=bridge({openrouter_status:{provider:{...connection,free_capacity:{state:'exhausted',used:50,limit:50,remaining:0,
+      checked_at:'2000-01-01T00:00:00Z',expires_at:'2000-01-01T00:05:00Z'}}}});
+    settingsPage();
+    expect(await screen.findByText('Daily allowance needs refresh.')).toBeTruthy();
+    expect(screen.queryByText(/0 remaining/)).toBeNull();
+    expect(screen.getByText('stale')).toBeTruthy();
+    expect(call.mock.calls.some(([action])=>action==='openrouter_test')).toBe(false);
+  });
+  it('refreshes only account and catalog metadata on an explicit allowance refresh',async()=>{
+    const {call}=bridge({openrouter_test:{provider:connection}});
+    const {change}=settingsPage();await screen.findByText('Account authenticated');
+    await userEvent.click(screen.getByRole('button',{name:'Refresh allowance'}));
+    await waitFor(()=>expect(call).toHaveBeenCalledWith('openrouter_test',{}));
+    expect(call.mock.calls.some(([action])=>action==='openrouter_save'||action==='agent_start'||action==='run_start')).toBe(false);
+    expect(change).not.toHaveBeenCalled();
+    expect(screen.getByText(/46 remaining/)).toBeTruthy();
+  });
+  it('expires a visible counter without an automatic cloud request',async()=>{
+    const {call}=bridge({openrouter_status:{provider:{...connection,free_capacity:{...connection.free_capacity,
+      expires_at:new Date(Date.now()+1000).toISOString()}}}});
+    vi.useFakeTimers();
+    try{
+      settingsPage();await act(async()=>{});
+      expect(screen.getByText(/46 remaining/)).toBeTruthy();
+      const count=call.mock.calls.length;
+      await act(async()=>{vi.advanceTimersByTime(30001);});
+      expect(screen.getByText('Daily allowance needs refresh.')).toBeTruthy();
+      expect(call.mock.calls).toHaveLength(count);
+    }finally{vi.useRealTimers();}
+  });
   it('sets up helpers and review only on an explicit click without changing the main model or saved consent', async () => {
     const { call } = bridge({ openrouter_setup_agents: { agents: [{ id: 'researcher', name: 'Researcher' }, { id: 'assistant', name: 'Assistant' }], settings: { auto_delegate: true, goal_review_enabled: true, goal_review_model: 'openrouter/free', goal_review_max_revisions: 3, goal_review_context: 32768 } } });
     const { change, notify } = settingsPage();
