@@ -251,6 +251,85 @@ def test_failed_review_child_does_not_overwrite_parent_goal_checkpoint(tmp_path)
         svc.shutdown()
 
 
+def _goal_review_fixture_diagnostics(svc, run, snapshot, reviewer, stop_category):
+    """Only fixed synthetic-fixture state; no prompts, paths, IDs or error text."""
+    statuses = {'queued', 'running', 'awaiting_approval', 'waiting_question', 'completed',
+                'cancelled', 'failed', 'paused', 'interrupted'}
+    phases = {'ready', 'generating', 'tools', 'round_complete', 'waiting_question',
+              'compacting', 'checkpoint'}
+    events = {'status', 'round', 'context', 'usage', 'generation', 'goal_review',
+              'verification', 'complete', 'done', 'error', 'tool', 'approval',
+              'question', 'skill', 'workflow', 'compacted', 'token'}
+    tools = set(REVIEW_TOOLS) | {'goal_update', 'tools_search', 'tools_load', 'request_user_input'}
+
+    def choice(value, allowed):
+        return value if type(value) is str and value in allowed else 'other'
+
+    def number(value):
+        return value if type(value) is int and 0 <= value <= 10_000_000 else None
+
+    def offered(requests):
+        return [sorted({schema['function']['name'] for schema in request.get('tools', [])[:128]
+            if isinstance(schema, dict) and isinstance(schema.get('function'), dict)
+            and type(schema['function'].get('name')) is str and schema['function']['name'] in tools})
+            for request in requests[:8] if isinstance(request, dict)]
+
+    result = {'stop_category': stop_category,
+        'snapshot_status': choice(snapshot.get('status'), statuses),
+        'snapshot_finished': snapshot.get('finished') is True,
+        'event_types': [choice(event.get('type'), events)
+            for event in snapshot.get('events', [])[:64] if isinstance(event, dict)]}
+    try:
+        result['runs'] = []
+        for row in svc.store.runs():
+            if row.get('id') != run['id'] and row.get('parent_id') != run['id']:
+                continue
+            settings = row.get('settings') or {}
+            failure = row.get('failure') or {}
+            result['runs'].append({'role': 'main' if row['id'] == run['id'] else 'reviewer',
+                'mode': choice(row.get('mode'), {'goal', 'goal_review'}),
+                'status': choice(row.get('status'), statuses), 'phase': choice(row.get('phase'), phases),
+                'rounds': number(row.get('rounds')),
+                'provider': choice(settings.get('provider_id'), {'ollama', 'openrouter'}),
+                'model': choice(settings.get('model'), {'fixture', 'openrouter/free'}),
+                'context': number(settings.get('context')), 'tokens': number(settings.get('tokens')),
+                'failure_category': choice(failure.get('category', 'none'),
+                    {'none', 'refusal', 'empty', 'quota', 'authentication', 'configuration',
+                     'protocol', 'context', 'cancelled', 'incomplete_provider_state'}),
+                'settings': {key: settings.get(key) if type(settings.get(key)) is bool else None
+                    for key in ('thinking', 'adaptive_enabled', 'auto_delegate', 'memory_enabled',
+                                'allow_edits', 'guided_execution', 'goal_review_enabled')}})
+        result['local_offered_tools'] = offered(getattr(svc.core, 'requests', []))
+        result['reviewer_offered_tools'] = offered(getattr(reviewer, 'requests', []))
+        result['state_read'] = 'available'
+    except Exception:
+        result['state_read'] = 'unavailable'
+    return result
+
+
+def _finished_goal_review_fixture(svc, run, reviewer=None):
+    deadline = time.monotonic() + 15
+    committed = threading.Event()
+
+    def observe(event):
+        if event.get('run_id') == run['id'] and event.get('type') == 'done':
+            committed.set()
+
+    svc.store.subscribe_events(observe)
+    try:
+        snapshot = svc.jobs.poll(run['id'])
+        if snapshot.get('finished') is not True:
+            committed.wait(max(0, deadline - time.monotonic()))
+            snapshot = svc.jobs.poll(run['id'])
+        if snapshot.get('finished') is True:
+            return snapshot
+        category = 'terminal_event_without_finished_snapshot' if committed.is_set() else 'terminal_wait_deadline'
+        diagnostics = _goal_review_fixture_diagnostics(svc, run, snapshot, reviewer, category)
+        raise AssertionError('Goal review fixture did not finish: ' + json.dumps(diagnostics, sort_keys=True))
+    finally:
+        svc.store.unsubscribe_events(observe)
+
+
 def test_actual_reviewer_reads_project_and_usage_is_separate_once(tmp_path):
     svc = service(tmp_path)
     try:
@@ -263,7 +342,7 @@ def test_actual_reviewer_reads_project_and_usage_is_separate_once(tmp_path):
                            mark_complete(svc), {'content': 'Implementation completed.'}]
         goal = svc.goal_create({'text': 'Inspect implementation.\nVerify results.', 'project_id': project['id']})
         run = svc.goal_resume({'id': goal['id']})
-        result = finished(svc, run)
+        result = _finished_goal_review_fixture(svc, run, reviewer)
         assert result['status'] == 'completed', result
         saved = svc.store.goal(goal['id'])
         assert saved['review']['verdict'] == 'complete' and saved['status'] == 'completed'
