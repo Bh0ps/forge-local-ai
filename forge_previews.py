@@ -356,25 +356,25 @@ class PreviewManager:
             raise ValueError('Start a ready preview before inspecting it.')
         changed = self.browser_preview != identifier
         self.browser_preview = identifier
+        browser = self.browser
+        from native_browser import BrowserGuard
+        def owned():
+            with self.lock:
+                if self.browser is not browser or self.browser_preview != identifier or identifier not in self.active:
+                    raise BrowserGuard('Browser view changed while opening. Open the preview again.')
         if changed:
             self.browser.stop()
             self.browser.reset()
-            self.browser.dispatch('open', {'url': record['url']})
+            self.browser.dispatch('open', {'url': record['url']}, context=context, check=owned)
         if getattr(self.browser, 'view', None) is not None:
             self.browser.view.preview_id = identifier
         args = {k: v for k, v in data.items() if k not in ('id', 'preview_id')}
         if action in ('show', 'reload', 'resize'):
-            browser = self.browser
-            result = browser.dispatch(action, args)
+            result = browser.dispatch(action, args, context=context, check=owned)
             if action == 'show' and args.get('rect') is None:
                 # An explicit preview_open must finish its one admitted opening
                 # before an agent can inspect. Frontend bounds binds stay short
                 # and asynchronous; they are not navigation-readiness requests.
-                from native_browser import BrowserGuard
-                def owned():
-                    with self.lock:
-                        if self.browser is not browser or self.browser_preview != identifier or identifier not in self.active:
-                            raise BrowserGuard('Browser view changed while opening. Open the preview again.')
                 return browser.wait_ready(context, check=owned)
             return result
         if action == 'viewport':

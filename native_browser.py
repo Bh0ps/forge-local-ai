@@ -349,7 +349,7 @@ class NativeBrowser:
                     self.state.update(running=False, loading=False, error=str(exc)[:400])
             raise
 
-    def dispatch(self, action, data=None):
+    def dispatch(self, action, data=None, *, context=None, check=None):
         data = {} if data is None else data
         if not isinstance(data, dict):
             raise ValueError('Expected browser controls object.')
@@ -361,7 +361,7 @@ class NativeBrowser:
             self._revoke_pane()
         with self.lock:
             generation = self._pane_generation
-        return self._submit(self._manual, action, deepcopy(data), generation).result(timeout=45)
+        return self._submit(self._manual, action, deepcopy(data), generation, context, check).result(timeout=45)
 
     def wait_ready(self, context=None, *, check=None, timeout=20):
         """Observe the opened document; never navigate, focus or repeat an action."""
@@ -413,7 +413,7 @@ class NativeBrowser:
 
         return self._submit(wait).result(timeout=timeout + 5)
 
-    def _manual(self, action, data, generation):
+    def _manual(self, action, data, generation, context=None, check=None):
         if action in ('close', 'hide'):
             self._clear_indicator()
             if self.view:
@@ -425,11 +425,17 @@ class NativeBrowser:
             with self.lock:
                 if generation != self._pane_generation:
                     raise BrowserGuard('The Browser pane changed. Open Browser and inspect again.', 'browser_owner_changed')
+        cancel = (context or {}).get('cancel')
+        if hasattr(cancel, 'is_set') and cancel.is_set():
+            raise BrowserGuard('Browser action cancelled.')
+        if check: check()
         self.cancelled.clear()
-        self._check()
+        self._check(context)
         self._start()
         self._clear_indicator()
-        guard = lambda: self._pane_check(generation, require=False)
+        def guard():
+            self._pane_check(generation, context, require=False)
+            if check: check()
         guard()
         if action in ('show', 'resize') and data.get('rect') is not None:
             if not hasattr(self.view, 'bind'): raise BrowserGuard('This browser does not support an embedded pane.')
