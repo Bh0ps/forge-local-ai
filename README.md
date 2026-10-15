@@ -64,9 +64,9 @@ Ollama and model downloads are separate. No cloud account is required.
 
 These Usage screenshots use an isolated workspace with synthetic data.
 
-![Scoped token totals and daily usage in the dark workspace](assets/demos/forge-5.1.28-usage-dark.png)
+![Scoped token totals and daily usage in the dark workspace](assets/demos/forge-5.1.27-usage-dark.png)
 
-![Usage controls in a narrow light window with text enlarged to 150%](assets/demos/forge-5.1.28-usage-narrow-light.png)
+![Usage controls in a narrow light window with text enlarged to 150%](assets/demos/forge-5.1.27-usage-narrow-light.png)
 
 ## Connect a browser or Telegram
 
