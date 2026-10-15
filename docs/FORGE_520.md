@@ -30,7 +30,8 @@ llama.cpp handles general supported GGUF architectures. Strata is specialized fo
 pinned Qwen3.8 Flash Next Coder IQ1_M model. The initial Windows package includes NVIDIA
 CUDA acceleration, with llama.cpp CPU execution available without a compatible GPU.
 Strata requires a compatible NVIDIA GPU; AMD Strata binaries are not included in this
-preview. The Coder download is 58,408,584,928 bytes, plus generated preparation files.
+preview. The Coder download is 58,408,584,928 bytes, plus generated preparation files. Memory-saving expert preparation can add about
+23.4 GB of local files; this is not another network download.
 
 The exact engines, revisions and binary hashes are recorded in `native-runtime.lock.json`.
 Selected MIT-licensed Strata artifact, tokenizer and protocol support lives under
@@ -49,7 +50,8 @@ Local inference shares the existing GPU queue. Another local engine's active tas
 native loading, and starting an external local engine unloads Forge's worker. Context,
 reasoning, CPU thread and keep-warm settings remain explicit. llama.cpp automatically
 fits GPU layers and selects its supported attention path. Strata automatically sizes
-its expert cache and prompt processing. A memory check prevents an unsafe large load.
+its expert cache and prompt processing. A memory check chooses a full arena, a resident CPU remainder, or SSD-mapped experts
+using Strata’s supported modes, and blocks loads without minimum headroom.
 The initial Strata adapter uses ordinary decoding; optional MTP draft acceleration is
 not included. Upstream speed charts do not establish performance on another computer.
 
@@ -75,3 +77,7 @@ The model picker shows model names while preserving stable request identities. T
 Models panel refreshes after completed imports, retries unavailable metadata and ignores
 responses after it closes. Existing Ollama and compatible connections remain available
 until their users choose to migrate them.
+
+Source development can acquire the same pinned bundle with
+`python scripts/fetch_native_runtimes.py --destination native-runtimes --cache build/native-downloads`.
+Use a fresh destination after changing the runtime lock; mismatched existing files are retained, never silently reused.

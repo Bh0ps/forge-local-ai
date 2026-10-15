@@ -69,7 +69,8 @@ class NativeJobs:
                         raise ValueError('Choose a supported Forge model.')
                     from forge_native_download import pinned_download
                     import shutil
-                    needed = sum(f['size'] for f in selected['files']) + 4 * 1024**3
+                    download_bytes=sum(f['size'] for f in selected['files'])
+                    needed = download_bytes + selected.get('preparation_bytes',0) + 4 * 1024**3
                     root = self.runtime.catalog.root / selected['id']
                     root.mkdir(parents=True, exist_ok=True)
                     present = sum(p.stat().st_size for p in root.rglob('*') if p.is_file())
@@ -81,7 +82,7 @@ class NativeJobs:
                         if self.closed:
                             raise ValueError('Model setup paused while Forge closed.')
                         with self.lock:
-                            job.update(message='Downloading ' + item['path'], expected_bytes=needed - 4 * 1024**3)
+                            job.update(message='Downloading ' + item['path'], expected_bytes=download_bytes)
                             self.save()
                         def progress(done,total):
                             with self.lock:

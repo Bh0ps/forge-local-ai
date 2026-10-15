@@ -40,4 +40,17 @@ describe('Forge model management',()=>{
     await waitFor(()=>expect(screen.getByText('Ready in Forge.')).toBeTruthy());
     expect(changed).toHaveBeenCalledTimes(1);
   });
+  it('shows the selected model without changing its stable identity',async()=>{
+    const useModel=vi.fn(async()=>{});
+    bridge(()=>({...status,catalog:{...status.catalog,models:[{id:'stable',name:'Synthetic model',engine:'llama-cpp',validation:'passed',files:[{size:1024}]}]}}));
+    render(<NativeModels changed={vi.fn(async()=>{})} useModel={useModel} selected="stable"/>);
+    expect((await screen.findByRole('button',{name:'Selected'})).getAttribute('aria-pressed')).toBe('true');
+    expect(useModel).not.toHaveBeenCalled();
+  });
+  it('keeps a malformed catalog out of the rendered model list',async()=>{
+    bridge(()=>({...status,catalog:{...status.catalog,models:[{id:'broken',name:'Malformed model'}]}}));
+    render(<NativeModels changed={vi.fn(async()=>{})} useModel={vi.fn(async()=>{})}/>);
+    await screen.findByText('Forge model metadata is unavailable. Refresh to retry.');
+    expect(screen.queryByText('Malformed model')).toBeNull();
+  });
 });

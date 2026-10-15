@@ -516,3 +516,11 @@ uvicorn==0.52.4 \
     #   -c requirements-ci.lock
     #   -r requirements.txt
     #   mcp
+
+# Native model template/tokenizer dependencies; Windows x64 / CPython 3.12.
+jinja2==3.1.6 \
+    --hash=sha256:85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
+markupsafe==3.0.4 \
+    --hash=sha256:11935df9bf455ed0c04eb87bcd720f02b1fe5e02128a9430f23aed6f93336fc7
+regex==2026.9.29 \
+    --hash=sha256:fdd88ed5e20b1bcdd234421e454962c971aa44b653bdb7f1ea9ef683e90fb649

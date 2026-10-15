@@ -9,6 +9,7 @@ from pathlib import Path
 import queue
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -244,8 +245,15 @@ class NativeRuntime:
                     raise NativeFailure('timeout', 'Model loading exceeded ten minutes. Check memory and model compatibility.')
         else:
             import psutil
-            if psutil.virtual_memory().available < 26 * 1024**3:
-                raise NativeFailure('memory', 'Strata Coder needs more free memory before loading. Finish other local model work and close memory-heavy apps, then retry.')
+            from forge_inference import memory_telemetry
+            from forge_native_memory import strata_memory_plan
+            facts=memory_telemetry()
+            if facts.get('stale') or facts.get('probe_state') in ('failed','unavailable','refreshing'):
+                raise NativeFailure('memory','GPU memory could not be measured. Retry Strata after the hardware check finishes.')
+            free=max([max(0,g.get('total_mb',0)-g.get('used_mb',0))*1024**2 for g in facts.get('gpus',[])] or [0])
+            try:plan=strata_memory_plan(psutil.virtual_memory().available,free,context)
+            except ValueError:
+                raise NativeFailure('memory','Strata Coder needs more free RAM or GPU memory. Finish other model work, then retry.') from None
             from forge_vendor.strata.iq_pack import main as prepare
             from forge_vendor.strata.tokenizer import Tokenizer
             from forge_vendor.strata.frontend import ChatTemplate
@@ -253,10 +261,19 @@ class NativeRuntime:
             if not (pack / 'native_experts.txt').is_file():
                 if prepare(['--gguf', str(path), '--out', str(pack)]) != 0:
                     raise NativeFailure('model', 'Strata model preparation failed. The original model files were retained.')
+            if plan['mode']!='arena' and not (pack/'experts.bin').is_file():
+                if shutil.disk_usage(pack).free<plan['prepared_expert_bytes']+4*1024**3:
+                    raise NativeFailure('storage','Strata memory-saving preparation needs another 28 GB of free space in the model directory.')
+                current()
+                if prepare(['--gguf',str(path),'--out',str(pack),'--experts-bin'])!=0:
+                    raise NativeFailure('model','Strata memory-saving preparation failed. Model originals were retained.')
             arguments = ['--serve', '--pack', str(pack), '--native', str(path),
                 '--ple-gguf', str(self.catalog.root / model['files'][1]['path']),
                 '--expert-profile', str(Path(__file__).parent / 'forge_vendor' / 'strata' / 'expert-profile-coder.bin'),
                 '--expert-cache', 'auto', '--prefill', 'auto', '--spec', '0', '--max-context', str(context)]
+            if plan['mode']!='arena':
+                arguments+=['--resident-experts' if plan['mode']=='resident' else '--mmap-experts']
+            if context>8192: arguments+=['--kv','int8']
             if threads is not None:
                 arguments += ['--pool-workers',str(max(1,threads-1))]
                 if threads==1: arguments += ['--no-host-worker']
@@ -300,7 +317,8 @@ class NativeRuntime:
                         for message in body['messages']:
                             if 'thinking' in message:
                                 message['reasoning_content']=message.pop('thinking')
-                        body['chat_template_kwargs'] = {'enable_thinking': bool(request.get('thinking', False))}
+                        if model.get('reasoning_control'):
+                            body['chat_template_kwargs'] = {'enable_thinking': bool(request.get('thinking', False))}
                         stops = defaults.get('params', {}).get('stop')
                         if isinstance(stops, list) and len(stops) <= 32 and all(isinstance(s, str) and len(s)<=200 for s in stops):
                             body['stop'] = stops
@@ -413,8 +431,10 @@ class NativeProvider:
 
     def capabilities(self, model):
         item = self.runtime.catalog.model(model)
+        control=item['engine']=='strata' or item.get('reasoning_control',False)
         return {'capabilities': item['capabilities'], 'model_info': {'local.context_length': item['context']},
-                'context_limit_source': 'gguf', 'reasoning': {'control_supported': item['engine'] == 'strata' or item.get('reasoning_control',False)}}
+                'context_limit_source': 'gguf', 'reasoning': {'control_supported': control},
+                **({'thinking':{'values':[False,True],'default':False}} if control else {})}
 
     def estimate_tokens(self, messages, tools):
         from context_window import estimated_prompt_tokens

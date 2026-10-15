@@ -348,7 +348,7 @@ class ForgeService:
         if getattr(self,'native_jobs',None):
             self.native_jobs.closed=True
             self.native_jobs.cancel.set()
-        if getattr(self.providers,'native_runtime',None) is not None: self.providers.native_runtime.close()
+        if getattr(getattr(self,'providers',None),'native_runtime',None) is not None: self.providers.native_runtime.close()
         if self.ai_workflow_manager: self.ai_workflow_manager.shutdown()
         if self.channel_manager: self.channel_manager.shutdown()
         if self.setup_manager: self.setup_manager.shutdown()
@@ -369,7 +369,7 @@ class ForgeService:
         for run in self.store.runs():
             if run['status'] not in TERMINAL: self.jobs.cancel(run['id'],pause=True)
         if getattr(self,'native_jobs',None): self.native_jobs.cancel.set()
-        if getattr(self.providers,'native_runtime',None) is not None: self.providers.native_runtime.stop()
+        if getattr(getattr(self,'providers',None),'native_runtime',None) is not None: self.providers.native_runtime.stop()
         if self.computer_broker and hasattr(self.computer_broker,'stop'): self.computer_broker.stop()
         if self.integrations and hasattr(self.integrations,'stop'): self.integrations.stop()
         if self.performance_manager:

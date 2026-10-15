@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import threading
+import time
 from uuid import uuid4
 
 
@@ -32,7 +33,13 @@ def atomic_json(path, value):
             json.dump(value, stream, ensure_ascii=False, allow_nan=False, indent=2)
             stream.flush()
             os.fsync(stream.fileno())
-        temporary.replace(path)
+        for attempt in range(6):
+            try:
+                temporary.replace(path)
+                break
+            except PermissionError:
+                if attempt==5: raise
+                time.sleep(.01*2**attempt)
     finally:
         temporary.unlink(missing_ok=True)
 

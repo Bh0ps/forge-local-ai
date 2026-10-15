@@ -1,18 +1,29 @@
 {
-  "schema":1,
-  "models":[{
-    "id":"strata-coder-iq1-m",
-    "name":"Qwen3.8 Flash Next Coder",
-    "engine":"strata",
-    "repo":"ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF",
-    "revision":"5348543e0147355ac9cbcb031184a3546350988e",
-    "license":"apache-2.0",
-    "minimum_ram_gib":31,
-    "minimum_vram_gib":12,
-    "context":8192,
-    "files":[
-      {"path":"IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf","size":29608446496,"sha256":"e11083ba855e7666b48ea3f2db6a9c3a20c18751a012cc24f948de91b7087fad"},
-      {"path":"IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00002-of-00002.gguf","size":28800138432,"sha256":"316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113"}
-    ]
-  }]
+  "schema": 1,
+  "models": [
+    {
+      "id": "strata-coder-iq1-m",
+      "name": "Qwen3.8 Flash Next Coder",
+      "engine": "strata",
+      "repo": "ISTA-DASLab/Qwen3.8-Flash-Next-GSQ-RCO-Coder-GGUF",
+      "revision": "5348543e0147355ac9cbcb031184a3546350988e",
+      "license": "apache-2.0",
+      "minimum_ram_gib": 31,
+      "minimum_vram_gib": 12,
+      "context": 8192,
+      "files": [
+        {
+          "path": "IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00001-of-00002.gguf",
+          "size": 29608446496,
+          "sha256": "e11083ba855e7666b48ea3f2db6a9c3a20c18751a012cc24f948de91b7087fad"
+        },
+        {
+          "path": "IQ1_M/Qwen3.8-Flash-Next-GSQ-RCO-IQ1_M-00002-of-00002.gguf",
+          "size": 28800138432,
+          "sha256": "316b46f3a2dbd68c900f43136ab9449f9dcc3725dfd8c794847c204bc161e113"
+        }
+      ],
+      "preparation_bytes": 23400000000
+    }
+  ]
 }

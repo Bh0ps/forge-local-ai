@@ -61,11 +61,11 @@ Model weights download separately; a separately installed inference application 
 
 ## A look inside
 
-These Usage screenshots use an isolated workspace with synthetic data.
+These model-management screenshots use an isolated workspace with synthetic data.
 
-![Scoped token totals and daily usage in the dark workspace](assets/demos/forge-5.1.27-usage-dark.png)
+![Forge model storage and native model controls in the dark workspace](assets/demos/forge-5.2.0-models-dark.png)
 
-![Usage controls in a narrow light window with text enlarged to 150%](assets/demos/forge-5.1.27-usage-narrow-light.png)
+![Forge model controls in a narrow light window](assets/demos/forge-5.2.0-models-light.png)
 
 ## Connect a browser or Telegram
 

@@ -191,3 +191,18 @@ def test_release_after_request_disposes_only_owned_worker(tmp_path):
     runtime.worker={'process':SimpleNamespace(poll=lambda:0,stdin=None),'job':SimpleNamespace(close=lambda:closed.append(True))}
     runtime._retain(0)
     assert runtime.worker is None and runtime.state=='stopped' and closed==[True]
+
+
+def test_catalog_publication_retries_transient_windows_reader(tmp_path,monkeypatch):
+    from forge_native_models import atomic_json
+    replace=Path.replace
+    attempts=[]
+    def busy_once(path,target):
+        attempts.append(True)
+        if len(attempts)==1: raise PermissionError('Synthetic Windows reader')
+        return replace(path,target)
+    monkeypatch.setattr(Path,'replace',busy_once)
+    monkeypatch.setattr('forge_native_models.time.sleep',lambda value:None)
+    target=tmp_path/'progress.json'
+    atomic_json(target,{'received':8192})
+    assert json.loads(target.read_text())=={'received':8192} and len(attempts)==2
