@@ -1,5 +1,6 @@
 """Native pipe terminals and durable answer recovery, without model processes."""
 import io
+import json
 import threading
 from types import SimpleNamespace
 
@@ -149,7 +150,7 @@ def test_historical_terminal_projection_requires_strata_run_provenance(tmp_path,
     try:
         svc.jobs._launch=lambda run:None
         old=svc.jobs.start({"text":"Old fixture."});old_id=old["id"];chat_id=old["chat_id"]
-        svc.store.save_assistant_turn(old_id,"<|im_end|>",interaction_run_id=old_id,
+        svc.store.add_message(chat_id,'assistant',"<|im_end|>",interaction_run_id=old_id,
             thinking="Saved reasoning.",tool_calls=[call("list_files",{})])
         svc.store.add_message(chat_id,"tool","[]",tool_name="list_files")
         svc.store.add_message(chat_id,"user","<|im_end|>")
@@ -182,4 +183,84 @@ def test_native_correction_counter_and_message_commit_atomically(tmp_path,monkey
         assert not svc.store.request_native_final_answer(identifier)
         messages=svc.store.run_chat(accepted["chat_id"],0)["messages"]
         assert sum(m["role"]=="user" and "last turn ended" in m["content"] for m in messages)==1
+    finally:svc.shutdown()
+
+
+@pytest.mark.parametrize('literal',['<|im_end|>','<|endoftext|>'])
+def test_new_native_literal_reply_survives_restart(tmp_path,monkeypatch,literal):
+    svc,_=native_service(tmp_path,monkeypatch,[])
+    svc.jobs._launch=lambda run:None
+    old=svc.jobs.start({'text':'Quote the literal marker.'})
+    saved=svc.store.save_assistant_turn(old['id'],literal,interaction_run_id=old['id'])
+    assert type(saved['native_turn_format']) is int and saved['native_turn_format']==1
+    svc.store.update_run(old['id'],status='completed',response_provider='Strata')
+    svc.shutdown()
+    restored,_=native_service(tmp_path,monkeypatch,[])
+    try:
+        restored.jobs._launch=lambda run:None
+        current=restored.jobs.start({'text':'Keep that literal reply.','chat_id':old['chat_id']})
+        messages=restored.jobs._context(restored.store.run(current['id']),[])
+        assert {'role':'assistant','content':literal} in messages
+        assert restored.store.run_chat(old['chat_id'],0)['messages'][1]['native_turn_format']==1
+    finally:restored.shutdown()
+
+
+def test_resumed_legacy_run_distinguishes_old_delimiter_from_new_literal(tmp_path,monkeypatch):
+    svc,_=native_service(tmp_path,monkeypatch,[])
+    try:
+        svc.jobs._launch=lambda run:None
+        old=svc.jobs.start({'text':'Inspect this synthetic fixture.'});chat=old['chat_id']
+        legacy=svc.store.add_message(chat,'assistant','<|im_end|>',interaction_run_id=old['id'],
+            thinking='Legacy tool reasoning.',tool_calls=[call('list_files',{})])
+        svc.store.add_message(chat,'tool','[]',tool_name='list_files')
+        svc.store.update_run(old['id'],status='paused',response_provider='Strata')
+        svc.jobs.resume(old['id'])
+        current=svc.store.save_assistant_turn(old['id'],'<|im_end|>',interaction_run_id=old['id'])
+        messages=svc.jobs._context(svc.store.run(old['id']),[])
+        assert next(m for m in messages if m.get('tool_calls'))['content']==''
+        assert {'role':'assistant','content':'<|im_end|>'} in messages
+        saved=svc.store.run_chat(chat,0)['messages']
+        assert next(m for m in saved if m['id']==legacy['id'])['content']=='<|im_end|>'
+        assert 'native_turn_format' not in next(m for m in saved if m['id']==legacy['id'])
+        assert next(m for m in saved if m['id']==current['id'])['native_turn_format']==1
+    finally:svc.shutdown()
+
+
+@pytest.mark.parametrize('value',[True,False,0,2,'1',None])
+def test_native_turn_format_rejects_noncanonical_values(value):
+    from storage import Store
+    with pytest.raises(ValueError,match='native turn format'):
+        Store._metadata({'native_turn_format':value})
+    with pytest.raises(ValueError,match='invalid metadata'):
+        Store._message({'metadata':json.dumps({'native_turn_format':value})})
+
+
+def test_native_turn_format_is_not_a_caller_supplied_capability(tmp_path,monkeypatch):
+    svc,_=native_service(tmp_path,monkeypatch,[])
+    try:
+        svc.jobs._launch=lambda run:None
+        run=svc.jobs.start({'text':'Synthetic request.'})
+        with pytest.raises(ValueError,match='coordinator-owned'):
+            svc.store.add_message(run['chat_id'],'assistant','Literal',native_turn_format=1)
+        with pytest.raises(ValueError,match='coordinator-owned'):
+            svc.store.save_assistant_turn(run['id'],'Literal',native_turn_format=1)
+        svc.store.update_run(run['id'],settings={**svc.store.run(run['id'])['settings'],'provider_id':'ollama'})
+        other=svc.store.save_assistant_turn(run['id'],'Other local provider.')
+        assert 'native_turn_format' not in other
+    finally:svc.shutdown()
+
+
+def test_native_format_marker_and_turn_roll_back_together(tmp_path,monkeypatch):
+    svc,_=native_service(tmp_path,monkeypatch,[])
+    try:
+        svc.jobs._launch=lambda run:None
+        run=svc.jobs.start({'text':'Synthetic request.'})
+        with svc.store._connection(transaction='write') as db:
+            db.execute("CREATE TRIGGER reject_native_turn BEFORE INSERT ON messages WHEN NEW.role='assistant' BEGIN SELECT RAISE(ABORT,'fixture rollback'); END")
+        with pytest.raises(ValueError,match='fixture rollback'):
+            svc.store.save_assistant_turn(run['id'],'Exact literal <|im_end|>.')
+        assert not any(m['role']=='assistant' for m in svc.store.run_chat(run['chat_id'],0)['messages'])
+        with svc.store._connection(transaction='write') as db:db.execute('DROP TRIGGER reject_native_turn')
+        saved=svc.store.save_assistant_turn(run['id'],'Exact literal <|im_end|>.')
+        assert saved['native_turn_format']==1
     finally:svc.shutdown()

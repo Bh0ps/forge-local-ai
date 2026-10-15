@@ -778,7 +778,7 @@ class RunManager:
             packet=self.workflow.context(run)
             messages.append({'role':'system','content':(packet if packet else 'Goal checkpoint (saved task data):\n'+compact_goal_context(goal,run['settings']['context'])+continuation)+execution_guidance})
         before=[]; after=[]; mutations={}; native_terminal_rows=set()
-        if any(row['role']=='assistant' and row['content'] in ('<|im_end|>','<|endoftext|>') for row in chat['messages']):
+        if any(row['role']=='assistant' and row.get('native_turn_format') is None and row['content'] in ('<|im_end|>','<|endoftext|>') for row in chat['messages']):
             # Older Strata adapters persisted an EOS token as the entire answer.
             # Project only those proven owned turns; preserve the original rows,
             # reasoning, tool calls, and literal marker text from other sources.
@@ -786,6 +786,7 @@ class RunManager:
                 native_terminal_rows={row[0] for row in db.execute(
                     "SELECT m.id FROM messages m JOIN runs r ON r.id=json_extract(m.metadata,'$.interaction_run_id') AND r.chat_id=m.chat_id "
                     "WHERE m.chat_id=? AND m.role='assistant' AND m.content IN ('<|im_end|>','<|endoftext|>') "
+                    "AND json_type(m.metadata,'$.native_turn_format') IS NULL "
                     "AND json_extract(r.data,'$.settings.provider_id')='forge-native' AND json_extract(r.data,'$.response_provider')='Strata'",
                     (run['chat_id'],))}
         if not run.get('cloud_scope'):

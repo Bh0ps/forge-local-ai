@@ -402,6 +402,7 @@ class ForgeStore(Store):
         return hydrated
 
     def add_message(self,chat_id,role,content,**metadata):
+        if 'native_turn_format' in metadata:raise ValueError('Native turn format is coordinator-owned.')
         if metadata.get('images'): metadata['images']=self.store_images(metadata['images'])
         return super().add_message(chat_id,role,content,**metadata)
 
@@ -444,6 +445,7 @@ class ForgeStore(Store):
         from storage import _text, MAX_MESSAGE_CHARACTERS
         from forge_provider_state import reasoning_details
         content=_text(content,'Message',MAX_MESSAGE_CHARACTERS,empty=True,strip=False)
+        if 'native_turn_format' in metadata:raise ValueError('Native turn format is coordinator-owned.')
         public=self._metadata(metadata)
         private=None
         if provider_state:
@@ -459,6 +461,8 @@ class ForgeStore(Store):
             run=json.loads(row['data'])
             if private is not None and run['settings']['provider_id']!='openrouter':
                 raise ValueError('Provider state belongs to another engine.')
+            if run['settings']['provider_id']=='forge-native':
+                public=self._metadata({**metadata,'native_turn_format':1})
             stamp=_now()
             cursor=db.execute('INSERT INTO messages(chat_id,role,content,metadata,created_at) VALUES(?,?,?,?,?)',
                 (row['chat_id'],'assistant',content,public,stamp))
