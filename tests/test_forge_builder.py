@@ -328,6 +328,32 @@ def test_preview_stop_never_holds_ownership_lock_while_waiting_for_browser(build
     assert manager.previews.status(preview['id'])['status'] == 'stopped'
 
 
+def test_delayed_preview_pane_cleanup_and_show_cannot_replace_current_owner(builder):
+    from types import SimpleNamespace
+    manager, record, _, _ = builder
+    manager.template({'id': record['id'], 'expected_revision': 1, 'directory': 'site'})
+    preview = manager.dispatch('preview_start', {'builder_id': record['id']})
+    calls = []
+    class Browser:
+        view = SimpleNamespace(_layout=lambda: {'preview_id': preview['id'], 'pane_token': 'current-mount'})
+        def dispatch(self, action, data=None):
+            calls.append(action)
+            return {'ok': True}
+        def stop(self): calls.append('stop')
+        def reset(self): calls.append('reset')
+        def shutdown(self): pass
+    manager.previews.browser = Browser()
+    manager.previews.browser_preview = preview['id']
+    for action in ('hide', 'show'):
+        outcome = manager.previews.browser_action(action, {'id': preview['id'], 'pane_token': 'previous-mount', 'rect': {}})
+        assert outcome['not_executed'] and calls == []
+    outcome = manager.previews.browser_action('show', {'id': 'previous-preview', 'pane_token': 'previous-mount', 'rect': {}})
+    assert outcome['not_executed'] and calls == []
+    assert manager.previews.browser_preview == preview['id']
+    manager.previews.browser_action('hide', {'id': preview['id'], 'pane_token': 'current-mount'})
+    assert calls == ['hide']
+
+
 def test_worktree_document_exports_never_write_original_and_preview_is_rejected(builder, tmp_path):
     manager, record, folder, _ = builder
     worktree = tmp_path / 'worktree'

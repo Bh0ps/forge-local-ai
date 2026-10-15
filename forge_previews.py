@@ -327,6 +327,19 @@ class PreviewManager:
                 return {'available': False, 'message': 'Open Forge desktop for the isolated preview panel.'}
             raise ValueError('Preview inspection requires Forge desktop.')
         identifier = data.get('id') or data.get('preview_id')
+        token = data.get('pane_token')
+        if token is not None:
+            if not isinstance(token, str) or not 1 <= len(token) <= 96 or not identifier:
+                raise ValueError('Expected a scoped preview pane identity.')
+            view = getattr(self.browser, 'view', None)
+            layout = view._layout() if view is not None and hasattr(view, '_layout') else {}
+            stale = (action == 'hide' and identifier != self.browser_preview)
+            if action == 'hide' and layout.get('pane_token'):
+                stale = stale or layout['pane_token'] != token
+            if action in ('show', 'resize') and view is not None and hasattr(view, '_layout'):
+                stale = layout.get('preview_id') != identifier or layout.get('pane_token') != token
+            if stale:
+                return {'ok': True, 'not_executed': True}
         if action in ('hide', 'status'):
             result = self.browser.dispatch(action)
             if action == 'status':
@@ -347,6 +360,8 @@ class PreviewManager:
             self.browser.stop()
             self.browser.reset()
             self.browser.dispatch('open', {'url': record['url']})
+        if getattr(self.browser, 'view', None) is not None:
+            self.browser.view.preview_id = identifier
         args = {k: v for k, v in data.items() if k not in ('id', 'preview_id')}
         if action in ('show', 'reload', 'resize'):
             return self.browser.dispatch(action, args)

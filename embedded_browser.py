@@ -108,12 +108,17 @@ class EmbeddedWebView2Page(WebView2Page):
          if(!panel||panel.getAttribute('data-forge-browser-panel')!==id)return {visible:false};
          const r=panel.getBoundingClientRect(),s=getComputedStyle(panel);
          return {visible:r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden',
+           preview_id:panel.getAttribute('data-forge-preview-id'),pane_token:panel.getAttribute('data-forge-pane-token'),
            hud:!!document.querySelector('.app.hud'),modal:!!document.querySelector('.modal-backdrop, dialog[open]'),
            viewport:{width:innerWidth,height:innerHeight},rect:{x:r.x,y:r.y,width:r.width,height:r.height}};
         })()'''.replace('__PANEL_ID__', json.dumps(self.panel_id)))
 
     def bind(self, request=None, check=None):
         snapshot = self._layout()
+        try: self._preview_identity(snapshot, request)
+        except BrowserGuard:
+            self.hide()
+            raise
         def position(owner):
             from System.Drawing import Rectangle
             main = owner.webview
@@ -126,6 +131,7 @@ class EmbeddedWebView2Page(WebView2Page):
             self.container.BringToFront()
             self.container.Visible = bool(owner.Visible)
             self.bound, self.visible = bounds, bool(owner.Visible)
+            self.bound_pane_token = snapshot.get('pane_token')
             return bounds
         try: return self.ui(position)
         except BrowserGuard:
@@ -137,6 +143,10 @@ class EmbeddedWebView2Page(WebView2Page):
         if check: check()
         if not self.visible: return
         snapshot = self._layout()
+        try: self._preview_identity(snapshot, {'pane_token': getattr(self, 'bound_pane_token', None)})
+        except BrowserGuard:
+            self.hide()
+            raise
         def validate(owner):
             main = owner.webview
             bounds = validate_bounds({'panel_id':self.panel_id}, snapshot,
@@ -154,6 +164,7 @@ class EmbeddedWebView2Page(WebView2Page):
         snapshot = self._layout()
         viewport = snapshot.get('viewport') or {}
         try:
+            self._preview_identity(snapshot)
             # This only decides whether to request the frontend's open/scroll
             # action. bind still validates against the real native client/DPI.
             validate_bounds({'panel_id': self.panel_id}, snapshot,
@@ -162,13 +173,25 @@ class EmbeddedWebView2Page(WebView2Page):
         except (BrowserGuard, TypeError):
             return False
 
-    def show(self, activate=True, check=None):
+    def _preview_identity(self, snapshot, request=None):
+        if self.panel_id != 'forge-preview-panel':
+            return
+        expected = getattr(self, 'preview_id', None)
+        token = (request or {}).get('pane_token')
+        if ((expected is not None and snapshot.get('preview_id') != expected)
+                or (token is not None and snapshot.get('pane_token') != token)):
+            raise BrowserGuard('Browser panel changed. Inspect again after reopening it.')
+
+    def open_pane(self, check=None):
+        self.show(check=check, request_open=True)
+
+    def show(self, activate=True, check=None, request_open=False):
         if check: check()
-        if not self._contained_layout():
+        if request_open or not self._contained_layout():
             event = 'forge:preview-open' if self.panel_id == 'forge-preview-panel' else 'forge:browser-open'
             if check: check()
             self._main_evaluate('window.dispatchEvent(new CustomEvent('+json.dumps(event)+'));true')
-            deadline = time.monotonic()+3
+            deadline = time.monotonic()+(10 if request_open else 3)
             while time.monotonic()<deadline:
                 if check: check()
                 if self._contained_layout(): break

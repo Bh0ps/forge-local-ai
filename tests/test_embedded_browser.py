@@ -104,3 +104,19 @@ def test_explicit_preview_open_requests_below_fold_pane_and_preserves_contained_
     snapshot['visible'] = False
     page.show(activate=False)
     assert len(opened) == 2 and len(bound) == 3
+    page.show(activate=False, request_open=True)
+    assert len(opened) == 3 and len(bound) == 4
+
+
+def test_preview_identity_rejects_a_previous_preview_or_pane_instance():
+    from embedded_browser import EmbeddedWebView2Page
+    page = EmbeddedWebView2Page.__new__(EmbeddedWebView2Page)
+    page.panel_id = 'forge-preview-panel'
+    page.preview_id = 'current-preview'
+    state = {**layout(), 'preview_id': 'current-preview', 'pane_token': 'current-mount'}
+    page._layout = lambda: state
+    assert page._contained_layout()
+    with pytest.raises(BrowserGuard, match='panel changed'):
+        page._preview_identity(state, {'pane_token': 'previous-mount'})
+    state['preview_id'] = 'previous-preview'
+    assert not page._contained_layout()

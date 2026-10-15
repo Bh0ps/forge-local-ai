@@ -74,7 +74,7 @@ describe('Builder brief and completion evidence', () => {
       expect(scroll).toHaveBeenCalledTimes(1);
       expect(scroll).toHaveBeenLastCalledWith({block: 'start', inline: 'nearest', behavior: 'instant'});
       top = innerHeight - 100; fireEvent.scroll(window);
-      await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_hide', {}));
+      await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_hide', expect.objectContaining({id: 'preview', pane_token: expect.any(String)})));
       expect(document.getElementById('forge-preview-panel')?.getBoundingClientRect().height).toBeGreaterThan(0);
       expect(scroll).toHaveBeenCalledTimes(1);
       const shown = call.mock.calls.filter(([action]) => action === 'preview_browser_show').length;
@@ -84,7 +84,9 @@ describe('Builder brief and completion evidence', () => {
       top = 220; fireEvent.scroll(window);
       await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_show', expect.objectContaining({rect: expect.objectContaining({y: 220, height: innerHeight - 248})})));
       expect(scroll).toHaveBeenCalledTimes(2);
+      const paneToken = document.getElementById('forge-preview-panel')?.getAttribute('data-forge-pane-token');
       view.unmount();
+      expect(call).toHaveBeenCalledWith('preview_browser_hide', {id: 'preview', pane_token: paneToken});
     } finally {
       if (descriptor) Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', descriptor);
       else delete (HTMLElement.prototype as {scrollIntoView?: unknown}).scrollIntoView;

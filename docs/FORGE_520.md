@@ -93,6 +93,11 @@ Historical Ollama chat model names resolve to their imported native identities w
 available. Missing models leave the current composer selection intact; chat history
 and saved run bindings are preserved. Loading earlier messages does not change models.
 
+Standalone preview opening selects Builder explicitly and waits for its actual pane.
+Pane requests carry a preview and mount identity: delayed cleanup or resize work from
+an earlier pane cannot hide or replace the current preview. Native bounds and tool
+snapshot checks still reject changed or obscured targets.
+
 Source development can acquire the same pinned bundle with
 `python scripts/fetch_native_runtimes.py --destination native-runtimes --cache build/native-downloads`.
 Use a fresh destination after changing the runtime lock; mismatched existing files are retained, never silently reused.

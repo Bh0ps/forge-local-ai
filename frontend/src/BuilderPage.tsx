@@ -34,6 +34,7 @@ export function briefContent(brief: BuilderBrief | null) { if(!brief)return {}; 
 
 function PreviewPane({ preview, reload = 0, onError }: {preview: BuilderPreview; reload?: number; onError: (text: string) => void}) {
   const pane = useRef<HTMLDivElement>(null);
+  const [paneToken] = useState(() => crypto.randomUUID());
   useEffect(() => {
     if (!isNative() || preview.status !== 'ready' || !pane.current) return;
     let disposed = false, pending = false, dirty = false, last = '';
@@ -57,28 +58,28 @@ function PreviewPane({ preview, reload = 0, onError }: {preview: BuilderPreview;
       // iframe, it cannot be clipped by the surrounding scroll container.
       const available = Math.floor(innerHeight - r.y - 28);
       if (available < 160 || r.y < 0 || r.x < 0 || r.right > innerWidth + 1) {
-        await api('preview_browser_hide').catch(() => {}); last = ''; return;
+        await api('preview_browser_hide', {id: preview.id, pane_token: paneToken}).catch(() => {}); last = ''; return;
       }
       const height = Math.min(760, available);
       pane.current.style.minHeight = '160px';
       pane.current.style.height = `${height}px`;
       r = pane.current.getBoundingClientRect();
-      const data = { id: preview.id, panel_id: 'forge-preview-panel', rect: { x: r.x, y: r.y, width: r.width, height: r.height }, viewport: {width: innerWidth, height: innerHeight} };
+      const data = { id: preview.id, pane_token: paneToken, panel_id: 'forge-preview-panel', rect: { x: r.x, y: r.y, width: r.width, height: r.height }, viewport: {width: innerWidth, height: innerHeight} };
       const key = blocked ? 'hidden' : JSON.stringify(data);
       if (last === key || r.width < 10 || r.height < 10) return;
       pending = true;
-      try { await api(blocked ? 'preview_browser_hide' : 'preview_browser_show', blocked ? {} : data); if (!disposed) last = key; }
+      try { await api(blocked ? 'preview_browser_hide' : 'preview_browser_show', blocked ? {id: preview.id, pane_token: paneToken} : data); if (!disposed) last = key; }
       catch (e) { if (!disposed) onError(errorText(e)); }
-      finally { pending = false; if (disposed) void api('preview_browser_hide').catch(() => {}); else if (dirty) { dirty = false; schedule(); } }
+      finally { pending = false; if (disposed) void api('preview_browser_hide', {id: preview.id, pane_token: paneToken}).catch(() => {}); else if (dirty) { dirty = false; schedule(); } }
     }
     const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(schedule) : null;
     resize?.observe(pane.current);
     const observer = new MutationObserver(schedule); observer.observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'open', 'hidden']});
     window.addEventListener('resize', schedule); window.addEventListener('scroll', schedule, true); window.addEventListener('forge:preview-open', openPane); openPane();
-    return () => { disposed = true; cancelAnimationFrame(frame); resize?.disconnect(); observer.disconnect(); window.removeEventListener('resize', schedule); window.removeEventListener('scroll', schedule, true); window.removeEventListener('forge:preview-open', openPane); void api('preview_browser_hide').catch(() => {}); };
+    return () => { disposed = true; cancelAnimationFrame(frame); resize?.disconnect(); observer.disconnect(); window.removeEventListener('resize', schedule); window.removeEventListener('scroll', schedule, true); window.removeEventListener('forge:preview-open', openPane); void api('preview_browser_hide', {id: preview.id, pane_token: paneToken}).catch(() => {}); };
   }, [preview.id, preview.status]);
   if (!isNative()) return <iframe key={`${preview.id}-${reload}`} className="builder-preview-frame" title="Local application preview" src={preview.url || undefined} sandbox="allow-scripts allow-forms allow-same-origin" />;
-  return <div className="builder-preview-frame" id="forge-preview-panel" data-forge-browser-panel="forge-preview-panel" ref={pane}><p>Opening the separate local preview…</p></div>;
+  return <div className="builder-preview-frame" id="forge-preview-panel" data-forge-browser-panel="forge-preview-panel" data-forge-preview-id={preview.id} data-forge-pane-token={paneToken} ref={pane}><p>Opening the separate local preview…</p></div>;
 }
 
 export function BuilderPage({ projects, chats = [], goals = [], runs = [], onRun, onOpenChat, notify = () => {} }: Props) {

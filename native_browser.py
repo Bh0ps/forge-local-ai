@@ -385,7 +385,8 @@ class NativeBrowser:
             if not hasattr(self.view, 'bind'): raise BrowserGuard('This browser does not support an embedded pane.')
             self._view_call('bind', data, check=guard)
         elif action != 'open' or not getattr(self.view, 'embedded', False):
-            self._view_call('show', check=guard)
+            explicit_preview = action == 'show' and self.panel_id == 'forge-preview-panel' and hasattr(self.view, 'open_pane')
+            self._view_call('open_pane' if explicit_preview else 'show', check=guard)
         with self.lock:
             if self.panel_id == 'forge-browser-panel' and generation == self._pane_generation:
                 if action in ('show', 'resize') or not getattr(self.view, 'embedded', False):
