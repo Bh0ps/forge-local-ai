@@ -30,8 +30,16 @@ llama.cpp handles general supported GGUF architectures. Strata is specialized fo
 pinned Qwen3.8 Flash Next Coder IQ1_M model. The initial Windows package includes NVIDIA
 CUDA acceleration, with llama.cpp CPU execution available without a compatible GPU.
 Strata requires a compatible NVIDIA GPU; AMD Strata binaries are not included in this
-preview. The Coder download is 58,408,584,928 bytes, plus generated preparation files. Memory-saving expert preparation can add about
-25.2 GB (23.42 GiB) of local files; this is not another network download.
+preview. The Coder weights are 58,408,584,928 bytes. Its required draft head adds
+5,214,301,696 bytes, fetched as 31 SHA-256-pinned tensor ranges from the official
+Qwen checkpoint. Allow about 96 GB of free storage for the complete download,
+generated runtime files and headroom. The memory-saving expert file alone occupies
+25.2 GB (23.42 GiB); it is prepared locally.
+
+The optional draft head uses [Qwen Community License 1.0](https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/de4b8e4d43b917e7706784d8bb445c9af86a3540/LICENSE).
+Its commercial coding/work assistant use requires a separate Qwen license. Review
+the model terms for your intended use. Forge's engine integration remains MIT-licensed;
+no model weights are included in Forge downloads.
 
 The exact engines, revisions and binary hashes are recorded in `native-runtime.lock.json`.
 Selected MIT-licensed Strata artifact, tokenizer and protocol support lives under
@@ -52,9 +60,10 @@ reasoning, CPU thread and keep-warm settings remain explicit. llama.cpp automati
 fits GPU layers and selects its supported attention path. Strata automatically sizes
 its expert cache and prompt processing. A memory check chooses a full arena, a resident CPU remainder, or SSD-mapped experts
 using Strata’s supported modes, and blocks loads without minimum headroom.
-Native IQ packs use Strata's required two-token verification windows. An additional
-MTP draft model and larger draft windows are not included. Upstream speed charts do
-not establish performance on another computer.
+Native IQ packs use Strata's required verification windows and MTP draft head. Forge
+prepares the draft runtime directly from pinned BF16 tensors, using upstream's Q2_0,
+Q8_0 and tensor layouts. Four-token windows follow the upstream setup default.
+Upstream speed charts do not establish performance on another computer.
 
 The existing Performance page accepts immutable native model and runtime identities for
 measured thread profiles. Recommendations remain scoped to the selected model, context,

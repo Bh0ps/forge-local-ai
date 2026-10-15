@@ -191,7 +191,7 @@ class NativeRuntime:
                 self._dispose(worker)
                 raise
         exe = self._executable(model['engine'])
-        for entry in model['files'] + model.get('auxiliary', []):
+        for entry in model['files'] + model.get('auxiliary', []) + model.get('support',{}).get('files',[]):
             current()
             if file_hash(self.catalog.root / entry['path'], check=current) != entry['sha256']:
                 raise NativeFailure('integrity', 'A model file failed verification. Import it again before use.')
@@ -274,10 +274,13 @@ class NativeRuntime:
             plan=placement()
             if plan['mode']!='arena' and not (pack/'experts.bin').is_file():
                 raise NativeFailure('memory','Free memory changed during Strata preparation. Retry to prepare its memory-saving layout.')
+            from forge_native_mtp import prepare as prepare_mtp
+            mtp=prepare_mtp(self.catalog.root,model,current)
+            plan=placement()
             arguments = ['--serve', '--pack', str(pack), '--native', str(path),
                 '--ple-gguf', str(self.catalog.root / model['files'][1]['path']),
                 '--expert-profile', str(Path(__file__).parent / 'forge_vendor' / 'strata' / 'expert-profile-coder.bin'),
-                '--expert-cache', 'auto', '--prefill', 'auto', '--spec', '2', '--max-context', str(context)]
+                '--expert-cache', 'auto', '--prefill', 'auto', '--spec', '4', '--mtp', str(mtp), '--max-context', str(context)]
             if plan['mode']!='arena':
                 arguments+=['--resident-experts' if plan['mode']=='resident' else '--mmap-experts']
             if context>8192: arguments+=['--kv','int8']
@@ -432,8 +435,8 @@ class NativeProvider:
 
     def models(self):
         return [{'name': m['id'], 'model': m['id'], 'display_name': m['name'],
-                 'digest':hashlib.sha256(json.dumps([f['sha256'] for f in m['files']+m.get('auxiliary',[]) ]).encode()).hexdigest(),
-                 'size': sum(f['size'] for f in m['files']), 'capabilities': m['capabilities']}
+                 'digest':hashlib.sha256(json.dumps([f['sha256'] for f in m['files']+m.get('auxiliary',[])+m.get('support',{}).get('files',[]) ]).encode()).hexdigest(),
+                 'size': sum(f['size'] for f in m['files']+m.get('support',{}).get('files',[])), 'capabilities': m['capabilities']}
                 for m in self.runtime.catalog.public()['models']]
 
     def capabilities(self, model):

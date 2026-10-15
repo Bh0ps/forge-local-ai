@@ -11,7 +11,8 @@ from forge_native_models import atomic_json, read_json
 def download_space_required(selected, root):
     """Credit only this pinned download's files, never unrelated caches."""
     present = 0
-    for item in selected['files']:
+    files=selected['files']+selected.get('support',{}).get('files',[])
+    for item in files:
         target = root / item['path']
         partial = target.with_suffix(target.suffix + '.forge-partial')
         if target.is_file() and not target.is_symlink() and target.stat().st_size == item['size']:
@@ -22,7 +23,7 @@ def download_space_required(selected, root):
     prepared = root / 'pack' / 'experts.bin'
     if preparation and prepared.is_file() and not prepared.is_symlink() and prepared.stat().st_size == preparation:
         present += preparation
-    return max(0, sum(f['size'] for f in selected['files']) + preparation + 4 * 1024**3 - present)
+    return max(0, sum(f['size'] for f in files) + preparation + 4 * 1024**3 - present)
 
 
 class NativeJobs:
@@ -86,14 +87,17 @@ class NativeJobs:
                         raise ValueError('Choose a supported Forge model.')
                     from forge_native_download import pinned_download
                     import shutil
-                    download_bytes=sum(f['size'] for f in selected['files'])
+                    support=selected.get('support')
+                    transfers=[(selected,item,True) for item in selected['files']]
+                    if support:transfers += [(support,item,False) for item in support['files']]
+                    download_bytes=sum(item['size'] for _,item,_ in transfers)
                     root = self.runtime.catalog.root / selected['id']
                     root.mkdir(parents=True, exist_ok=True)
                     if shutil.disk_usage(root).free < download_space_required(selected, root):
                         raise ValueError('The Forge model directory needs more free disk space.')
                     sources = []
                     completed_bytes=0
-                    for item in selected['files']:
+                    for download_model,item,is_weight in transfers:
                         if self.closed:
                             raise ValueError('Model setup paused while Forge closed.')
                         with self.lock:
@@ -103,15 +107,18 @@ class NativeJobs:
                             with self.lock:
                                 job.update(received_bytes=completed_bytes+done, file_bytes=total)
                                 self.save()
-                        sources.append(pinned_download(selected,item,root,cancel=self.cancel,progress=progress))
+                        downloaded=pinned_download(download_model,item,root,cancel=self.cancel,progress=progress)
+                        if is_weight:sources.append(downloaded)
                         completed_bytes+=item['size']
                     with self.lock:
                         job.update(message='Verifying model hashes. Original files are retained.')
                         self.save()
-                    result = self.runtime.catalog.add(sources, name=selected['name'], engine=selected['engine'],
+                    result = self.runtime.catalog.add(sources, name=selected['name'], engine=selected['engine'],publish=False,
                         identifier=selected['id'], expected=selected['files'],
                         origin={'kind': 'huggingface', 'repo': selected['repo'], 'revision': selected['revision'],
                                 'license': selected['license']})
+                    if support:result=self.runtime.catalog.attach_support(result,support)
+                    self.runtime.catalog.publish(result)
                 if self.closed:
                     raise ValueError('Model setup paused while Forge closed.')
                 self.profile()

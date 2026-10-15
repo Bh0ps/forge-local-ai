@@ -70,3 +70,20 @@ def test_cancel_retains_resumable_partial(monkeypatch,tmp_path):
     with pytest.raises(ValueError,match='paused'):
         pinned_download(model,item,tmp_path,cancel=cancel)
     assert calls==[] and not (tmp_path/item['path']).exists()
+
+
+def test_official_tensor_range_is_bound_to_offset_size_and_digest(monkeypatch,tmp_path):
+    shard=b'unrelated-header'+b'trusted-tensor'+b'unrelated-tail'
+    model,item,calls=fixture(monkeypatch,shard)
+    tensor=b'trusted-tensor';start=len(b'unrelated-header')
+    item.update(path='mtp/tensors/tensor.bin',source_path='model-001-of-002.safetensors',
+        source_offset=start,source_size=len(shard),size=len(tensor),sha256=hashlib.sha256(tensor).hexdigest())
+    assert pinned_download(model,item,tmp_path).read_bytes()==tensor
+    assert calls==[(start,start+len(tensor)-1)]
+
+
+@pytest.mark.parametrize('changes',[{'source_offset':-1},{'source_size':1},{'source_path':'../escape'},{'source_offset':True}])
+def test_invalid_source_ranges_are_refused_before_network(monkeypatch,tmp_path,changes):
+    model,item,calls=fixture(monkeypatch,b'synthetic weights');item.update(changes)
+    with pytest.raises(ValueError):pinned_download(model,item,tmp_path)
+    assert calls==[]

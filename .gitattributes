@@ -2,3 +2,5 @@
 *.ps1 text eol=crlf
 *.png binary
 *.ico binary
+# Preserve the pinned upstream model notice byte-for-byte, including its spacing.
+forge_vendor/strata/QWEN_MTP_LICENSE -text -whitespace

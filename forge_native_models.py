@@ -89,7 +89,7 @@ class NativeCatalog:
             if found is None:
                 raise ValueError('Choose an installed Forge model.')
             result = json.loads(json.dumps(found))
-        for entry in result['files'] + result.get('auxiliary', []):
+        for entry in result['files'] + result.get('auxiliary', []) + result.get('support',{}).get('files',[]):
             path = self.root / entry['path']
             if not path.resolve().is_relative_to(self.root) or not path.is_file():
                 raise ValueError('A Forge model file is missing or outside its model directory.')
@@ -100,7 +100,7 @@ class NativeCatalog:
 
     def binding(self):
         with self.lock:
-            fields=('id','engine','files','auxiliary','projector','architecture','context','capabilities','reasoning_control')
+            fields=('id','engine','files','auxiliary','support','projector','architecture','context','capabilities','reasoning_control')
             models=[{**{key:model.get(key) for key in fields},'defaults':model.get('origin',{}).get('defaults',{})}
                     for model in self.data['models']]
             return hashlib.sha256(json.dumps({'root':self.data['root'],'models':models},sort_keys=True).encode()).hexdigest()
@@ -201,6 +201,21 @@ class NativeCatalog:
         with self.lock:
             self.data['models'] = [m for m in self.data['models'] if m['id'] != record['id']] + [record]
             atomic_json(self.path, self.data)
+
+    def attach_support(self, record, support):
+        entries=[]
+        for item in support['files']:
+            path=self.root/record['id']/item['path']
+            if path.is_symlink() or not path.resolve().is_relative_to(self.root) or not path.is_file():
+                raise ValueError('A pinned native support file is missing or outside Forge storage.')
+            before=path.stat()
+            if before.st_size!=item['size'] or file_hash(path)!=item['sha256']:
+                raise ValueError('A native support file failed verification.')
+            after=path.stat()
+            if (before.st_size,before.st_mtime_ns)!=(after.st_size,after.st_mtime_ns):
+                raise ValueError('A native support file changed during verification.')
+            entries.append({**item,'path':path.relative_to(self.root).as_posix(),'mtime_ns':after.st_mtime_ns})
+        return {**record,'support':{**support,'files':entries}}
 
     def ollama_inventory(self, root):
         root = Path(root).resolve(strict=True)

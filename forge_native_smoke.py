@@ -18,6 +18,7 @@ def frozen_native_smoke(service):
     from forge_vendor.strata.frontend import ChatTemplate
     from forge_vendor.strata.tokenizer import Tokenizer,bytes_to_unicode
     from forge_vendor.strata import iq_pack
+    from forge_native_mtp import prepare as prepare_mtp
     source=Path(os.environ['FORGE_NATIVE_SMOKE_MODEL']).resolve(strict=True)
     # No arbitrary model code or live workspace data enters this fixture.
     if source.stat().st_size!=MODEL['size'] or file_hash(source)!=MODEL['sha256']:
@@ -32,7 +33,9 @@ def frozen_native_smoke(service):
     tokenizer=Tokenizer(list(bytes_to_unicode().values()),[])
     if tokenizer.decode(tokenizer.encode('Synthetic \U0001f642'))!='Synthetic \U0001f642':
         raise ValueError('The frozen Strata tokenizer did not round-trip.')
-    if not callable(iq_pack.main):raise ValueError('The frozen Strata pack module is unavailable.')
+    if not callable(iq_pack.main) or not callable(prepare_mtp):raise ValueError('The frozen Strata pack module is unavailable.')
+    if not (Path(__file__).parent/'forge_vendor/strata/draft_vocab.bin').is_file():
+        raise ValueError('The frozen Strata draft vocabulary is unavailable.')
     runtime=service.providers.native()
     runtime.catalog.configure(str(home/'models'/'native-smoke'))
     model=runtime.catalog.add([source],identifier='native-smoke-qwen',expected=[MODEL])

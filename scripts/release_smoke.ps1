@@ -184,7 +184,7 @@ function Write-ForgeSmokeDiagnostics {
     $summary = [ordered]@{ gate=$Gate; phase=$phase; process_exit=$ExitCode; error_present=$hasError;
         error_category=$category; error_type=$errorType; safe_error=$message; report_state=$ReportState;
         tool_failure=$toolFailure; research_view_created=$researchViewCreated;
-        tool_refusal=$(if (@('stale-snapshot','snapshot-expired','navigating','target-changed','navigated','preview-hidden') -contains $SmokeData.tool_refusal) { $SmokeData.tool_refusal } else { 'unrecorded' });
+        tool_refusal=$(if (@('stale-snapshot','snapshot-expired','navigating','target-changed','navigated','preview-hidden','panel-changed','panel-layout','panel-hidden','cancelled','desktop-locked') -contains $SmokeData.tool_refusal) { $SmokeData.tool_refusal } else { 'unrecorded' });
         smoke_standalone_readiness=$standaloneReadiness;
         handoff_feature_available=$handoffFeature; handoff_reason=$handoffReason; handoff_phase=$handoffPhase;
         handoff_participant_count=$handoffParticipants;

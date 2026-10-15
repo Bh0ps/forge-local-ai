@@ -29,6 +29,7 @@ def test_strata_rechecks_memory_before_launch_after_preparation(tmp_path,monkeyp
     import psutil
     import forge_inference
     import forge_native
+    import forge_native_mtp
     from forge_native import NativeRuntime
     from forge_vendor.strata.tokenizer import Tokenizer
     runtime=NativeRuntime(tmp_path/'home',bundle=tmp_path/'bundle')
@@ -39,11 +40,13 @@ def test_strata_rechecks_memory_before_launch_after_preparation(tmp_path,monkeyp
     model={'id':'coder','engine':'strata','context':8192,
            'files':[{'path':'shard1.gguf','sha256':'fixture'},{'path':'shard2.gguf','sha256':'fixture'}]}
     samples=iter([{'gpus':[{'total_mb':16384,'used_mb':0}]},
+                  {'gpus':[{'total_mb':16384,'used_mb':0}]},
                   {'gpus':[{'total_mb':16384,'used_mb':5000}]}])
     monkeypatch.setattr(forge_inference,'memory_telemetry',lambda:next(samples))
     monkeypatch.setattr(psutil,'virtual_memory',lambda:SimpleNamespace(available=20*1024**3))
     monkeypatch.setattr(forge_native,'file_hash',lambda path,**kwargs:'fixture')
     monkeypatch.setattr(runtime,'_executable',lambda engine:tmp_path/'strata.exe')
+    monkeypatch.setattr(forge_native_mtp,'prepare',lambda *args:tmp_path/'mtp')
     monkeypatch.setattr(Tokenizer,'from_gguf',classmethod(lambda cls,path:object()))
     launched=[]
     worker={'process':SimpleNamespace(poll=lambda:None)}
@@ -53,7 +56,7 @@ def test_strata_rechecks_memory_before_launch_after_preparation(tmp_path,monkeyp
     try:
         runtime._start(model,8192,threading.Event())
         assert '--mmap-experts' in launched[0] and '--resident-experts' not in launched[0]
-        assert launched[0][launched[0].index('--spec')+1]=='2'
+        assert launched[0][launched[0].index('--spec')+1]=='4' and '--mtp' in launched[0]
     finally:runtime.close()
 
 

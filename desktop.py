@@ -67,6 +67,11 @@ def _smoke_preview_tool(manager, run, cancel, result, name, args):
                 'Browser target changed. Inspect again.': 'target-changed',
                 'Browser navigated. Inspect again.': 'navigated',
                 'The Builder preview is hidden. Open its pane before using preview tools.': 'preview-hidden',
+                'Browser panel changed. Inspect again after reopening it.': 'panel-changed',
+                'Browser layout changed. Refresh its panel bounds.': 'panel-layout',
+                'Open the Browser panel in the full Forge workspace.': 'panel-hidden',
+                'Browser action cancelled.': 'cancelled',
+                'Windows desktop session is unavailable. Unlock Windows before continuing browser work.': 'desktop-locked',
             }
             if outcome.get('error') in reasons:
                 result['tool_refusal'] = reasons[outcome['error']]

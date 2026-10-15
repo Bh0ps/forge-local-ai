@@ -66,3 +66,9 @@ the CUDA 13 major family. No system CUDA installation or driver installation is
 performed. Full native notices accompany the binaries; Strata attribution and
 the changes to its support modules are in `forge_vendor/strata/ORIGIN.json`.
 Model weights are downloaded separately and retain their own publisher licenses.
+
+The optional Strata Coder setup fetches its MTP tensors from the official pinned
+Qwen3.8 Flash Next checkpoint. These weights use Qwen Community License 1.0,
+including its separate licensing requirement for commercial coding/work assistants.
+The exact notice accompanies Forge at `forge_vendor/strata/QWEN_MTP_LICENSE` and is
+copied beside downloaded draft files. No Qwen weights are included in the installer.

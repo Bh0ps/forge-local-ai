@@ -13,10 +13,17 @@ from filelock import FileLock
 
 def pinned_download(model, item, directory, *, cancel=None, progress=None):
     relative=Path(item['path'])
+    source_path=item.get('source_path',item['path'])
+    source_relative=Path(source_path)
+    source_offset=item.get('source_offset',0)
+    source_size=item.get('source_size',item['size'])
     root=Path(directory).resolve()
     if (relative.is_absolute() or '..' in relative.parts or '\\' in item['path'] or ':' in item['path']
-            or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',model['repo'])
+            or source_relative.is_absolute() or '..' in source_relative.parts or '\\' in source_path or ':' in source_path
             or type(item['size']) is not int or not 0<item['size']<=150*1024**3
+            or type(source_offset) is not int or source_offset<0 or type(source_size) is not int
+            or source_size>150*1024**3 or source_offset+item['size']>source_size
+            or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',model['repo'])
             or not re.fullmatch('[0-9a-f]{64}',item['sha256'])):
         raise ValueError('Invalid pinned model download.')
     lock_path=root/relative.with_suffix(relative.suffix+'.forge-download.lock')
@@ -46,7 +53,9 @@ def _pinned_download(model, item, directory, *, cancel=None, progress=None):
     part = target.with_suffix(target.suffix + '.forge-partial')
     if part.is_symlink() or not part.resolve().is_relative_to(root):
         raise ValueError('Unsafe model download partial.')
-    url = 'https://huggingface.co/' + model['repo'] + '/resolve/' + model['revision'] + '/' + quote(item['path'], safe='/')
+    url = 'https://huggingface.co/' + model['repo'] + '/resolve/' + model['revision'] + '/' + quote(item.get('source_path',item['path']), safe='/')
+    source_offset=item.get('source_offset',0)
+    source_size=item.get('source_size',item['size'])
     offset = part.stat().st_size if part.exists() else 0
     if offset > item['size']:
         raise ValueError('The partial model exceeds its pinned size.')
@@ -57,9 +66,9 @@ def _pinned_download(model, item, directory, *, cancel=None, progress=None):
             raise ValueError('Model download paused.')
         for attempt in range(4):
             try:
-                request = urllib.request.Request(url, headers={'Range':f'bytes={start}-{end}', 'User-Agent':'Forge-model-download'})
+                request = urllib.request.Request(url, headers={'Range':f'bytes={source_offset+start}-{source_offset+end}', 'User-Agent':'Forge-model-download'})
                 with urllib.request.urlopen(request, timeout=30) as response:
-                    expected = f'bytes {start}-{end}/{item["size"]}'
+                    expected = f'bytes {source_offset+start}-{source_offset+end}/{source_size}'
                     if response.status != 206 or response.headers.get('Content-Range') != expected or urlparse(response.url).scheme != 'https':
                         raise ValueError('The model server did not honor the exact byte range.')
                     data = response.read(end - start + 2)

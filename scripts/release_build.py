@@ -71,7 +71,9 @@ def build(args):
     for value in ('frontend/dist;frontend/dist', 'assets;assets', 'browser-extension;browser-extension', 'LICENSE;.', 'THIRD_PARTY_NOTICES.md;.',
                   'native-runtimes;native-runtimes','native-models.lock.json;.',
                   'forge_vendor/strata/LICENSE;forge_vendor/strata','forge_vendor/strata/ORIGIN.json;forge_vendor/strata',
-                  'forge_vendor/strata/expert-profile-coder.bin;forge_vendor/strata'):
+                  'forge_vendor/strata/expert-profile-coder.bin;forge_vendor/strata',
+                  'forge_vendor/strata/draft_vocab.bin;forge_vendor/strata',
+                  'forge_vendor/strata/QWEN_MTP_LICENSE;forge_vendor/strata'):
         command += ['--add-data', value]
     for module in ('ddgs', 'tzdata', 'faster_whisper', 'av', 'huggingface_hub', 'hf_xet', 'gguf', 'sounddevice', 'pystray', 'webview', 'playwright','jinja2','regex'):
         command += ['--collect-all', module]
