@@ -70,7 +70,9 @@ def test_native_sequence_blocks_fourth_write_then_failed_check_permits_verified_
     svc,root,goal,_=cadence_case(tmp_path,engine)
     try:
         accepted=svc.jobs.start({'text':goal['request'],'project_id':goal['project_id'],'goal_id':goal['id'],'mode':'goal'})
-        final=finished(svc,accepted)
+        # Six journaled rounds need a bounded completion budget on shared CI;
+        # this fixture checks effects and cadence, rather than response latency.
+        final=finished(svc,accepted,timeout=45)
         assert final['status']=='completed',final.get('recovery')
         assert not (root/'fourth.txt').exists() and (root/'a.txt').read_text()=='#exact-selector'
         assert len(engine.requests)==6

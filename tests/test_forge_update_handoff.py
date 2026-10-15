@@ -406,10 +406,12 @@ def test_real_junction_in_retained_helper_refuses_ready_and_preserves_outside(fl
     sentinel = outside / 'sentinel.txt'; sentinel.write_text('Keep outside data')
     link = Path(value.bootstrap.command[0]).parent / '_internal' / 'junction'
     if os.name == 'nt':
+        # Shared Windows runners can delay PowerShell startup. This bounded
+        # fixture setup is independent of the trust-floor assertions below.
         result = subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
             'New-Item -ItemType Junction -Path $env:FORGE_FIXTURE_LINK -Target $env:FORGE_FIXTURE_TARGET | Out-Null'],
             env={**os.environ, 'FORGE_FIXTURE_LINK': str(link), 'FORGE_FIXTURE_TARGET': str(outside)},
-            capture_output=True, timeout=10, creationflags=subprocess.CREATE_NO_WINDOW)
+            capture_output=True, timeout=30, creationflags=subprocess.CREATE_NO_WINDOW)
         assert result.returncode == 0 and link.is_junction()
     else: link.symlink_to(outside, target_is_directory=True)
     try:

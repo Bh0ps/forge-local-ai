@@ -96,7 +96,8 @@ def test_review_fixes_return_to_local_agent_and_write_executes_once(tmp_path):
         svc.core.rounds=[complete_tasks(svc,goal),{'content':'Created the file.'},
             {'tool_calls':[call('write_file',{'path':'result.txt','content':'verified output'})]},complete_tasks(svc,goal),{'content':'Created and verified the file.'}]
         run=svc.jobs.start({'text':'Implement the goal.','mode':'goal','goal_id':goal['id'],'project_id':project['id']})
-        assert finished(svc,run)['status']=='completed'
+        # Include three reviewer requests and the repair's durable tool journal.
+        assert finished(svc,run,timeout=45)['status']=='completed'
         assert (folder/'result.txt').read_text()=='verified output'
         final_schema=remote.requests[-1]['response_format']['json_schema']['schema']['properties']['verified_tasks']['items']['properties']
         assert result_artifact(remote.requests[-1]) in final_schema['evidence_ids']['items']['enum']
