@@ -19,6 +19,7 @@ from uuid import uuid4
 
 import httpx
 import psutil
+from forge_version import VERSION
 
 from forge_store import TERMINAL, atomic_text, encode
 from forge_update_proof import (BUILD_NAME, RELEASE_NAME, MAX_RECORD_BYTES, normalize_keys,
@@ -319,7 +320,7 @@ async def _get_bytes(client, url, limit, cancel=None, progress=None, consume=Non
 
 
 class UpdateManager:
-    def __init__(self, service, current_version='5.2.2', install_dir=None, trust_policy=None,
+    def __init__(self, service, current_version=VERSION, install_dir=None, trust_policy=None,
                  client_factory=None, verifier=authenticode, *, proof_policy=None, _allow_installation=False):
         # The seed release authenticates downloads, but cannot yet acknowledge
         # every native workspace draft/attachment before shutting its host down.

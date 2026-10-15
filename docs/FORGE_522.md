@@ -36,3 +36,7 @@ continuation, consent and access restrictions retain their existing guards.
 This revision changes neither the native model directory nor installed model
 files. The optional native models and their license notices are described in
 [the model guide](FORGE_520.md) and [5.2.1 notes](FORGE_521.md).
+
+The coordinator, HTTP health endpoint and updater share one backend version
+constant. A release-metadata regression also checks agreement with the frontend
+package and lockfile.

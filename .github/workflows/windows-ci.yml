@@ -43,7 +43,7 @@ jobs:
       - name: Test Python and evaluation contracts
         run: python scripts/ci_backend_tests.py --shard ${{ matrix.shard }} --shards 4 -q
   validate:
-    needs: backend
+    # No backend artifacts are consumed; branch protection requires both jobs.
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
