@@ -550,7 +550,8 @@ $script:ForgeSmokeDiagnosticPath=Join-Path $env:FORGE_READINESS_TEST_ROOT 'safe.
 $secret='synthetic-private-path-key-opaque-value'
 $names=@('view_present','owner_same','snapshot_observed','native_observed',
     'owner_visible','view_visible','status_visible','loading_complete','dom_visible','dom_hud',
-    'dom_modal','layout_valid','native_bound_present','bounds_match','same_sample','deadline_expired')
+    'dom_modal','layout_valid','native_bound_present','bounds_match','same_sample','deadline_expired',
+    'layout_left','layout_top','layout_right','layout_bottom','layout_scale')
 function Project-Readiness($record) {
     $data=[pscustomobject]@{smoke_phase='standalone-layout';smoke_standalone_readiness=$record;private=$secret}
     Write-ForgeSmokeDiagnostics $data 'standalone-preview' $null 'ready'
@@ -565,7 +566,7 @@ $record=[pscustomobject]@{iterations=512;private=$secret;rect=@(1,2,3,4);url=$se
 foreach ($name in $names) { $record|Add-Member -NotePropertyName $name -NotePropertyValue $true }
 $record.dom_hud=$false
 $safe=Project-Readiness $record
-if (@($safe.PSObject.Properties).Count -ne 17 -or $safe.iterations -ne 512 -or $safe.dom_hud -isnot [bool] -or $safe.dom_hud) { throw 'Fixed scalar record was not preserved.' }
+if (@($safe.PSObject.Properties).Count -ne ($names.Count+1) -or $safe.iterations -ne 512 -or $safe.dom_hud -isnot [bool] -or $safe.dom_hud) { throw 'Fixed scalar record was not preserved.' }
 foreach ($name in $names) { if ($safe.$name -isnot [bool]) { throw 'A boolean observation changed type.' } }
 foreach ($number in @(0,512,[long]5)) {
     $record.iterations=$number

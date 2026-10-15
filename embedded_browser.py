@@ -107,7 +107,9 @@ class EmbeddedWebView2Page(WebView2Page):
          const id=__PANEL_ID__,panel=document.getElementById(id);
          if(!panel||panel.getAttribute('data-forge-browser-panel')!==id)return {visible:false};
          const r=panel.getBoundingClientRect(),s=getComputedStyle(panel);
-         return {visible:r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden',
+         const clip=id==='forge-preview-panel'?panel.closest('.builder-page')?.getBoundingClientRect():null;
+         const contained=!clip||(r.top>=clip.top-.5&&r.bottom<=clip.bottom+.5&&r.left>=clip.left-.5&&r.right<=clip.right+.5);
+         return {visible:r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&contained,
            preview_id:panel.getAttribute('data-forge-preview-id'),pane_token:panel.getAttribute('data-forge-pane-token'),
            hud:!!document.querySelector('.app.hud'),modal:!!document.querySelector('.modal-backdrop, dialog[open]'),
            viewport:{width:innerWidth,height:innerHeight},rect:{x:r.x,y:r.y,width:r.width,height:r.height}};

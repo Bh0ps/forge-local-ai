@@ -39,13 +39,26 @@ function PreviewPane({ preview, reload = 0, onError }: {preview: BuilderPreview;
     if (!isNative() || preview.status !== 'ready' || !pane.current) return;
     let disposed = false, pending = false, dirty = false, last = '';
     let frame = 0;
+    function verticalViewport() {
+      const scrollport = pane.current?.closest('.builder-page')?.getBoundingClientRect();
+      return {top: Math.max(0, scrollport?.top ?? 0), bottom: Math.min(innerHeight - 28, scrollport?.bottom || innerHeight - 28)};
+    }
     function schedule() { if (!disposed && !frame) frame = requestAnimationFrame(() => { frame = 0; void bind(); }); }
     function openPane() {
       if (disposed || !pane.current) return;
-      const r = pane.current.getBoundingClientRect();
-      if (!document.querySelector('.modal-backdrop, dialog[open]') &&
-          (r.y < 0 || r.x < 0 || r.right > innerWidth + 1 || r.bottom > innerHeight - 28)) {
-        pane.current.scrollIntoView?.({block: 'start', inline: 'nearest', behavior: 'instant'});
+      if (!document.querySelector('.modal-backdrop, dialog[open]')) {
+        const viewport = verticalViewport();
+        // Size before scrolling. Resizing a bottom-aligned pane afterwards can
+        // repeatedly move its scroll anchor and push it outside the viewport.
+        const height = Math.min(760, Math.floor(viewport.bottom - viewport.top));
+        if (height >= 160) {
+          pane.current.style.minHeight = '160px';
+          pane.current.style.height = `${height}px`;
+        }
+        const r = pane.current.getBoundingClientRect();
+        if (r.y < viewport.top || r.x < 0 || r.right > innerWidth + 1 || r.bottom > viewport.bottom) {
+          pane.current.scrollIntoView?.({block: 'start', inline: 'nearest', behavior: 'instant'});
+        }
       }
       last = ''; schedule();
     }
@@ -56,14 +69,18 @@ function PreviewPane({ preview, reload = 0, onError }: {preview: BuilderPreview;
       let r = pane.current.getBoundingClientRect();
       // A native child must fit wholly inside its actual owner. Unlike an
       // iframe, it cannot be clipped by the surrounding scroll container.
-      const available = Math.floor(innerHeight - r.y - 28);
-      if (available < 160 || r.y < 0 || r.x < 0 || r.right > innerWidth + 1) {
+      const viewport = verticalViewport();
+      const available = Math.floor(viewport.bottom - r.y);
+      if (available < 160 || r.y < viewport.top - .5 || r.x < 0 || r.right > innerWidth + 1) {
         await api('preview_browser_hide', {id: preview.id, pane_token: paneToken}).catch(() => {}); last = ''; return;
       }
       const height = Math.min(760, available);
       pane.current.style.minHeight = '160px';
       pane.current.style.height = `${height}px`;
       r = pane.current.getBoundingClientRect();
+      if (r.y < viewport.top - .5 || r.bottom > viewport.bottom + .5) {
+        await api('preview_browser_hide', {id: preview.id, pane_token: paneToken}).catch(() => {}); last = ''; return;
+      }
       const data = { id: preview.id, pane_token: paneToken, panel_id: 'forge-preview-panel', rect: { x: r.x, y: r.y, width: r.width, height: r.height }, viewport: {width: innerWidth, height: innerHeight} };
       const key = blocked ? 'hidden' : JSON.stringify(data);
       if (last === key || r.width < 10 || r.height < 10) return;

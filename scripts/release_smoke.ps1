@@ -164,7 +164,8 @@ function Write-ForgeSmokeDiagnostics {
         $standaloneReadiness=[ordered]@{}
         foreach ($name in @('view_present','owner_same','snapshot_observed','native_observed',
                 'owner_visible','view_visible','status_visible','loading_complete','dom_visible','dom_hud',
-                'dom_modal','layout_valid','native_bound_present','bounds_match','same_sample','deadline_expired')) {
+                'dom_modal','layout_valid','native_bound_present','bounds_match','same_sample','deadline_expired',
+                'layout_left','layout_top','layout_right','layout_bottom','layout_scale')) {
             $standaloneReadiness[$name]=$null
             if ($observation.$name -is [bool]) { $standaloneReadiness[$name]=$observation.$name }
         }

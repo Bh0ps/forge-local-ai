@@ -61,6 +61,7 @@ describe('Builder brief and completion evidence', () => {
     const preview = {id: 'preview', builder_id: 'builder', status: 'ready', url: 'http://127.0.0.1:1234/'};
     const call = bridge({builder_get: {...record, previews: [preview]}, preview_browser_status: {builder_id: 'builder'}, preview_browser_show: {ok: true}, preview_browser_hide: {ok: true}, preview_status: {previews: [preview]}});
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function(this: HTMLElement) {
+      if (this.classList.contains('builder-page')) return {x:0,y:57,top:57,left:0,width:innerWidth,height:innerHeight-85,right:innerWidth,bottom:innerHeight-28,toJSON:()=>({})} as DOMRect;
       const height = this.id === 'forge-preview-panel' ? Number.parseInt(this.style.height) || 735 : 0;
       return {x: 100, y: top, top, left: 100, width: 500, height, right: 600, bottom: top + height, toJSON: () => ({})} as DOMRect;
     });
@@ -83,6 +84,11 @@ describe('Builder brief and completion evidence', () => {
       expect(scroll).toHaveBeenCalledTimes(2);
       top = 220; fireEvent.scroll(window);
       await waitFor(() => expect(call).toHaveBeenCalledWith('preview_browser_show', expect.objectContaining({rect: expect.objectContaining({y: 220, height: innerHeight - 248})})));
+      expect(scroll).toHaveBeenCalledTimes(2);
+      const afterScroll = call.mock.calls.filter(([action]) => action === 'preview_browser_show').length;
+      top = 10; fireEvent.scroll(window);
+      await waitFor(() => expect(call).toHaveBeenLastCalledWith('preview_browser_hide', expect.objectContaining({id: 'preview'})));
+      expect(call.mock.calls.filter(([action]) => action === 'preview_browser_show').length).toBe(afterScroll);
       expect(scroll).toHaveBeenCalledTimes(2);
       const paneToken = document.getElementById('forge-preview-panel')?.getAttribute('data-forge-pane-token');
       view.unmount();

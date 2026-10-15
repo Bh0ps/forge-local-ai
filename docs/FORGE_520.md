@@ -97,6 +97,9 @@ Standalone preview opening selects Builder explicitly and waits for its actual p
 Pane requests carry a preview and mount identity: delayed cleanup or resize work from
 an earlier pane cannot hide or replace the current preview. Native bounds and tool
 snapshot checks still reject changed or obscured targets.
+Native panes fit their scroll area before opening. Browser scroll anchoring cannot
+push a resizing preview over the workspace header, and clipped panes stay hidden.
+Smoke diagnostics expose fixed containment facts without coordinates or page content.
 
 Source development can acquire the same pinned bundle with
 `python scripts/fetch_native_runtimes.py --destination native-runtimes --cache build/native-downloads`.

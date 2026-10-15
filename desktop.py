@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import logging
+import math
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
@@ -36,7 +37,29 @@ SMOKE_ERROR_TYPES = frozenset({'ValueError', 'RuntimeError', 'TimeoutError', 'St
     'JavascriptException', 'WebViewException', 'ImportError', 'ModuleNotFoundError'})
 SMOKE_STANDALONE_READINESS_FLAGS = ('view_present', 'owner_same', 'snapshot_observed', 'native_observed',
     'owner_visible', 'view_visible', 'status_visible', 'loading_complete', 'dom_visible', 'dom_hud',
-    'dom_modal', 'layout_valid', 'native_bound_present', 'bounds_match', 'same_sample', 'deadline_expired')
+    'dom_modal', 'layout_valid', 'native_bound_present', 'bounds_match', 'same_sample', 'deadline_expired',
+    'layout_left', 'layout_top', 'layout_right', 'layout_bottom', 'layout_scale')
+
+
+def _smoke_layout_flags(snapshot, client):
+    """Containment facts only; never emit coordinates, paths, URLs or content."""
+    flags = dict.fromkeys(('layout_left', 'layout_top', 'layout_right', 'layout_bottom', 'layout_scale'), False)
+    if type(snapshot) is not dict or type(client) not in (tuple, list) or len(client) != 4:
+        return flags
+    rect, viewport = dict.get(snapshot, 'rect'), dict.get(snapshot, 'viewport')
+    if type(rect) is not dict or type(viewport) is not dict:
+        return flags
+    values = [dict.get(rect, key) for key in ('x', 'y', 'width', 'height')]
+    values += [dict.get(viewport, key) for key in ('width', 'height')] + list(client[2:])
+    if any(type(value) not in (int, float) or not -32768 <= value <= 32768 or not math.isfinite(value) for value in values):
+        return flags
+    x, y, width, height, vw, vh, nw, nh = values
+    if min(width, height, vw, vh, nw, nh) <= 0:
+        return flags
+    flags.update(layout_left=x >= 0, layout_top=y >= 0, layout_right=x+width <= vw+.5,
+                 layout_bottom=y+height <= vh+.5,
+                 layout_scale=.5 <= nw/vw <= 5 and .5 <= nh/vh <= 5 and abs(nw/vw-nh/vh) <= .08)
+    return flags
 
 
 def _smoke_preview_tool(manager, run, cancel, result, name, args):
@@ -133,6 +156,7 @@ def _smoke_preview_ready(manager, identifier, *, deadline, clock=time.monotonic,
                 return (bool(owner.Visible), bool(view.visible), view.bound,
                         (main.Left, main.Top, main.ClientSize.Width, main.ClientSize.Height))
             visible, bound_visible, bound, client = view.ui(native)
+            observation.update(_smoke_layout_flags(snapshot, client))
             observation.update(native_observed=True, owner_visible=visible is True,
                                view_visible=bound_visible is True, native_bound_present=bound is not None)
             if not owned() or after_deadline(clock() >= deadline):
