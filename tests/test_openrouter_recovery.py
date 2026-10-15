@@ -1,5 +1,6 @@
 """Synthetic errors and helper correction; never authenticate or infer remotely."""
 from datetime import datetime, timedelta, timezone
+import gzip
 import json
 import threading
 from types import SimpleNamespace
@@ -89,6 +90,49 @@ def test_http_error_body_is_read_from_chunks_before_safe_projection(env,monkeypa
     try:
         with pytest.raises(OpenRouterFailure) as error:list(provider.generate(request(),threading.Event()))
         assert error.value.category=='refusal' and CANARY not in str(error.value)+json.dumps(error.value.diagnostics())
+        assert body.closed.is_set()
+    finally:client.close()
+
+
+@pytest.mark.parametrize('status,metadata,category',[
+    (403,{'error_type':'refusal'},'refusal'),
+    (429,{'error_type':'provider_overloaded','limit_source':'upstream_provider_shared_pool'},'provider_overloaded')])
+def test_compressed_http_error_keeps_status_request_retry_after_and_private_projection(env,monkeypatch,status,metadata,category):
+    _,provider,_,client=connected(env);calls=[]
+    decoded=json.dumps({'error':{'code':status,'message':CANARY,'metadata':{**metadata,'raw':CANARY}}}).encode()
+    encoded=gzip.compress(decoded)
+    body=TimedBody([(0,encoded[:17]),(0,encoded[17:])])
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(status,headers={'Content-Encoding':'gzip','Content-Length':str(len(encoded)),
+            'Retry-After':'5'},stream=body)
+    transport(monkeypatch,handle)
+    original=provider.response_error
+    def projected(response):
+        assert response.request is calls[0] and response.status_code==status
+        assert response.headers['Retry-After']=='5'
+        assert response.headers['Content-Length']==str(len(decoded))
+        return original(response)
+    monkeypatch.setattr(provider,'response_error',projected)
+    try:
+        with pytest.raises(OpenRouterFailure) as raised:list(provider.generate(request(),threading.Event()))
+        diagnostic=raised.value.diagnostics()
+        assert diagnostic['category']==category and diagnostic['http_status']==status
+        assert diagnostic['retry_after_seconds']==5 and diagnostic['error_type']==metadata['error_type']
+        assert CANARY not in str(raised.value)+json.dumps(diagnostic)
+        assert len(calls)==1 and body.closed.is_set()
+    finally:client.close()
+
+
+def test_compressed_http_error_bound_counts_decoded_bytes(env,monkeypatch):
+    from inference_stream import MAX_PACKET_BYTES
+    _,provider,_,client=connected(env)
+    encoded=gzip.compress(b' '*(MAX_PACKET_BYTES+1))
+    body=TimedBody([(0,encoded)])
+    transport(monkeypatch,lambda request:httpx.Response(429,headers={'content-encoding':'gzip'},stream=body))
+    try:
+        with pytest.raises(OpenRouterFailure) as raised:list(provider.generate(request(),threading.Event()))
+        assert raised.value.category=='rate_limit' and raised.value.http_status==429
         assert body.closed.is_set()
     finally:client.close()
 

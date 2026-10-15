@@ -159,7 +159,11 @@ class OpenRouterProvider(CompatibleProvider):
                     if len(content)+len(chunk)>bound:
                         raise OpenRouterFailure('OpenRouter returned oversized metadata.',category='metadata')
                     content.extend(chunk)
-                return httpx.Response(response.status_code,headers=response.headers,content=bytes(content),request=response.request)
+                # iter_bytes() has decoded content already; retaining its wire
+                # encoding would make the reconstructed response decode twice.
+                headers=response.headers.copy()
+                for name in ('Content-Encoding','Content-Length'):headers.pop(name,None)
+                return httpx.Response(response.status_code,headers=headers,content=bytes(content),request=response.request)
         try:
             if self.http_client:
                 response = read(self.http_client)

@@ -24,6 +24,10 @@ quota exhaustion. Account metadata is advisory and never blocks inference. Retry
 timing and the original sanitized failure category remain visible when incomplete
 reasoning prevents safe continuation.
 
+Compressed OpenRouter catalogs, account metadata and inference errors are decoded
+once. Decoded size limits, HTTP status, retry timing and private error projection
+remain enforced.
+
 A helper response containing only an acknowledgment or promise gets one persisted
 correction request within the existing assignment and budgets. The correction and
 its counter are saved together. If it still supplies no usable findings, the
