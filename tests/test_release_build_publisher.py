@@ -149,3 +149,15 @@ def test_unsigned_legacy_validation_is_still_available(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b'Synthetic notice')
     release_build.verify_app(tmp_path, '5.1.2', False)
+
+
+@pytest.mark.parametrize('bound,detail', [(1, 'Installer'), (64, 'Portable archive')])
+def test_package_rejects_oversized_artifacts_before_release_metadata(publisher_package, monkeypatch, bound, detail):
+    monkeypatch.setattr(release_build, 'MAX_ARTIFACT_BYTES', bound)
+    manifest = publisher_package.work / 'Forge-release.json'
+    before = manifest.read_bytes()
+    args = SimpleNamespace(work=publisher_package.app.parent.parent, version=publisher_package.version,
+                           require_signed=False, require_publisher_proof=True)
+    with pytest.raises(ValueError, match=detail + ' exceeds'):
+        release_build.package(args)
+    assert manifest.read_bytes() == before

@@ -23,6 +23,12 @@ def frozen_native_smoke(service):
     # No arbitrary model code or live workspace data enters this fixture.
     if source.stat().st_size!=MODEL['size'] or file_hash(source)!=MODEL['sha256']:
         raise ValueError('The frozen native smoke model failed its pinned digest.')
+    # Dictation must retain its real CPU backend after native DLL deduplication.
+    # This does not record audio, download a speech model or initialize CUDA.
+    from faster_whisper import WhisperModel
+    from ctranslate2 import get_supported_compute_types
+    if not callable(WhisperModel) or 'int8' not in get_supported_compute_types('cpu'):
+        raise ValueError('The frozen CPU dictation backend is unavailable.')
     home=service.store.home.resolve()
     if home==(Path.home()/'.forge').resolve():
         raise ValueError('Frozen native smoke requires disposable state.')
@@ -47,4 +53,5 @@ def frozen_native_smoke(service):
         runtime.stop()
         runtime.cpu_only=False
     return {**checks,'strata_support_imported':True,'tokenizer_round_trip':True,
-            'template_rendered':True,'cpu_only':True,'worker_stopped':runtime.worker is None}
+            'template_rendered':True,'cpu_dictation_available':True,
+            'cpu_only':True,'worker_stopped':runtime.worker is None}

@@ -363,6 +363,56 @@ class NativeBrowser:
             generation = self._pane_generation
         return self._submit(self._manual, action, deepcopy(data), generation).result(timeout=45)
 
+    def wait_ready(self, context=None, *, check=None, timeout=20):
+        """Observe the opened document; never navigate, focus or repeat an action."""
+        if type(timeout) not in (int, float) or not 0 < timeout <= 20:
+            raise ValueError('Browser readiness requires a timeout of at most 20 seconds.')
+        deadline = time.monotonic() + timeout
+        with self.lock:
+            view, pane = self.view, self._pane_generation
+        navigation = getattr(view, '_navigation_id', None)
+
+        def guard():
+            nonlocal navigation
+            self._pane_check(pane, context)
+            if check: check()
+            with self.lock:
+                if view is None or self.view is not view or not self.state['running']:
+                    raise BrowserGuard('Browser view changed while opening. Open the preview again.')
+                current = getattr(view, '_navigation_id', None)
+                if navigation is None:
+                    navigation = current  # First Starting may arrive after Navigate returns.
+                elif current != navigation:
+                    raise BrowserGuard('Browser navigation changed while opening. Inspect the preview again.')
+
+        def wait():
+            while True:
+                guard()
+                if time.monotonic() >= deadline:
+                    raise TimeoutError('Browser navigation did not become ready within its opening timeout.')
+                with self.lock:
+                    loading, error, generation = self.state['loading'], self.state['error'], self.generation
+                if error:
+                    raise BrowserGuard('Browser navigation failed. Check the preview and reload it.')
+                if not loading:
+                    if getattr(view, 'embedded', False) and not getattr(view, 'visible', True):
+                        raise BrowserGuard('The Builder preview is hidden. Open its pane before using preview tools.')
+                    if hasattr(view, 'preflight'):
+                        self._view_call('preflight', check=guard)
+                    guard()
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('Browser navigation did not become ready within its opening timeout.')
+                    with self.lock:
+                        ready = generation == self.generation and not self.state['loading'] and not self.state['error']
+                    if ready:
+                        return {'ok': True, **self.status()}
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    # Stop wakes this wait without waiting for another UI round.
+                    self.cancelled.wait(min(.05, remaining))
+
+        return self._submit(wait).result(timeout=timeout + 5)
+
     def _manual(self, action, data, generation):
         if action in ('close', 'hide'):
             self._clear_indicator()

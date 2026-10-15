@@ -34,7 +34,7 @@ def main():
         result=read_json(output/'native-smoke.json')
         checks=result.get('native_model',{})
         required=('text','tool_arguments','tool_continuation','strata_support_imported',
-                  'tokenizer_round_trip','template_rendered','cpu_only','worker_stopped')
+                  'tokenizer_round_trip','template_rendered','cpu_dictation_available','cpu_only','worker_stopped')
         passed=code==0 and not result.get('error') and all(checks.get(key) is True for key in required)
         report={'passed':passed,'exit_code':code,'checks':{key:checks.get(key) is True for key in required},
                 'disposable_state':True,'cloud_requests':False}

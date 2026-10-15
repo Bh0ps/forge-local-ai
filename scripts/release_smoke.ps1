@@ -96,6 +96,10 @@ function Write-ForgeSmokeDiagnostics {
         'Browser action cancelled.' = 'browser-cancelled'
         'Open Forge Browser or use browser_navigate before inspecting this page.' = 'browser-not-open'
         'Browser page is still loading. Inspect again when navigation completes.' = 'browser-loading'
+        'Browser navigation did not become ready within its opening timeout.' = 'browser-opening-timeout'
+        'Browser view changed while opening. Open the preview again.' = 'browser-opening-owner'
+        'Browser navigation changed while opening. Inspect the preview again.' = 'browser-opening-navigation'
+        'Browser navigation failed. Check the preview and reload it.' = 'browser-opening-failed'
         'Browser page could not be inspected.' = 'browser-inspection'
         'Browser navigated while inspecting. Inspect again.' = 'browser-navigation-changed'
         'Start a ready preview before inspecting it.' = 'preview-not-ready'
@@ -123,7 +127,7 @@ function Write-ForgeSmokeDiagnostics {
     $phases = @('workspace-ready','workspace-size','handoff-floor','library','host-lifecycle','research-start','research-navigate',
         'research-load','research-input-target','research-type','research-button-target','research-click','research-verify',
         'research-screenshot','builder-start','builder-navigation','builder-input-target','builder-button-target',
-        'builder:preview_inspect','builder:preview_type','builder:preview_click','builder:preview_viewport',
+        'builder:preview_open','builder-layout','builder:preview_inspect','builder:preview_type','builder:preview_click','builder:preview_viewport',
         'builder:preview_diagnostics','builder:preview_screenshot','standalone-start','standalone-open','standalone-layout','standalone-viewport',
         'standalone-input-target','standalone-button-target','standalone-screenshot')
     $checkpointPhases = $phases + @('startup-imports','startup-imports-ready','logging-start','logging-ready',

@@ -1,11 +1,11 @@
 <p align="center"><img src="assets/forge.svg" width="88" alt="Forge"></p>
 
-# Forge 5.2.0
+# Forge 5.2.1
 
 This Windows preview runs GGUF models with Forge-owned, bundled llama.cpp workers.
 Strata supports the pinned Qwen Coder model. Model files stay in your chosen Forge
 directory, independently of app updates. Existing Ollama and compatible endpoints
-remain optional connections. Read [the native model guide](docs/FORGE_520.md).
+remain optional connections. Read [the native model guide](docs/FORGE_520.md) and [5.2.1 fixes](docs/FORGE_521.md).
 
 Forge retains its warm palettes, compact tabs, grouped composer, searchable Settings
 and the HTTP privacy, XML and Windows lifecycle fixes from 5.1.29. Desktop computer
@@ -17,17 +17,17 @@ Forge is a local AI workspace for building apps, exploring ideas and working wit
 files on your computer. It brings chat, Builder, previews and project tools into
 one Windows app. Optional OpenRouter guidance helps with planning and review.
 
-**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.0/Forge-5.2.0-Setup.exe)**
-· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.2.0)
-· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.0/Forge-5.2.0-Portable.zip)
-· [Publisher record](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.0/Forge-update-proof.json)
-· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.0/SHA256SUMS.txt)
+**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.1/Forge-5.2.1-Setup.exe)**
+· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.2.1)
+· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.1/Forge-5.2.1-Portable.zip)
+· [Publisher record](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.1/Forge-update-proof.json)
+· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.1/SHA256SUMS.txt)
 
 The [previous 5.1.29 preview](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.1.29) remains available.
 
 ## Install
 
-1. Install **Forge-5.2.0-Setup.exe** after closing Forge.
+1. Install **Forge-5.2.1-Setup.exe** after closing Forge.
 2. Open **Settings → Models & engines → Forge models** and choose your model directory.
 3. Import GGUF files, import existing Ollama models, or explicitly download Strata Coder.
 4. Select **Use** beside your model. Forge starts its bundled worker when needed.

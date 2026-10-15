@@ -17,7 +17,7 @@ import zipfile
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from forge_updates import authenticode, file_hash, regular_tree, require_trust, safe_relative, version
 from forge_update_keys import TRUSTED_UPDATE_KEYS
-from forge_update_proof import (BUILD_NAME, RELEASE_NAME, MAX_EXPANDED_BYTES, MAX_RECORD_BYTES,
+from forge_update_proof import (BUILD_NAME, RELEASE_NAME, MAX_EXPANDED_BYTES, MAX_RECORD_BYTES, MAX_ARTIFACT_BYTES,
     bind_release_build, normalize_keys, plain_root, read_record, relative_path,
     strict_json, tree_files, validated_build_manifest, verify_artifact, verify_build, verify_release)
 
@@ -87,6 +87,8 @@ def build(args):
     for name in ('LICENSE', 'THIRD_PARTY_NOTICES.md'): shutil.copy2(stage / name, app / name)
     run([sys.executable, source / 'scripts/collect_licenses.py', '--output', app / 'third-party-licenses'], source)
     run([sys.executable, source / 'scripts/prune_license_cache.py', '--app', app], source)
+    from scripts.prune_native_runtime_aliases import prune as prune_native_aliases
+    print('Native runtime packaging:', prune_native_aliases(app))
     verify_app(app, args.version, False)
     print('Application built. Sign Forge.exe and ForgeBrowserHost.exe before the installer stage for a public signed release.')
 
@@ -110,6 +112,8 @@ def package(args):
     verify_app(app, args.version, args.require_signed, require_proof=getattr(args, 'require_publisher_proof', False))
     setup = output / ('Forge-' + args.version + '-Setup.exe')
     if not setup.is_file(): raise ValueError('Build the installer first.')
+    if not 0 < setup.stat().st_size <= MAX_ARTIFACT_BYTES:
+        raise ValueError('Installer exceeds the supported authenticated-artifact size bound.')
     if args.require_signed: require_trust(setup, args.version, publisher())
     if args.require_signed:
         policy = (work / 'source/forge_release_policy.py').read_text(encoding='utf-8')
@@ -123,6 +127,8 @@ def package(args):
             info = zipfile.ZipInfo(entry['path'], date_time=(2020, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_DEFLATED; info.external_attr = 0o100644 << 16
             target.writestr(info, data)
+    if not 0 < archive.stat().st_size <= MAX_ARTIFACT_BYTES:
+        raise ValueError('Portable archive exceeds the supported authenticated-artifact size bound.')
     manifest = {'schema': 1, 'version': args.version, 'repository': 'Bh0ps/forge-local-ai',
         'signing': 'verified-authenticode' if args.require_signed else 'unsigned-development-preview',
         'publisher_policy_embedded': bool(args.require_signed),

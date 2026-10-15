@@ -28,7 +28,7 @@ SMOKE_PHASES = frozenset({'startup-imports', 'startup-imports-ready', 'logging-s
     'workspace-ready', 'workspace-size', 'handoff-floor', 'library', 'host-lifecycle', 'research-start', 'research-navigate',
     'research-load', 'research-input-target', 'research-type', 'research-button-target', 'research-click',
     'research-verify', 'research-screenshot', 'builder-start', 'builder-navigation', 'builder-input-target',
-    'builder-button-target', 'builder:preview_inspect', 'builder:preview_type', 'builder:preview_click',
+    'builder-button-target', 'builder:preview_open', 'builder-layout', 'builder:preview_inspect', 'builder:preview_type', 'builder:preview_click',
     'builder:preview_viewport', 'builder:preview_diagnostics', 'builder:preview_screenshot',
     'standalone-start', 'standalone-open', 'standalone-layout', 'standalone-viewport',
     'standalone-input-target', 'standalone-button-target', 'standalone-screenshot', 'native-model'})
@@ -1977,11 +1977,6 @@ def main():
                             # below its native owner's viewport. Scroll as a user
                             # would; the frontend still validates/binds real bounds.
                             api._window.evaluate_js("document.getElementById('forge-preview-panel')?.scrollIntoView({block:'start',inline:'nearest',behavior:'instant'});true")
-                            # The actual frontend sizes and binds the child to
-                            # host-inspected viewport bounds.
-                            deadline = time.monotonic()+20
-                            while (not manager.previews.browser.status().get('visible') or manager.previews.browser.status().get('loading')) and time.monotonic()<deadline:
-                                time.sleep(.1)
                             preview_run = {'id': 'preview-native-smoke', 'project_id': project['id'], 'settings': service.store.get_settings()}
                             def preview_tool(name, arguments):
                                 result['smoke_phase'] = 'builder:' + name
@@ -2007,6 +2002,13 @@ def main():
                                         except Exception:
                                             result.setdefault('smoke_preview_state', {'available': False})
                                     raise
+                            # Await the same explicit opening used by an agent.
+                            # A React bind may still be initializing WebView2;
+                            # do not spend navigation's budget on that startup.
+                            preview_tool('preview_open', {})
+                            result['smoke_phase'] = 'builder-layout'
+                            _smoke_checkpoint(result['smoke_phase'])
+                            _smoke_preview_ready(manager,preview['id'],deadline=time.monotonic()+10,diagnostics=result)
                             inspected = preview_tool('preview_inspect', {})
                             result['smoke_phase'] = 'builder-input-target'
                             _smoke_checkpoint(result['smoke_phase'])

@@ -308,15 +308,15 @@ def test_standalone_viewport_phase_precedes_one_checked_call_and_both_new_phases
     tree = ast.parse(Path(desktop.__file__).read_bytes())
     starts = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name) and node.func.id == '_smoke_preview_ready']
-    assert len(starts) == 1
-    assert any(keyword.arg == 'diagnostics' and isinstance(keyword.value, ast.Name)
-               and keyword.value.id == 'result' for keyword in starts[0].keywords)
+    assert len(starts) == 2
+    assert all(any(keyword.arg == 'diagnostics' and isinstance(keyword.value, ast.Name)
+                   and keyword.value.id == 'result' for keyword in start.keywords) for start in starts)
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name) and node.func.id == '_smoke_preview_tool'
         and any(isinstance(arg, ast.Constant) and arg.value == 'preview_viewport' for arg in node.args)]
-    assert len(calls) == 1 and starts[0].lineno < calls[0].lineno
+    assert len(calls) == 1 and max(start.lineno for start in starts) < calls[0].lineno
     script = (Path(desktop.__file__).parent / 'scripts/release_smoke.ps1').read_text()
-    for phase in ('standalone-layout', 'standalone-viewport'):
+    for phase in ('builder:preview_open', 'builder-layout', 'standalone-layout', 'standalone-viewport'):
         assert phase in desktop.SMOKE_PHASES and "'" + phase + "'" in script
 
 
