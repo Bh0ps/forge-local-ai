@@ -107,6 +107,32 @@ def _smoke_preview_readiness_report(diagnostics, observation):
         dict.__setitem__(diagnostics, 'smoke_standalone_readiness', observation.copy())
 
 
+def _smoke_preview_failure_state(manager, identifier, window):
+    """Fixed observations for failures before inspect, without page content."""
+    result = {'available': False}
+    try:
+        state = manager.previews.browser.status()
+        result.update(available=True, running=state.get('running') is True,
+            loading=state.get('loading') is True, visible=state.get('visible') is True,
+            view_present=manager.previews.browser.view is not None,
+            record_ready=manager.previews.status(identifier).get('status') == 'ready')
+        ui = window.evaluate_js("""(() => {
+          const p=document.getElementById('forge-preview-panel'),r=p?.getBoundingClientRect(),
+            s=p&&getComputedStyle(p),clip=p?.closest('.builder-page')?.getBoundingClientRect();
+          return {builder:!!document.querySelector('nav[aria-label="Builder sections"]'),pane:!!p,
+            pane_visible:!!r&&r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden',
+            contained:!!r&&!!clip&&r.top>=clip.top-.5&&r.bottom<=clip.bottom+.5&&r.left>=clip.left-.5&&r.right<=clip.right+.5,
+            viewport:!!r&&r.left>=0&&r.top>=0&&r.right<=innerWidth+.5&&r.bottom<=innerHeight+.5,
+            modal:!!document.querySelector('dialog[open],.modal-backdrop'),hud:!!document.querySelector('.app.hud')};
+        })()""")
+        if type(ui) is dict:
+            result.update({key: dict.get(ui, key) is True for key in
+                ('builder', 'pane', 'pane_visible', 'contained', 'viewport', 'modal', 'hud')})
+    except Exception:
+        pass
+    return result
+
+
 def _smoke_preview_ready(manager, identifier, *, deadline, clock=time.monotonic, pause=time.sleep, diagnostics=None):
     """Observe stable owned bounds; never show, resize, focus or repeat an action."""
     from embedded_browser import validate_bounds
@@ -1986,21 +2012,7 @@ def main():
                                     if outcome.get('ok') is False: raise ValueError(outcome.get('error', 'Preview fixture failed.'))
                                     return outcome
                                 except Exception:
-                                    if name == 'preview_inspect':
-                                        try:
-                                            state = manager.previews.browser.status()
-                                            result['smoke_preview_state'] = {
-                                                'available': True, 'running': bool(state.get('running')),
-                                                'loading': bool(state.get('loading')), 'visible': bool(state.get('visible')),
-                                                'view_present': manager.previews.browser.view is not None,
-                                                'record_ready': manager.previews.status(preview['id']).get('status') == 'ready'}
-                                            ui = api._window.evaluate_js("(()=>{const p=document.getElementById('forge-preview-panel'),r=p?.getBoundingClientRect(),s=p&&getComputedStyle(p);return {builder:!!document.querySelector('nav[aria-label=\"Builder sections\"]'),pane:!!p,pane_visible:!!r&&r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden',modal:!!document.querySelector('dialog[open],.modal-backdrop')};})()")
-                                            if isinstance(ui, dict):
-                                                result['smoke_preview_state'].update({
-                                                    'builder': bool(ui.get('builder')), 'pane': bool(ui.get('pane')),
-                                                    'pane_visible': bool(ui.get('pane_visible')), 'modal': bool(ui.get('modal'))})
-                                        except Exception:
-                                            result.setdefault('smoke_preview_state', {'available': False})
+                                    result['smoke_preview_state'] = _smoke_preview_failure_state(manager, preview['id'], api._window)
                                     raise
                             # Await the same explicit opening used by an agent.
                             # A React bind may still be initializing WebView2;
