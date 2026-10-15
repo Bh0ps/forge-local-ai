@@ -401,6 +401,19 @@ class NativeRuntime:
             raise NativeFailure('context', 'The tokenized request exceeds the selected context. Compact the conversation or increase Context.')
         parser = OutputParser(thinking=bool(data.get('thinking', False)), tools=tools)
         decoder = codecs.getincrementaldecoder('utf-8')('replace')
+        # The pipe includes its terminal token. Strata's HTTP frontend consumes
+        # these IDs before detokenization; they are protocol, not answer text.
+        # Keep ordinary text spelling the same literals and all tool/think tags.
+        stop_ids = set()
+        token_types = getattr(tokenizer, 'token_types', None) or []
+        eos = getattr(tokenizer, 'special_ids', {}).get('tokenizer.ggml.eos_token_id')
+        if type(eos) is int and 0 <= eos < len(tokenizer.tokens):
+            stop_ids.add(eos)
+        for literal in ('<|im_end|>', '<|endoftext|>'):
+            identity = getattr(tokenizer, 'special_tokens', {}).get(literal)
+            if type(identity) is int and 0 <= identity < len(token_types) and token_types[identity] == 3:
+                stop_ids.add(identity)
+        terminal_seen = False
         projection = 'cvec=1 ' if worker.get('projection_enabled') else ''
         worker['process'].stdin.write(f'GEN {limit} temperature={float(data.get("temperature", .3))} ' + projection + ','.join(map(str, ids)) + '\n')
         worker['process'].stdin.flush()
@@ -424,11 +437,18 @@ class NativeRuntime:
                 token = int(line.split()[1])
                 if not 0 <= token < len(tokenizer.tokens):
                     raise NativeFailure('protocol', 'Strata returned an invalid token identity.')
+                if token in stop_ids:
+                    terminal_seen = True
+                    continue
+                if terminal_seen:
+                    raise NativeFailure('protocol', 'Strata returned output after its terminal token. Partial output is saved; no tool call was executed.')
                 yield from emit(parser.feed(decoder.decode(tokenizer.token_bytes(token))))
             elif line.startswith('DONE '):
                 fields = line.split()
                 if len(fields)<6 or fields[5] not in ('stop','length'):
                     raise NativeFailure('protocol', 'Strata did not complete the request. Partial output remains saved; no tool call was executed.')
+                if terminal_seen and fields[5] != 'stop':
+                    raise NativeFailure('protocol', 'Strata returned an inconsistent terminal reason. Partial output is saved; no tool call was executed.')
                 yield from emit(parser.feed(decoder.decode(b'', final=True)))
                 yield from emit(parser.finish())
                 yield {'done': True, 'prompt_eval_count': int(fields[2]), 'eval_count': int(fields[1]),
