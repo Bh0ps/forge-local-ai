@@ -160,7 +160,7 @@ def test_shutdown_during_verification_cannot_spawn_worker(tmp_path,monkeypatch):
     runtime=NativeRuntime(tmp_path/'home')
     record=runtime.catalog.add([gguf(tmp_path/'weights.gguf')],identifier='test')
     monkeypatch.setattr(runtime,'_executable',lambda engine:tmp_path/'not-executed.exe')
-    def hash_then_close(path):
+    def hash_then_close(path, **kwargs):
         runtime.close()
         return record['files'][0]['sha256']
     monkeypatch.setattr('forge_native.file_hash',hash_then_close)

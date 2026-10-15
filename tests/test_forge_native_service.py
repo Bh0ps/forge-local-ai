@@ -6,6 +6,24 @@ from test_forge_engine_run_binding import fixture
 from test_forge_native import gguf
 
 
+def test_migrated_chat_composer_keeps_native_identity_and_original_records(fixture,tmp_path):
+    svc,_=fixture
+    svc.dispatch('native_configure',{'root':str(tmp_path/'owned')})
+    catalog=svc.providers.native().catalog
+    catalog.add([gguf(tmp_path/'local.gguf')],identifier='migrated',
+        origin={'kind':'ollama','manifest':'registry.ollama.ai/library/synthetic/latest'})
+    svc.store.update_settings({'provider_id':'forge-native','model':'migrated'})
+    chat=svc.store.create_chat(None,'Historical fixture','synthetic:latest')
+    restored=svc.dispatch('get_chat',{'id':chat['id']})
+    assert restored['model']=='synthetic:latest'
+    assert restored['composer_model']=='migrated' and restored['composer_provider_id']=='forge-native'
+    assert svc.store.get_chat(chat['id'])['model']=='synthetic:latest'
+    assert catalog.composer_model('synthetic')=='migrated'
+    assert catalog.composer_model('migrated')=='migrated'
+    assert catalog.composer_model('unavailable')==''
+    assert svc.providers.native().worker is None
+
+
 def test_native_setup_and_metadata_are_local_and_durable(fixture,tmp_path):
     svc,_=fixture
     result=svc.dispatch('native_configure',{'root':str(tmp_path/'owned')})

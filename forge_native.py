@@ -193,7 +193,7 @@ class NativeRuntime:
         exe = self._executable(model['engine'])
         for entry in model['files'] + model.get('auxiliary', []):
             current()
-            if file_hash(self.catalog.root / entry['path']) != entry['sha256']:
+            if file_hash(self.catalog.root / entry['path'], check=current) != entry['sha256']:
                 raise NativeFailure('integrity', 'A model file failed verification. Import it again before use.')
         path = self.catalog.root / model['files'][0]['path']
         if context > model['context']:
@@ -247,13 +247,15 @@ class NativeRuntime:
             import psutil
             from forge_inference import memory_telemetry
             from forge_native_memory import strata_memory_plan
-            facts=memory_telemetry()
-            if facts.get('stale') or facts.get('probe_state') in ('failed','unavailable','refreshing'):
-                raise NativeFailure('memory','GPU memory could not be measured. Retry Strata after the hardware check finishes.')
-            free=max([max(0,g.get('total_mb',0)-g.get('used_mb',0))*1024**2 for g in facts.get('gpus',[])] or [0])
-            try:plan=strata_memory_plan(psutil.virtual_memory().available,free,context)
-            except ValueError:
-                raise NativeFailure('memory','Strata Coder needs more free RAM or GPU memory. Finish other model work, then retry.') from None
+            def placement():
+                facts=memory_telemetry()
+                if facts.get('stale') or facts.get('probe_state') in ('failed','unavailable','refreshing'):
+                    raise NativeFailure('memory','GPU memory could not be measured. Retry Strata after the hardware check finishes.')
+                free=max([max(0,g.get('total_mb',0)-g.get('used_mb',0))*1024**2 for g in facts.get('gpus',[])] or [0])
+                try:return strata_memory_plan(psutil.virtual_memory().available,free,context)
+                except ValueError:
+                    raise NativeFailure('memory','Strata Coder needs more free RAM or GPU memory. Finish other model work, then retry.') from None
+            plan=placement()
             from forge_vendor.strata.iq_pack import main as prepare
             from forge_vendor.strata.tokenizer import Tokenizer
             from forge_vendor.strata.frontend import ChatTemplate
@@ -263,14 +265,19 @@ class NativeRuntime:
                     raise NativeFailure('model', 'Strata model preparation failed. The original model files were retained.')
             if plan['mode']!='arena' and not (pack/'experts.bin').is_file():
                 if shutil.disk_usage(pack).free<plan['prepared_expert_bytes']+4*1024**3:
-                    raise NativeFailure('storage','Strata memory-saving preparation needs another 28 GB of free space in the model directory.')
+                    raise NativeFailure('storage','Strata memory-saving preparation needs another 30 GB of free space in the model directory.')
                 current()
                 if prepare(['--gguf',str(path),'--out',str(pack),'--experts-bin'], cancel=cancel)!=0:
                     raise NativeFailure('model','Strata memory-saving preparation failed. Model originals were retained.')
+            # Preparation can take minutes; other apps may have changed memory use.
+            current()
+            plan=placement()
+            if plan['mode']!='arena' and not (pack/'experts.bin').is_file():
+                raise NativeFailure('memory','Free memory changed during Strata preparation. Retry to prepare its memory-saving layout.')
             arguments = ['--serve', '--pack', str(pack), '--native', str(path),
                 '--ple-gguf', str(self.catalog.root / model['files'][1]['path']),
                 '--expert-profile', str(Path(__file__).parent / 'forge_vendor' / 'strata' / 'expert-profile-coder.bin'),
-                '--expert-cache', 'auto', '--prefill', 'auto', '--spec', '0', '--max-context', str(context)]
+                '--expert-cache', 'auto', '--prefill', 'auto', '--spec', '2', '--max-context', str(context)]
             if plan['mode']!='arena':
                 arguments+=['--resident-experts' if plan['mode']=='resident' else '--mmap-experts']
             if context>8192: arguments+=['--kv','int8']

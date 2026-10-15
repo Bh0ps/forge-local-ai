@@ -1,6 +1,7 @@
 """Conservative Strata Coder placement using upstream expert-arena/cache geometry."""
 GIB=1024**3
-ARENA_BYTES=23_400_000_000
+# Exact expert layout of the pinned IQ1_M Coder shards (23.42 GiB).
+ARENA_BYTES=25_146_163_200
 
 
 def strata_memory_plan(available_ram,free_vram,context):

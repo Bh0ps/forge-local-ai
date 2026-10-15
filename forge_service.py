@@ -595,7 +595,11 @@ class ForgeService:
             return result
         if action=='get_chat':
             from forge_workspace_ui import WorkspaceUI
-            return WorkspaceUI(self.store).chat(data['id'],data.get('limit',200))
+            chat=WorkspaceUI(self.store).chat(data['id'],data.get('limit',200))
+            if self.store.get_settings().get('provider_id')=='forge-native':
+                chat={**chat,'composer_provider_id':'forge-native',
+                      'composer_model':self.providers.native().catalog.composer_model(chat.get('model',''))}
+            return chat
         if action=='attachment':
             image=self.store.hydrate_images([data['id']])[0]
             import base64,io

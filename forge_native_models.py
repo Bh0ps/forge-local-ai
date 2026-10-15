@@ -12,9 +12,17 @@ import time
 from uuid import uuid4
 
 
-def file_hash(path):
+def file_hash(path, *, check=None):
     with Path(path).open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+        if check is None:
+            return hashlib.file_digest(stream, 'sha256').hexdigest()
+        digest=hashlib.sha256()
+        while True:
+            check()
+            chunk=stream.read(1024**2)
+            if not chunk:
+                return digest.hexdigest()
+            digest.update(chunk)
 
 
 def read_json(path, maximum=2 * 1024**2):
@@ -96,6 +104,25 @@ class NativeCatalog:
             models=[{**{key:model.get(key) for key in fields},'defaults':model.get('origin',{}).get('defaults',{})}
                     for model in self.data['models']]
             return hashlib.sha256(json.dumps({'root':self.data['root'],'models':models},sort_keys=True).encode()).hexdigest()
+
+    def composer_model(self, saved):
+        """Resolve historical Ollama names without rewriting chats or run bindings."""
+        with self.lock:
+            exact = [model['id'] for model in self.data['models'] if model['id'] == saved]
+            if exact:
+                return exact[0]
+            matches = []
+            for model in self.data['models']:
+                manifest = model.get('origin', {}).get('manifest', '')
+                if not manifest:
+                    continue
+                repository, separator, tag = manifest.rpartition('/')
+                if not separator:
+                    continue
+                name = repository.removeprefix('registry.ollama.ai/').removeprefix('library/') + ':' + tag
+                if saved in (name, name.removesuffix(':latest')):
+                    matches.append(model['id'])
+            return matches[0] if len(matches) == 1 else ''
 
     @staticmethod
     def inspect(path):

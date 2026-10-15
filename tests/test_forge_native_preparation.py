@@ -22,3 +22,47 @@ def test_cancelled_pack_does_not_read_or_create_model_files(tmp_path):
     with pytest.raises(ValueError,match='cancelled'):
         main(['--gguf',str(tmp_path/'missing.gguf'),'--out',str(tmp_path/'pack')],cancel=cancel)
     assert not (tmp_path/'pack').exists()
+
+
+def test_strata_rechecks_memory_before_launch_after_preparation(tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    import psutil
+    import forge_inference
+    import forge_native
+    from forge_native import NativeRuntime
+    from forge_vendor.strata.tokenizer import Tokenizer
+    runtime=NativeRuntime(tmp_path/'home',bundle=tmp_path/'bundle')
+    root=runtime.catalog.root
+    pack=root/'pack';(pack/'tokenizer').mkdir(parents=True)
+    for name in ('native_experts.txt','experts.bin'):(pack/name).touch()
+    (pack/'tokenizer'/'chat_template.jinja').write_text('{{ messages }}',encoding='utf-8')
+    model={'id':'coder','engine':'strata','context':8192,
+           'files':[{'path':'shard1.gguf','sha256':'fixture'},{'path':'shard2.gguf','sha256':'fixture'}]}
+    samples=iter([{'gpus':[{'total_mb':16384,'used_mb':0}]},
+                  {'gpus':[{'total_mb':16384,'used_mb':5000}]}])
+    monkeypatch.setattr(forge_inference,'memory_telemetry',lambda:next(samples))
+    monkeypatch.setattr(psutil,'virtual_memory',lambda:SimpleNamespace(available=20*1024**3))
+    monkeypatch.setattr(forge_native,'file_hash',lambda path,**kwargs:'fixture')
+    monkeypatch.setattr(runtime,'_executable',lambda engine:tmp_path/'strata.exe')
+    monkeypatch.setattr(Tokenizer,'from_gguf',classmethod(lambda cls,path:object()))
+    launched=[]
+    worker={'process':SimpleNamespace(poll=lambda:None)}
+    monkeypatch.setattr(runtime,'_spawn',lambda exe,args,**kwargs:launched.append(args) or worker)
+    monkeypatch.setattr(runtime,'_line',lambda *args:'READY 8192 stop')
+    monkeypatch.setattr(runtime,'_dispose',lambda worker:None)
+    try:
+        runtime._start(model,8192,threading.Event())
+        assert '--mmap-experts' in launched[0] and '--resident-experts' not in launched[0]
+        assert launched[0][launched[0].index('--spec')+1]=='2'
+    finally:runtime.close()
+
+
+def test_model_verification_can_stop_between_bounded_reads(tmp_path):
+    from forge_native_models import file_hash
+    source=tmp_path/'weights.gguf';source.write_bytes(b'x'*(3*1024**2))
+    checks=[]
+    def check():
+        checks.append(True)
+        if len(checks)==2:raise RuntimeError('Synthetic stop')
+    with pytest.raises(RuntimeError,match='Synthetic stop'):file_hash(source,check=check)
+    assert len(checks)==2

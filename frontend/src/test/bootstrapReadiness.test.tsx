@@ -28,6 +28,17 @@ const layoutObservation=()=>updateReadiness.diagnose().participants.find(row=>ro
 afterEach(()=>{updateReadiness.aborted(attempt);updateReadiness.dismiss();delete window.pywebview;vi.unstubAllGlobals();});
 
 describe('committed bootstrap readiness',()=>{
+  it.each(['migrated-model',''])('opens legacy history without restoring an unavailable engine name (%s)',async mapped=>{
+    const historical={...chat,model:'old-ollama-name:latest',composer_provider_id:'forge-native',composer_model:mapped};
+    const call=vi.fn(async(action:string,data:Record<string,unknown>={})=>{
+      if(action==='bootstrap')return {...fresh,settings:{...fresh.settings,provider_id:'forge-native',model:'current-native'}};
+      if(action==='get_chat')return historical;
+      if(action==='models')return {models:[{name:'current-native',display_name:'Current native model'},{name:'migrated-model',display_name:'Imported native model'}]};
+      return result(action,data);
+    });window.pywebview={api:{call}};render(<App/>);await act(async()=>window.dispatchEvent(new Event('pywebviewready')));
+    await screen.findByText('Fresh native answer');await screen.findByRole('button',{name:mapped?'Imported native model':'Current native model'});
+    expect(screen.queryByRole('button',{name:/old-ollama-name/})).toBeNull();
+  });
   it('reproduces ref-only activation losing its effect after React bails out an unchanged state batch',async()=>{
     let activate!:()=>void,rerender!:()=>void;const call=vi.fn(async()=>DEFAULT_LAYOUT);window.pywebview={api:{call}};
     function Owner(){const booted=useRef(false),[cycle,setCycle]=useState(false),[tick,setTick]=useState(0);const layout=useWorkspaceLayout(booted.current,()=>{});activate=()=>{booted.current=true;setCycle(true);setCycle(false);};rerender=()=>setTick(value=>value+1);return <span>{String(cycle)}/{tick}/{String(layout.ready)}</span>;}

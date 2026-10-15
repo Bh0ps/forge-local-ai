@@ -340,11 +340,14 @@ export default function App() {
     const event = new CustomEvent('forge:navigate', {cancelable: true, detail: {page: 'chat', chat_id: id}}); if (!window.dispatchEvent(event)) return;
     const navigationVersion=++navigation.current;
     const version = ++chatNavigationVersion.current;
+    const preferenceVersion = settingsRevision.current;
     const focusRequest = older ? chatActionFocus.admit('history', focusOrigin) : null;
     if(older && chatScroll.current){historyAnchor.current={height:chatScroll.current.scrollHeight,top:chatScroll.current.scrollTop};setHistoryLoading(true);}else{historyAnchor.current=null;setJumpToLatest(false);}
     try {
       const next = await api<SavedChat>('get_chat', { id, limit }); if (!accepted() || deletedChats.current.has(id) || version !== chatNavigationVersion.current || navigationVersion!==navigation.current) return; if(older && chatScroll.current)historyAnchor.current={height:chatScroll.current.scrollHeight,top:chatScroll.current.scrollTop};setChat(next); setChatId(next.id); setProjectId(next.project_id); setMessagesLimit(limit); setPageState('chat');
-      if (next.model) setSettings(prev => ({ ...prev, model: next.model }));
+      const restoredModel = next.composer_model ?? next.model;
+      if (!older && restoredModel && preferenceVersion===settingsRevision.current) setSettings(prev =>
+        next.composer_provider_id && next.composer_provider_id!==prev.provider_id ? prev : ({ ...prev, model: restoredModel }));
       shouldScroll.current = !older;
     } catch (e) { if(accepted() && version===chatNavigationVersion.current){historyAnchor.current=null;flash(errorText(e));} }
     finally{if(accepted() && version===chatNavigationVersion.current){setHistoryLoading(false);chatActionFocus.complete(focusRequest,()=>historyLoadTrigger.current || chatScroll.current);}}
