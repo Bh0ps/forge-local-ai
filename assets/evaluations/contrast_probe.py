@@ -9,7 +9,6 @@ This measures computed body text contrast; it is not a visual or behavior oracle
 from __future__ import annotations
 
 import json
-import mimetypes
 import os
 from pathlib import Path
 import shutil
@@ -28,6 +27,10 @@ PROBE_VERSION = 'forge-body-contrast-1'
 DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS = 10, 30
 MAX_FILES, MAX_ENTRIES, MAX_FILE_BYTES, MAX_TOTAL_BYTES = 32, 128, 256 * 1024, 1024 * 1024
 MAX_OUTPUT_BYTES, MAX_DIAGNOSTICS = 65536, 16
+FIXTURE_TYPES = {'.html': 'text/html', '.htm': 'text/html', '.css': 'text/css',
+                 '.js': 'text/javascript', '.json': 'application/json', '.svg': 'image/svg+xml',
+                 '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                 '.woff': 'font/woff', '.woff2': 'font/woff2'}
 
 
 def _result(status='unverified', detail='', **values):
@@ -171,7 +174,7 @@ def _worker(request):
                 if raw is None:
                     self.send_error(404); return
                 self.send_response(200)
-                self.send_header('Content-Type', mimetypes.guess_type(served_name)[0] or 'application/octet-stream')
+                self.send_header('Content-Type', FIXTURE_TYPES.get(Path(served_name).suffix.lower(), 'application/octet-stream'))
                 self.send_header('Content-Length', str(len(raw)))
                 self.send_header('Cache-Control', 'no-store')
                 self.send_header('Content-Security-Policy', "object-src 'none'; worker-src 'none'; frame-src 'none'; form-action 'self'; base-uri 'self'")

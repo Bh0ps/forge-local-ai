@@ -11,6 +11,8 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException
+from starlette.staticfiles import StaticFiles
 
 from core import BASE_DIR
 from forge_host import PairingAuthority
@@ -28,6 +30,7 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
             service = ForgeService()
     authority = auth or PairingAuthority()
     assets = Path(assets_dir or BASE_DIR / 'frontend' / 'dist').resolve()
+    static_assets = StaticFiles(directory=assets, check_dir=False)
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     app.state.service = service
     app.state.pairing = authority
@@ -115,8 +118,8 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
             response.set_cookie('forge_session', credentials['session'], httponly=True, samesite='strict',
                                 secure=request.url.scheme == 'https', max_age=86400, path='/api/')
             return response
-        except ValueError as exc:
-            return JSONResponse({'error': str(exc)}, status_code=403)
+        except ValueError:
+            return JSONResponse({'error': 'Pairing failed. Check the code or generate a new code in Forge Settings.'}, status_code=403)
 
     @app.post('/api/v1/unpair')
     async def unpair(request: Request):
@@ -157,8 +160,10 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
             return error
         try:
             return JSONResponse(await dispatch(action, data, request))
-        except (ValueError, httpx.HTTPError) as exc:
-            return JSONResponse({'error': str(exc)[:1000]}, status_code=400)
+        except httpx.HTTPError:
+            return JSONResponse({'error': 'Connection failed. Check the provider endpoint, credentials and availability.'}, status_code=400)
+        except ValueError:
+            return JSONResponse({'error': 'Request rejected. Check the selected inputs and settings, then try again.'}, status_code=400)
 
     @app.get('/api/v1/runs/{run_id}/events')
     async def events(run_id: str, request: Request, after: int = 0):
@@ -178,8 +183,8 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
         if 'text/event-stream' not in request.headers.get('accept', ''):
             try:
                 return JSONResponse(await dispatch('poll', {'id': run_id, 'after': after}))
-            except ValueError as exc:
-                return JSONResponse({'error': str(exc)}, status_code=400)
+            except ValueError:
+                return JSONResponse({'error': 'Run events are unavailable. Refresh the chat and try again.'}, status_code=400)
 
         async def replay():
             cursor = after
@@ -190,8 +195,8 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
                     return
                 try:
                     batch = await dispatch('poll', {'id': run_id, 'after': cursor})
-                except ValueError as exc:
-                    yield 'event: error\ndata: ' + json.dumps({'error': str(exc)}) + '\n\n'
+                except ValueError:
+                    yield 'event: error\ndata: ' + json.dumps({'error': 'Run events are unavailable. Refresh the chat and try again.'}) + '\n\n'
                     return
                 for event in batch.get('events', []):
                     sequence = int(event.get('seq', event.get('sequence', cursor + 1)))
@@ -207,7 +212,7 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
 
     @app.get('/api/v1/health')
     def health():
-        return {'app': 'Forge', 'version': '5.1.28', 'pairing_required': not legacy}
+        return {'app': 'Forge', 'version': '5.1.29', 'pairing_required': not legacy}
 
     @app.get('/')
     def index():
@@ -219,11 +224,13 @@ def create_app(core=None, service=None, auth=None, assets_dir=None):
         return HTMLResponse('<!doctype html><title>Forge</title><main>Frontend build missing. Run npm ci and npm run build in frontend.</main>', status_code=503)
 
     @app.get('/{path:path}')
-    def static(path: str):
-        candidate = (assets / path).resolve()
-        if not candidate.is_relative_to(assets) or not candidate.is_file() or path.startswith('api/'):
+    async def static(path: str, request: Request):
+        if path.startswith('api/'):
             return JSONResponse({'error': 'Not found'}, status_code=404)
-        return FileResponse(candidate)
+        try:
+            return await static_assets.get_response(path, request.scope)
+        except (HTTPException, RuntimeError, OSError):
+            return JSONResponse({'error': 'Not found'}, status_code=404)
     return app
 
 
