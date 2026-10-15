@@ -13,7 +13,7 @@ import stat
 import tempfile
 import threading
 import zipfile
-from xml.etree import ElementTree
+from forge_xml import parse_xml
 
 from project_tools import ProjectTools
 
@@ -75,7 +75,7 @@ def extract_document(path, start=0, limit=12000):
             append(text)
     elif suffix == '.docx':
         with _archive(path) as package:
-            root = ElementTree.fromstring(package.read('word/document.xml'))
+            root = parse_xml(package.read('word/document.xml'))
             namespace = {'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'}
             for paragraph in root.findall('.//w:p', namespace):
                 append(''.join(node.text or '' for node in paragraph.findall('.//w:t', namespace)) + '\n')

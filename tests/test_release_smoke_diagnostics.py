@@ -627,6 +627,11 @@ $saved=[IO.File]::ReadAllText($script:ForgeSmokeDiagnosticPath)
 $safe=$saved|ConvertFrom-Json
 if ($saved.Contains($secret) -or $safe.gate -ne 'unclassified' -or $null -ne $safe.process_exit) { throw 'Unknown gate or exit object escaped the closed summary.' }
 foreach ($case in @(
+    @('Workspace page load timed out.','workspace-page-timeout','not-executed'),
+    @('Workspace bridge initialization timed out.','workspace-bridge-timeout','not-executed'),
+    @('Main window failed to start','workspace-sdk-readiness','not-executed'),
+    @('GUI is not initialized','workspace-sdk-gui','not-executed'),
+    @('Create a web view window first, before invoking this function','workspace-sdk-window','not-executed'),
     @('Integration timed out. Inspect its outcome before retrying a side effect.','integration-timeout','outcome-unknown'),
     @('Native input is paused while Forge confirms a restart.','native-admission','refused'),
     @('Browser panel bounds must be finite numbers.','panel-bounds','not-executed'),

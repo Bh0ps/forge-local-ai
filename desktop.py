@@ -394,6 +394,24 @@ def _smoke_tray_open(api, *, clock=time.monotonic, pause=time.sleep):
                        _update_safe=True)
 
 
+def _smoke_workspace_state(window, timeout=25):
+    """Wait for the real page/bridge before probing, within one startup budget."""
+    deadline = time.monotonic() + timeout
+    for event, message in ((window.events.loaded, 'Workspace page load timed out.'),
+                           (window.events._pywebviewready, 'Workspace bridge initialization timed out.')):
+        if not event.wait(max(0, deadline - time.monotonic())):
+            raise ValueError(message)
+    while time.monotonic() < deadline:
+        result = {'ready': window.evaluate_js('document.readyState'),
+                  'title': window.evaluate_js('document.title'),
+                  'ui': window.evaluate_js("({composer:!!document.querySelector('.composer'), textarea:!!document.querySelector('.composer textarea'), navigation:document.querySelectorAll('nav[aria-label=\"Workspace navigation\"] button').length})")}
+        if (result['ready'] == 'complete' and result['title'] == 'Forge'
+                and result['ui'].get('composer') and result['ui'].get('textarea')):
+            return result
+        time.sleep(min(.2, max(0, deadline - time.monotonic())))
+    raise ValueError('React workspace did not render its composer.')
+
+
 class Bridge:
     class _NativeCompletionError(RuntimeError):
         """A submitted operation has no usable, confirmed completion result."""
@@ -427,6 +445,7 @@ class Bridge:
         self._window_closed = False
         self._tray_actions_lock = threading.Lock()
         self._tray_actions = set()
+        self._tray_workers = set()
         self._owned_teardown = threading.local()
         self._capture_lock = threading.Lock()
         self._pairing = pairing or PairingAuthority()
@@ -1213,10 +1232,16 @@ class Bridge:
                 with self._tray_actions_lock:
                     self._tray_actions.discard(action)
         try:
-            threading.Thread(target=run, name='Forge-tray-' + action, daemon=True).start()
+            worker = threading.Thread(target=run, name='Forge-tray-' + action, daemon=True)
+            with self._tray_actions_lock:
+                self._tray_workers = {thread for thread in self._tray_workers if thread.is_alive()}
+                self._tray_workers.add(worker)
+                worker.start()
         except Exception:
             with self._tray_actions_lock:
                 self._tray_actions.discard(action)
+                if 'worker' in locals():
+                    self._tray_workers.discard(worker)
             raise
         return True
 
@@ -1477,7 +1502,25 @@ class Bridge:
         # not finalize the interpreter before that owner has finished cleanup.
         if self._quit_owner == threading.get_ident():
             return self._quit_done.is_set() and self._quit_complete is True
-        return self._quit_done.wait(timeout) and self._quit_complete is True
+        deadline = time.monotonic() + timeout
+        if not self._quit_done.wait(max(0, deadline - time.monotonic())) or self._quit_complete is not True:
+            return False
+        # The completion event is set inside quit(). The tray callback still
+        # owns a Python frame and may be unwinding a managed call afterwards.
+        # Join owned callbacks outside native/UI locks, using the same budget.
+        if not self._tray_actions_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+            return False
+        try:
+            workers = tuple(self._tray_workers)
+        finally:
+            self._tray_actions_lock.release()
+        for worker in workers:
+            if worker is threading.current_thread():
+                return False
+            worker.join(max(0, deadline - time.monotonic()))
+            if worker.is_alive():
+                return False
+        return True
 
     def _finish_native_host(self, timeout=30):
         # Called only after the GUI loop has returned or startup has failed.
@@ -1670,16 +1713,7 @@ def main():
                 result = {'smoke_phase': 'workspace-ready'}
                 _smoke_checkpoint('workspace-ready')
                 try:
-                    deadline = time.monotonic() + 25
-                    while time.monotonic() < deadline:
-                        result['ready'] = api._window.evaluate_js('document.readyState')
-                        result['title'] = api._window.evaluate_js('document.title')
-                        result['ui'] = api._window.evaluate_js("({composer:!!document.querySelector('.composer'), textarea:!!document.querySelector('.composer textarea'), navigation:document.querySelectorAll('nav[aria-label=\"Workspace navigation\"] button').length})")
-                        if result['ready'] == 'complete' and result['title'] == 'Forge' and result['ui']['composer']:
-                            break
-                        time.sleep(.2)
-                    if not result.get('ui', {}).get('composer') or not result['ui']['textarea']:
-                        raise ValueError('React workspace did not render its composer.')
+                    result.update(_smoke_workspace_state(api._window))
                     result['smoke_phase'] = 'workspace-size'
                     _smoke_checkpoint(result['smoke_phase'])
                     result['launch_maximized'] = api._native(lambda form: str(form.WindowState) == 'Maximized')

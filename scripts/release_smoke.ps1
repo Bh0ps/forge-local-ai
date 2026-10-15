@@ -61,6 +61,11 @@ function Write-ForgeSmokeDiagnostics {
     # Only fixed labels, check statuses and exact known error messages leave the report.
     $knownErrors = @{
         'React workspace did not render its composer.' = 'workspace-render'
+        'Workspace page load timed out.' = 'workspace-page-timeout'
+        'Workspace bridge initialization timed out.' = 'workspace-bridge-timeout'
+        'Main window failed to start' = 'workspace-sdk-readiness'
+        'GUI is not initialized' = 'workspace-sdk-gui'
+        'Create a web view window first, before invoking this function' = 'workspace-sdk-window'
         'Handoff smoke requires pristine un-staged disposable state.' = 'handoff-fixture-state'
         'Native handoff trust-floor smoke failed.' = 'handoff-trust-floor'
         'Forge did not launch with its workspace maximized.' = 'window-state'

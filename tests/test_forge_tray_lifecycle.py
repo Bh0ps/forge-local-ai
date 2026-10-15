@@ -9,6 +9,26 @@ from webview.event import Event
 from desktop import Bridge, _tray
 
 
+def test_cleanup_waits_for_tray_callback_tail_after_quit_signal(host):
+    instance = host[0]
+    original = instance.quit
+    tail, release = threading.Event(), threading.Event()
+    def quit_with_tail():
+        result = original()
+        tail.set()
+        assert release.wait(2)
+        return result
+    instance.quit = quit_with_tail
+    try:
+        assert instance._tray_action('quit') is True
+        assert tail.wait(1) and instance._quit_done.is_set()
+        assert instance._await_owned_cleanup(.01) is False
+    finally:
+        release.set()
+    assert instance._await_owned_cleanup(1) is True
+    assert all(not worker.is_alive() for worker in instance._tray_workers)
+
+
 class Form:
     def __init__(self):
         self.Visible = False

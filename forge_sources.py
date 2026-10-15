@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import xml.etree.ElementTree as ET
+from forge_xml import parse_xml
 
 SKIP = {'.git', 'node_modules', '.venv', 'venv', '__pycache__', '.pytest_cache', '.cache', 'dist', 'build', '.forge'}
 
@@ -60,7 +61,7 @@ def generated_file(path, kind):
             if path.name == '.gitignore': return data.strip() == b'*'
             return path.name.startswith(('style_', 'coverage_html_', 'keybd_', 'favicon_')) and path.suffix in ('.css', '.js', '.png')
         if kind in ('junit', 'coverage_xml'):
-            node = ET.fromstring(data)
+            node = parse_xml(data)
             if kind == 'junit':
                 return node.tag in ('testsuite', 'testsuites') and bool(list(node.iter('testcase')))
             return node.tag == 'coverage' and 'version' in node.attrib and node.find('packages') is not None
