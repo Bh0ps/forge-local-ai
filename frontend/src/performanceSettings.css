@@ -1,4 +1,35 @@
-.local-tuning-card{padding:18px}.local-tuning-card>header{display:flex;gap:12px;align-items:center}.local-tuning-card>header>svg{color:var(--accent);flex:none}.local-tuning-card>header>div{display:grid;gap:5px;flex:1;min-width:0}.local-tuning-card>header strong{font-size:15px;overflow-wrap:anywhere}.local-tuning-card>header small,.local-tuning-card>p,.local-tuning-actions>span,.local-tuning-proposal small{font-size:12px;line-height:1.6;color:var(--muted)}.local-tuning-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.local-tuning-progress{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;color:var(--muted);font-size:12px}.local-tuning-proposal{padding:14px 0;margin-top:14px;border-top:1px solid var(--border)}.local-tuning-proposal p{font-size:13px;margin:7px 0}.local-tuning-proposal>div{margin-top:10px}.local-tuning-presets{margin-top:14px;border-top:1px solid var(--border);padding-top:14px}.performance-advanced{margin-top:18px}.performance-advanced>summary{display:flex;align-items:center;gap:10px;cursor:pointer;padding:14px 0;font-size:13px;font-weight:500;color:var(--text)}.performance-advanced>summary>span{display:grid;gap:5px}.performance-advanced>summary small{font-size:12px;color:var(--muted);font-weight:400}.performance-advanced>summary:focus-visible{outline:2px solid var(--accent);outline-offset:4px;border-radius:4px}.performance-page .performance-live span{font-size:11px}
-@media(max-width:650px){.local-tuning-card{padding:14px}.local-tuning-card>header{flex-wrap:wrap}.local-tuning-presets{align-items:stretch;flex-direction:column;gap:12px}.local-tuning-presets select{width:100%;max-width:100%}.local-tuning-actions>span{flex-basis:100%}}
-.calibration-card>.calibration-intro{margin:16px 18px;font-size:12px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere}
-.calibration-card>.calibration-error{margin:0 18px 14px;font-size:12px;line-height:1.6;color:var(--danger);overflow-wrap:anywhere}
+.local-tuning-card {padding:16px;}
+.local-tuning-card>header {display:flex;gap:10px;align-items:center;}
+.local-tuning-card>header>svg {color:var(--icon-green);flex:none;}
+.local-tuning-card>header>div {display:grid;gap:4px;flex:1;min-width:0;}
+.local-tuning-card>header strong {font-size:14px;font-weight:550;overflow-wrap:anywhere;}
+.local-tuning-card>header small,.local-tuning-card>p,.local-tuning-actions>span,.local-tuning-proposal small {font-size:12px;line-height:1.6;color:var(--muted);}
+.local-tuning-actions {display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;}
+.local-tuning-actions>button {min-height:32px;font-size:12px;}
+.local-tuning-progress {display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;color:var(--muted);font-size:12px;}
+.local-tuning-proposal {padding:12px 0 0;margin-top:14px;border-top:1px solid var(--border);}
+.local-tuning-proposal p {font-size:13px;line-height:1.6;margin:7px 0;}
+.local-tuning-proposal>div {margin-top:10px;}
+.local-tuning-presets {margin-top:14px;border-top:1px solid var(--border);padding-top:14px;}
+.performance-advanced {margin-top:18px;}
+.performance-advanced>summary {display:flex;align-items:center;gap:10px;cursor:pointer;padding:12px 0;font-size:13px;font-weight:550;color:var(--text);}
+.performance-advanced>summary>span {display:grid;gap:4px;}
+.performance-advanced>summary small {font-size:12px;line-height:1.5;color:var(--muted);font-weight:400;}
+.performance-advanced>summary:focus-visible {outline:2px solid var(--accent);outline-offset:4px;border-radius:4px;}
+.performance-page .performance-live span {font-size:12px;}
+.performance-page .calibration-card>.calibration-intro {margin:14px;font-size:12px;line-height:1.6;color:var(--muted);overflow-wrap:anywhere;}
+.performance-page .calibration-card>.calibration-error {margin:0 14px 14px;font-size:12px;line-height:1.6;color:var(--danger);overflow-wrap:anywhere;}
+.performance-page .calibration-card .benchmark-options {padding:12px 14px;gap:8px;border-top:1px solid var(--border);}
+.performance-page .calibration-card .recommendation {padding:12px 14px;gap:10px;border-top:1px solid var(--border);border-bottom:0;flex-wrap:wrap;}
+.performance-page .calibration-card .recommendation>div {flex-basis:180px;}
+.performance-page .calibration-card .recommendation strong {font-size:13px;overflow-wrap:anywhere;}
+.performance-page .calibration-card .recommendation :is(p,small) {font-size:12px;line-height:1.6;overflow-wrap:anywhere;}
+.performance-page .calibration-card .recommendation small {display:block;margin-top:4px;color:var(--muted);}
+.performance-page .calibration-card button:not(.toggle) {min-height:32px;font-size:12px;}
+@media(max-width:650px) {
+  .local-tuning-card {padding:14px;}
+  .local-tuning-card>header {flex-wrap:wrap;}
+  .local-tuning-presets {align-items:stretch;flex-direction:column;gap:12px;}
+  .local-tuning-presets select {width:100%;max-width:100%;}
+  .local-tuning-actions>span {flex-basis:100%;}
+}

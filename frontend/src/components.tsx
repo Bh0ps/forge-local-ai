@@ -1,5 +1,5 @@
 import { cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
-import { Brain, Check, ChevronDown, Copy, Info, Search, X, Eye, Wrench, LoaderCircle, ArrowUpRight } from 'lucide-react';
+import { Brain, Check, ChevronDown, Copy, Info, Search, X, Eye, Wrench, LoaderCircle, ArrowUpRight, Target, ListChecks, Hammer } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import { api, bytesLabel, friendlyModel, isNative, native, tokenLabel } from './api';
 import type { Message, Model, RunEvent } from './types';
@@ -217,7 +217,8 @@ export const slashCommands = [
 ] as const;
 export function ComposerModeChip({mode,remove}:{mode:DraftCommandMode;remove:()=>void}) {
   const info=composerModes[mode];
-  return <div className="composer-mode-row"><span className="composer-mode-chip"><Wrench size={12} aria-hidden="true"/><span>Next request: {info.label}</span><button type="button" aria-label={`Remove ${info.label} mode`} title="Return to normal chat" onClick={remove}><X size={12} aria-hidden="true"/></button></span><small>{info.description}</small></div>;
+  const ModeIcon=mode==='goal'?Target:mode==='plan'||mode==='todo'?ListChecks:mode==='builder'?Hammer:Wrench;
+  return <div className="composer-mode-row"><span className="composer-mode-chip" title={info.description}><ModeIcon size={12} aria-hidden="true"/><span>{info.label} mode</span><button type="button" aria-label={`Remove ${info.label} mode`} title="Return to normal chat" onClick={remove}><X size={12} aria-hidden="true"/></button></span></div>;
 }
 export function SlashPalette({ query, select, activeIndex = 0 }: { query: string; select: (value: string) => void; activeIndex?: number }) {
   const search = query.slice(1).split(' ')[0].toLowerCase();

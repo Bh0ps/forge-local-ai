@@ -38,7 +38,9 @@ def test_owned_import_hash_and_restart(tmp_path):
     target = owned / model['files'][0]['path']
     assert target.is_file() and file_hash(target) == file_hash(original)
     assert NativeCatalog(tmp_path / 'home').model('test')['context'] == 8192
-    target.touch()
+    # A same-tick touch can preserve the verified NTFS timestamp.
+    verified = target.stat()
+    os.utime(target, ns=(verified.st_atime_ns, verified.st_mtime_ns + 2_000_000_000))
     with pytest.raises(ValueError, match='changed after verification'):
         catalog.model('test')
 
