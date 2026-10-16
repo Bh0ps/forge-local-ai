@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
-import { scopeWorkspaceRuns, WorkspaceActivity, workspaceActivityGroups, WorkspacePanel, type WorkspaceActivityScope } from './workspacePanel';
+import { scopeWorkspaceRuns, WorkspaceActivity, workspaceActivityGroups, WorkspacePanel, type WorkspaceActivityScope, type WorkspacePanelFocusScope } from './workspacePanel';
 import { TaskContextPanel } from './taskContextPanel';
 import type { ActivityLive } from './chatActivity';
 import type { ActivityGroup, Run, SavedChat } from './types';
@@ -56,6 +56,28 @@ describe('detail pane navigation', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Close detail pane' }));
     expect(screen.queryByRole('complementary', { name: 'Workspace details' })).toBeNull();
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Open workspace panel' })));
+  });
+  it('shows the selected pane title and restores each tab reading position without moving focus',async()=>{
+    render(<Harness/>);
+    expect(screen.getByRole('heading',{name:'Activity'}).classList.contains('sr-only')).toBe(false);
+    const activity=screen.getByRole('tabpanel',{name:'Activity'});activity.scrollTop=180;fireEvent.scroll(activity);
+    await userEvent.click(screen.getByRole('tab',{name:'Files'}));
+    const files=screen.getByRole('tabpanel',{name:'Files'});expect(files.scrollTop).toBe(0);files.scrollTop=65;fireEvent.scroll(files);
+    await userEvent.click(screen.getByRole('tab',{name:'Activity'}));
+    expect(screen.getByRole('tabpanel',{name:'Activity'}).scrollTop).toBe(180);
+    expect(document.activeElement).toBe(screen.getByRole('tab',{name:'Activity'}));
+    await userEvent.click(screen.getByRole('tab',{name:'Files'}));
+    expect(screen.getByRole('tabpanel',{name:'Files'}).scrollTop).toBe(65);
+    expect(screen.getByRole('heading',{name:'Files'})).toBeTruthy();
+  });
+  it('keeps positions through content updates and discards them when the conversation changes',()=>{
+    const owner:WorkspacePanelFocusScope={page:'chat',projectId:'studio',chatId:'first',navigation:0,transport:window.fetch,visible:true,current:()=>true};
+    const select=vi.fn(),view=render(<WorkspacePanel tab="activity" select={select} close={()=>{}} width={320} resize={()=>{}} focusScope={owner}><p>Initial activity</p></WorkspacePanel>);
+    const panel=screen.getByRole('tabpanel',{name:'Activity'});panel.scrollTop=210;fireEvent.scroll(panel);
+    view.rerender(<WorkspacePanel tab="activity" select={select} close={()=>{}} width={340} resize={()=>{}} focusScope={{...owner}}><p>More activity</p></WorkspacePanel>);
+    expect(panel.scrollTop).toBe(210);
+    view.rerender(<WorkspacePanel tab="activity" select={select} close={()=>{}} width={340} resize={()=>{}} focusScope={{...owner,chatId:'second',navigation:1}}><p>Other conversation</p></WorkspacePanel>);
+    expect(panel.scrollTop).toBe(0);expect(select).not.toHaveBeenCalled();
   });
 });
 
@@ -162,7 +184,7 @@ describe('context attachment clarity', () => {
     bridge({ skills: { skills: [{ id: 'design', name: 'Interface design', enabled: true }] } });
     const onSkills = vi.fn(), onNotes = vi.fn();
     render(<TaskContextPanel projectId="studio" skills={['design']} notes={['note']} spaces={[{ id: 'note', name: 'Brand guide' }]} onSkills={onSkills} onNotes={onNotes} />);
-    await screen.findByRole('checkbox', { name: /Interface design/ });
+    await screen.findByRole('button', { name: 'Remove Interface design' });
     expect(screen.getByText('2 attached')).toBeTruthy();
     const search = screen.getByRole('textbox', { name: 'Search skills and notes' });
     fireEvent.change(search, { target: { value: '  Missing fixture  ' } });
@@ -173,7 +195,7 @@ describe('context attachment clarity', () => {
     expect(document.activeElement).toBe(search);
     expect(onSkills).not.toHaveBeenCalled();
     expect(onNotes).not.toHaveBeenCalled();
-    expect(screen.getByRole('checkbox', { name: /Interface design/ })).toHaveProperty('checked', true);
+    expect(screen.getByRole('button', { name: 'Remove Interface design' }).getAttribute('data-context-identity')).toBe('skill:design');
   });
   it('retains unavailable attachments through catalog errors and retries with the original selected identities', async () => {
     let attempts = 0;
@@ -184,8 +206,8 @@ describe('context attachment clarity', () => {
     expect(screen.getByText('Unavailable skill')).toBeTruthy();
     expect(screen.getByText('Unavailable note')).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
-    await screen.findByRole('checkbox', { name: /Review the interface/ });
-    expect(screen.getByRole('checkbox', { name: /Review the interface/ })).toHaveProperty('checked', true);
+    await screen.findByRole('button', { name: 'Remove Review the interface' });
+    expect(screen.getByRole('button', { name: 'Remove Review the interface' }).getAttribute('data-context-identity')).toBe('skill:skill');
     expect(call).toHaveBeenNthCalledWith(2, 'skills', { project_id: 'studio' });
     expect(onSkills).not.toHaveBeenCalled();
     expect(onNotes).not.toHaveBeenCalled();

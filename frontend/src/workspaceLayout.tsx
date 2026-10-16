@@ -182,6 +182,30 @@ export function useWorkspaceLayout(enabled:boolean,notify:(message:string)=>void
   return {layout,update,ready:enabled && ready && current(client.current,scopeGeneration.current),error,retrying,retry};
 }
 export function ResizeHandle({label,value,min,max,change,reverse=false}: {label:string;value:number;min:number;max:number;change:(value:number)=>void;reverse?:boolean}) {
-  const drag=useRef<{x:number;width:number;pointer:number}|null>(null);
-  return <div className="pane-resize-handle" role="separator" aria-label={label} aria-orientation="vertical" aria-valuemin={min} aria-valuemax={max} aria-valuenow={Math.round(value)} tabIndex={0} onKeyDown={event=>{if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();change(Math.round(Math.max(min,Math.min(max,value+(event.key==='ArrowRight'?1:-1)*(reverse?-1:1)*10))));}else if(event.key==='Home'){event.preventDefault();change(min);}else if(event.key==='End'){event.preventDefault();change(max);}}} onPointerDown={event=>{if(event.button!==0)return;drag.current={x:event.clientX,width:value,pointer:event.pointerId};event.currentTarget.setPointerCapture(event.pointerId);event.preventDefault();}} onPointerMove={event=>{if(!drag.current || drag.current.pointer!==event.pointerId)return;change(Math.round(Math.max(min,Math.min(max,drag.current.width+(event.clientX-drag.current.x)*(reverse?-1:1)))));}} onPointerUp={event=>{drag.current=null;if(event.currentTarget.hasPointerCapture(event.pointerId))event.currentTarget.releasePointerCapture(event.pointerId);}} onPointerCancel={()=>{drag.current=null;}}/ >;
+  const drag=useRef<{x:number;width:number;pointer:number;latestX:number;published:number;target:HTMLDivElement}|null>(null), frame=useRef<number|null>(null);
+  const options=useRef({min,max,change,reverse});options.current={min,max,change,reverse};
+  const cancelFrame=()=>{if(frame.current!==null){cancelAnimationFrame(frame.current);frame.current=null;}};
+  const publish=()=>{
+    frame.current=null;
+    const active=drag.current;if(!active)return;
+    const settings=options.current,next=Math.round(Math.max(settings.min,Math.min(settings.max,active.width+(active.latestX-active.x)*(settings.reverse?-1:1))));
+    if(next!==active.published){active.published=next;settings.change(next);}
+  };
+  const finish=(pointer:number,latestX?:number)=>{
+    const active=drag.current;if(!active || active.pointer!==pointer)return;
+    cancelFrame();if(latestX!==undefined)active.latestX=latestX;publish();drag.current=null;
+    if(active.target.hasPointerCapture?.(pointer))active.target.releasePointerCapture(pointer);
+  };
+  useEffect(()=>()=>{
+    cancelFrame();const active=drag.current;drag.current=null;
+    if(active?.target.hasPointerCapture?.(active.pointer))active.target.releasePointerCapture(active.pointer);
+  },[]);
+  return <div className="pane-resize-handle" role="separator" aria-label={label} aria-orientation="vertical" aria-valuemin={min} aria-valuemax={max} aria-valuenow={Math.round(value)} tabIndex={0} onKeyDown={event=>{if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();change(Math.round(Math.max(min,Math.min(max,value+(event.key==='ArrowRight'?1:-1)*(reverse?-1:1)*10))));}else if(event.key==='Home'){event.preventDefault();change(min);}else if(event.key==='End'){event.preventDefault();change(max);}}} onPointerDown={event=>{
+    if(event.button!==0 || drag.current)return;
+    drag.current={x:event.clientX,width:value,pointer:event.pointerId,latestX:event.clientX,published:value,target:event.currentTarget};
+    event.currentTarget.setPointerCapture?.(event.pointerId);event.preventDefault();
+  }} onPointerMove={event=>{
+    if(!drag.current || drag.current.pointer!==event.pointerId)return;
+    drag.current.latestX=event.clientX;if(frame.current===null)frame.current=requestAnimationFrame(publish);
+  }} onPointerUp={event=>finish(event.pointerId,event.clientX)} onPointerCancel={event=>finish(event.pointerId)} onLostPointerCapture={event=>finish(event.pointerId)}/>;
 }

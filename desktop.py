@@ -1839,10 +1839,10 @@ def main():
                     if not opened: raise ValueError('The Library navigation is missing.')
                     deadline = time.monotonic() + 10
                     cards = 0
-                    while cards < 24 and time.monotonic() < deadline:
+                    while cards < 28 and time.monotonic() < deadline:
                         time.sleep(.05)
-                        cards = api._window.evaluate_js("document.querySelectorAll('.library-card').length")
-                    if cards < 24: raise ValueError('The packaged Discover library did not render.')
+                        cards = api._window.evaluate_js("document.querySelectorAll('.library-page .library-bundles article.library-entry').length")
+                    if cards < 28: raise ValueError('The packaged Discover library did not render.')
                     result['library'] = {'starter_skills': len(starters), 'discover_cards': cards, 'rendered': True}
                     api._window.evaluate_js("document.querySelector('.new-chat').click()")
                     result['smoke_phase'] = 'host-lifecycle'

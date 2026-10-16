@@ -1,30 +1,17 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { BookOpen, ChevronDown, Code2, Database, Globe, Layers3, Package, Palette, Search, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { BookOpen, Check, ChevronDown, Search, Sparkles, X } from 'lucide-react';
 import { api, errorText } from './api';
 import { ErrorNotice, useControlLabel } from './components';
 import type { LibrarySkill } from './pluginsPage';
+import { skillBundle } from './skillBundles';
 import './taskContextPanel.css';
 
 type Note = {id: string; name: string; description?: string; project_ids?: string[]};
 type Props = {projectId?: string | null; skills: string[]; notes: string[]; spaces: Note[]; onSkills: (ids: string[]) => void; onNotes: (ids: string[]) => void};
 
-const BUNDLES: Record<string, {name: string; icon: typeof Code2; tone: string}> = {
-  build: {name: 'Coding', icon: Code2, tone: 'blue'}, coding: {name: 'Coding', icon: Code2, tone: 'blue'}, development: {name: 'Coding', icon: Code2, tone: 'blue'},
-  design: {name: 'Design', icon: Palette, tone: 'violet'}, backend: {name: 'Backend', icon: Database, tone: 'green'},
-  review: {name: 'Review', icon: ShieldCheck, tone: 'green'}, research: {name: 'Research', icon: Globe, tone: 'blue'},
-  delivery: {name: 'Delivery', icon: Package, tone: 'amber'}, workflow: {name: 'Workflow', icon: Layers3, tone: 'violet'},
-};
-
-function skillBundle(skill: LibrarySkill) {
-  const source = skill.bundle?.trim() || skill.category?.trim() || '';
-  const known = BUNDLES[source.toLocaleLowerCase()];
-  const name = known?.name || (source ? source.replaceAll(/[_-]/g, ' ').replace(/^\w/, value => value.toUpperCase()) : 'Your skills');
-  return {key: name.toLocaleLowerCase(), name, icon: known?.icon || Sparkles, tone: known?.tone || 'violet', ungrouped: !source};
-}
-
-function ContextAction({label, expanded, controls, children, click}: {label: string; expanded?: boolean; controls?: string; children: React.ReactNode; click: (button: HTMLButtonElement) => void}) {
+function ContextAction({label, identity, expanded, controls, children, click}: {label: string; identity?: string; expanded?: boolean; controls?: string; children: React.ReactNode; click: (button: HTMLButtonElement) => void}) {
   const hint = useControlLabel(label);
-  return <button type="button" className="context-row-action" aria-label={label} aria-expanded={expanded} aria-controls={controls} {...hint.events} onClick={event => {hint.dismiss();click(event.currentTarget);}}>{children}{hint.content}</button>;
+  return <button type="button" className="context-row-action" data-context-identity={identity} aria-label={label} aria-expanded={expanded} aria-controls={controls} {...hint.events} onClick={event => {hint.dismiss();click(event.currentTarget);}}>{children}{hint.content}</button>;
 }
 
 function ContextChoice({identity, name, description, checked, disabled, status, change, remove, kind = 'skill'}: {
@@ -33,10 +20,10 @@ function ContextChoice({identity, name, description, checked, disabled, status, 
 }) {
   const id = useId(), [expanded, setExpanded] = useState(false);
   return <div className={`context-item context-item-${kind}${disabled ? ' context-item-disabled' : ''}`}>
-    <label className="context-choice"><input type="checkbox" data-context-identity={identity} aria-label={name} checked={checked} disabled={disabled} onChange={event => change(event.currentTarget)}/><span><strong>{name}</strong>{status && <small>{status}</small>}</span></label>
+    {remove ? <div className="context-selection"><Check size={14} aria-hidden="true"/><span><strong>{name}</strong>{status && <small>{status}</small>}</span></div> : <label className="context-choice"><input type="checkbox" data-context-identity={identity} aria-label={name} checked={checked} disabled={disabled} onChange={event => change(event.currentTarget)}/><span><strong>{name}</strong>{status && <small>{status}</small>}</span></label>}
     <div className="context-item-actions">
       {description && <ContextAction label={`About ${name}`} expanded={expanded} controls={id} click={() => setExpanded(value => !value)}><ChevronDown size={14} aria-hidden="true"/></ContextAction>}
-      {remove && <ContextAction label={`Remove ${name}`} click={remove}><X size={13} aria-hidden="true"/></ContextAction>}
+      {remove && <ContextAction label={`Remove ${name}`} identity={identity} click={remove}><X size={13} aria-hidden="true"/></ContextAction>}
     </div>
     {expanded && description && <p id={id} className="context-item-description">{description}</p>}
   </div>;
@@ -57,7 +44,7 @@ export function TaskContextPanel({projectId, skills, notes, spaces, onSkills, on
     if (!request || request.projectId !== projectId || request.query !== query || request.transport !== (window.pywebview?.api.call || window.fetch)
       || document.visibilityState === 'hidden' || !document.hasFocus() || !root.current?.isConnected) return;
     if (document.activeElement !== request.origin && (document.activeElement !== document.body || request.origin.isConnected)) return;
-    const replacement = request.identity && [...root.current.querySelectorAll<HTMLInputElement>('input[data-context-identity]')].find(input => input.dataset.contextIdentity === request.identity && !input.disabled);
+    const replacement = request.identity && [...root.current.querySelectorAll<HTMLInputElement | HTMLButtonElement>('[data-context-identity]')].find(control => control.dataset.contextIdentity === request.identity && !control.disabled);
     (replacement || search.current)?.focus({preventScroll: true});
   }, [skills, notes, catalog, query, projectId]);
   useEffect(() => {
@@ -81,6 +68,8 @@ export function TaskContextPanel({projectId, skills, notes, spaces, onSkills, on
   const availableNotes = spaces.filter(note => !note.project_ids?.length || Boolean(projectId && note.project_ids.includes(projectId)));
   const shownSkills = catalog.filter(skill => matches(skill.name, skill.description, skill.bundle, skill.category, skillBundle(skill).name, ...(skill.tags || [])));
   const shownNotes = availableNotes.filter(note => matches(note.name, note.description));
+  const noteChoices = shownNotes.filter(note => !notes.includes(note.id));
+  const notesKey = `${projectId || ''}:${query.trim().toLocaleLowerCase()}:notes`, notesOpen = expanded[notesKey] ?? terms.length > 0;
   const bundles = new Map<string, ReturnType<typeof skillBundle> & {skills: LibrarySkill[]}>();
   for (const skill of shownSkills.filter(skill => !selectedSkill(skill))) {
     const bundle = skillBundle(skill), group = bundles.get(bundle.key);
@@ -113,9 +102,9 @@ export function TaskContextPanel({projectId, skills, notes, spaces, onSkills, on
       })}
       {!loading && !error && !shownSkills.length && <p className="context-empty">{terms.length ? 'No skills match this search.' : 'No skills available.'}</p>}
     </section>}
-    {(shownNotes.some(note => !notes.includes(note.id)) || !shownNotes.length) && <section className="context-notes" aria-label="Available notes"><h3><BookOpen size={14} aria-hidden="true"/>Notes</h3>
-      {shownNotes.filter(note => !notes.includes(note.id)).map(note => <ContextChoice key={note.id} identity={`note:${note.id}`} kind="note" name={note.name} description={note.description} checked={false} disabled={selectedNotes.length >= 5} change={origin => change(origin, () => onNotes(toggle(notes, note.id)), `note:${note.id}`)}/>) }
-      {!shownNotes.length && <p className="context-empty">{terms.length && availableNotes.length ? 'No notes match this search.' : 'No notes available.'}</p>}
+    {(noteChoices.length > 0 || !shownNotes.length) && <section className="context-notes" aria-label="Available notes"><button type="button" className="context-bundle-toggle" aria-label="Notes" aria-expanded={notesOpen} aria-controls={`${groupId}-notes`} onClick={() => setExpanded(value => ({...value, [notesKey]: !notesOpen}))}><BookOpen size={16} aria-hidden="true"/><strong>Notes</strong><span>{noteChoices.length}</span><ChevronDown size={14} aria-hidden="true"/></button>
+      {notesOpen && <div id={`${groupId}-notes`} className="context-note-items">{noteChoices.map(note => <ContextChoice key={note.id} identity={`note:${note.id}`} kind="note" name={note.name} description={note.description} checked={false} disabled={selectedNotes.length >= 5} change={origin => change(origin, () => onNotes(toggle(notes, note.id)), `note:${note.id}`)}/>)}
+      {!shownNotes.length && <p className="context-empty">{terms.length && availableNotes.length ? 'No notes match this search.' : 'No notes available.'}</p>}</div>}
       {selectedNotes.length >= 5 && <p className="context-note-limit">Five-note limit. Remove one to attach another.</p>}
     </section>}
   </section>;

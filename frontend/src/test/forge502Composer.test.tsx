@@ -9,14 +9,14 @@ describe('5.0.2 composer', () => {
     window.pywebview={api:{call:vi.fn(async()=>({skills:[{id:'design',name:'Interface design',description:'Colour and spacing',enabled:true},{id:'disabled',name:'Retired design',enabled:false}]}))}};
     const skills=vi.fn(), notes=vi.fn();
     render(<TaskContextPanel skills={['design']} notes={['note']} spaces={[{id:'note',name:'Brand colours'},{id:'other',name:'Other project',project_ids:['other']}]} projectId="project" onSkills={skills} onNotes={notes}/>);
-    await screen.findByRole('checkbox',{name:/Interface design/});
+    await screen.findByRole('button',{name:'Remove Interface design'});
     expect(screen.queryByText('Other project')).toBeNull();
     expect((screen.getByRole('checkbox',{name:/Retired design/}) as HTMLInputElement).disabled).toBe(true);
     fireEvent.change(screen.getByRole('textbox',{name:'Search skills and notes'}),{target:{value:'colour'}});
-    expect(screen.getByRole('checkbox',{name:/Brand colours/})).toBeTruthy();
+    expect(screen.getByRole('button',{name:'Remove Brand colours'})).toBeTruthy();
     expect(screen.queryByRole('checkbox',{name:/Retired design/})).toBeNull();
     fireEvent.click(screen.getByRole('button',{name:'Remove Brand colours'})); expect(notes).toHaveBeenCalledWith([]);
-    fireEvent.click(screen.getByRole('checkbox',{name:/Interface design/})); expect(skills).toHaveBeenCalledWith([]);
+    fireEvent.click(screen.getByRole('button',{name:'Remove Interface design'})); expect(skills).toHaveBeenCalledWith([]);
   });
 
   it('keeps Resume icon-only and waits for inspection before enabling it', async () => {
