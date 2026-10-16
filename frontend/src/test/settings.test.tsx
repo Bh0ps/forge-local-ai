@@ -31,6 +31,17 @@ const provider = { id: '', name: 'Studio engine', type: 'openai', base_url: 'htt
 
 describe('settings navigation', () => {
   beforeEach(() => { bridge(); });
+  it('opens each settings section at its beginning without changing any preference', async () => {
+    const { onChange } = workspace();
+    const content = document.querySelector<HTMLElement>('.settings-content')!;
+    content.scrollTop = 240;
+    await userEvent.click(screen.getByRole('button', { name: 'Shortcuts' }));
+    expect(content.scrollTop).toBe(0);
+    content.scrollTop = 120;
+    await userEvent.click(screen.getByRole('button', { name: 'General' }));
+    expect(content.scrollTop).toBe(0);
+    expect(onChange).not.toHaveBeenCalled();
+  });
   it('groups all existing sections and preserves deep navigation identities', async () => {
     const { selected, onChange } = workspace(DEFAULT_SETTINGS, 'dictation');
     const nav = screen.getByRole('navigation', { name: 'Settings sections' });

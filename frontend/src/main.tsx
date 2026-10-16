@@ -1,9 +1,9 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
-import App from './App';
 import './styles.css';
 import './upgrade.css';
 import './forge42.css';
+import App from './App';
 import './workspacePolish.css';
 class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { error: string }> {
   state = { error: '' };

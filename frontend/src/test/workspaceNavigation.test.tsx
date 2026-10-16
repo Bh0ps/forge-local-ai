@@ -106,3 +106,37 @@ describe('compact detail tabs keep their actual button ownership',()=>{
     await userEvent.keyboard('{End}{ArrowRight}');expect(document.activeElement).toBe(screen.getByRole('tab',{name:'Context'}));
   });
 });
+
+describe('temporary sidebar search expansion',()=>{
+  it('shows matching collapsed projects honestly and keeps search toggles out of saved preferences',async()=>{
+    const save=vi.fn(),view=sidebar({collapsedProjectIds:['studio'],onCollapsedProjects:save});
+    expect(screen.getByRole('button',{name:'Expand Studio'}).getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('button',{name:chat.title})).toBeNull();
+    view.rerender(<WorkspaceSidebar {...view.props} search="conversation"/>);
+    const expanded=screen.getByRole('button',{name:'Collapse Studio'});
+    expect(expanded.getAttribute('aria-expanded')).toBe('true');expect(screen.getByRole('button',{name:chat.title})).toBeTruthy();
+    await userEvent.click(expanded);
+    expect(screen.getByRole('button',{name:'Expand Studio'}).getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('button',{name:chat.title})).toBeNull();expect(save).not.toHaveBeenCalled();
+    view.rerender(<WorkspaceSidebar {...view.props} search="conversation" scheduledCount={2}/>);
+    expect(screen.getByRole('button',{name:'Expand Studio'})).toBeTruthy();
+    view.rerender(<WorkspaceSidebar {...view.props} search="Keep"/>);
+    expect(screen.getByRole('button',{name:'Collapse Studio'})).toBeTruthy();
+    view.rerender(<WorkspaceSidebar {...view.props}/>);
+    expect(screen.getByRole('button',{name:'Expand Studio'})).toBeTruthy();expect(save).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button',{name:'Expand Studio'}));expect(save).toHaveBeenCalledExactlyOnceWith([]);
+  });
+  it('lets filtered projects and archives collapse without changing their ordinary expansion state',async()=>{
+    const archived={...chat,id:'archived',title:'Archived conversation',archived:true},view=sidebar({chats:[chat,archived]});
+    view.rerender(<WorkspaceSidebar {...view.props} search="conversation"/>);
+    await userEvent.click(screen.getByRole('button',{name:'Collapse Studio'}));
+    const archives=screen.getByRole('button',{name:/Archived chats/});expect(archives.getAttribute('aria-expanded')).toBe('true');
+    await userEvent.click(archives);expect(archives.getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('button',{name:archived.title})).toBeNull();
+    view.rerender(<WorkspaceSidebar {...view.props}/>);
+    expect(screen.getByRole('button',{name:'Collapse Studio'})).toBeTruthy();expect(screen.getByRole('button',{name:chat.title})).toBeTruthy();
+    expect(screen.getByRole('button',{name:/Archived chats/}).getAttribute('aria-expanded')).toBe('false');
+    view.rerender(<WorkspaceSidebar {...view.props} search="Archived"/>);
+    expect(screen.getByRole('button',{name:/Archived chats/}).getAttribute('aria-expanded')).toBe('true');
+  });
+});

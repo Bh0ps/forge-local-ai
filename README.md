@@ -1,10 +1,10 @@
 <p align="center"><img src="assets/forge.svg" width="88" alt="Forge"></p>
 
-# Forge 5.2.3
+# Forge 5.2.4
 
-This Windows preview brings a quieter chat composer, clearer navigation and
-consistent model setup and Builder surfaces. Settings stays over your workspace,
-with live accent previews. Read [the 5.2.3 notes](docs/FORGE_523.md).
+This Windows preview polishes chat, Settings and the detail pane, with compact
+skill bundles, clearer controls and less repeated information. Saved messages
+skip unnecessary streaming renders. Read [the 5.2.4 notes](docs/FORGE_524.md).
 
 GGUF models run with Forge-owned, bundled llama.cpp workers. Optional Strata Coder
 includes an explicitly selected uncensored variant. Model files stay in your chosen
@@ -17,17 +17,17 @@ Forge is a local AI workspace for building apps, exploring ideas and working wit
 files on your computer. It brings chat, Builder, previews and project tools into
 one Windows app. Optional OpenRouter guidance helps with planning and review.
 
-**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.3/Forge-5.2.3-Setup.exe)**
-· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.2.3)
-· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.3/Forge-5.2.3-Portable.zip)
-· [Publisher record](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.3/Forge-update-proof.json)
-· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.3/SHA256SUMS.txt)
+**[Download the Windows preview installer](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.4/Forge-5.2.4-Setup.exe)**
+· [Prerelease notes](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.2.4)
+· [Portable ZIP](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.4/Forge-5.2.4-Portable.zip)
+· [Publisher record](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.4/Forge-update-proof.json)
+· [Checksum](https://github.com/Bh0ps/forge-local-ai/releases/download/v5.2.4/SHA256SUMS.txt)
 
-The [previous 5.2.2 preview](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.2.2) remains available.
+The [previous 5.2.3 preview](https://github.com/Bh0ps/forge-local-ai/releases/tag/v5.2.3) remains available.
 
 ## Install
 
-1. Install **Forge-5.2.3-Setup.exe** after closing Forge.
+1. Install **Forge-5.2.4-Setup.exe** after closing Forge.
 2. Open **Settings → Models & engines → Forge models** and choose your model directory.
 3. Import GGUF files, import existing Ollama models, or explicitly download Strata Coder.
 4. Select **Use** beside your model. Forge starts its bundled worker when needed.
@@ -63,11 +63,11 @@ Model weights download separately; a separately installed inference application 
 
 These screenshots show the running workspace with synthetic data.
 
-![Forge chat in dark appearance](assets/demos/forge-5.2.3-chat-dark.png)
+![Forge chat in dark appearance](assets/demos/forge-5.2.4-chat-dark.png)
 
-![Forge chat in light appearance](assets/demos/forge-5.2.3-chat-light.png)
+![Forge chat in light appearance](assets/demos/forge-5.2.4-chat-light.png)
 
-![Forge Settings and workspace accents](assets/demos/forge-5.2.3-settings-dark.png)
+![Forge Settings and workspace accents](assets/demos/forge-5.2.4-settings-dark.png)
 
 ## Connect a browser or Telegram
 

@@ -48,24 +48,44 @@ describe('Library current loading and error copy',()=>{
 });
 
 describe('Library presentation preserves explicit workflows',()=>{
+ it('shares Coding aliases and exposes custom bundles without catalog reads on filter changes',async()=>{
+  const cpp={...entry,id:'cpp',name:'Native C++',bundle:'build',category:'coding',description:'Use CMake presets.',skill_id:undefined};
+  const dotnet={...cpp,id:'dotnet',name:'Windows .NET',bundle:'development',description:'Use the solution build.'};
+  const custom={...cpp,id:'custom',name:'Training report',bundle:'machine_learning',description:'Compare training runs.'};
+  const {call}=bridge({catalog_discover:{entries:[cpp,dotnet,custom],sources:[]}});render(<PluginsPage notify={vi.fn()}/>);
+  await screen.findByRole('heading',{name:'Native C++'});const before=call.mock.calls.length;
+  expect(screen.getAllByRole('button',{name:'Coding bundle'})).toHaveLength(1);
+  expect(screen.getByRole('option',{name:'Machine Learning'})).toBeTruthy();
+  await userEvent.selectOptions(screen.getByRole('combobox',{name:'Workflow bundle'}),'coding');
+  expect(screen.getByRole('heading',{name:'Windows .NET'})).toBeTruthy();expect(screen.queryByRole('heading',{name:'Training report'})).toBeNull();
+  const group=screen.getByRole('button',{name:'Coding bundle'});await userEvent.click(group);
+  expect(screen.queryByRole('heading',{name:'Native C++'})).toBeNull();
+  await userEvent.type(screen.getByRole('textbox',{name:'Search library'}),'cmake');
+  expect(screen.getByRole('heading',{name:'Native C++'})).toBeTruthy();expect(call.mock.calls).toHaveLength(before);
+  await userEvent.clear(screen.getByRole('textbox',{name:'Search library'}));
+  await userEvent.selectOptions(screen.getByRole('combobox',{name:'Workflow bundle'}),'machine-learning');
+  expect(screen.getByRole('heading',{name:'Training report'})).toBeTruthy();expect(call.mock.calls).toHaveLength(before);
+ });
  it('names real view/filter groups and filters locally through their original controls',async()=>{
   const {call}=bridge({catalog_discover:{entries:[entry],sources:[]}});render(<PluginsPage notify={vi.fn()}/>);
   await screen.findByRole('heading',{name:entry.name});const before=call.mock.calls.length;
   expect(screen.getByRole('group',{name:'Library views'})).toBeTruthy();expect(screen.getByRole('group',{name:'Library filters'})).toBeTruthy();
-  const types=screen.getByRole('group',{name:'Extension type'}),categories=screen.getByRole('group',{name:'Skill categories'});
+  const types=screen.getByRole('group',{name:'Extension type'});
   const plugins=within(types).getByRole('button',{name:'Plugins'});plugins.focus();await userEvent.keyboard('{Enter}');
   expect(plugins.getAttribute('aria-pressed')).toBe('true');expect(screen.getByRole('heading',{name:'No matching items'})).toBeTruthy();
   await userEvent.click(within(types).getByRole('button',{name:'Skills'}));await userEvent.selectOptions(screen.getByRole('combobox',{name:'Workflow bundle'}),'review');
-  const review=within(categories).getByRole('button',{name:'Review'});review.focus();await userEvent.keyboard(' ');
-  expect(review.getAttribute('aria-pressed')).toBe('true');expect(screen.getByRole('heading',{name:entry.name})).toBeTruthy();expect(call.mock.calls).toHaveLength(before);
+  await userEvent.selectOptions(screen.getByRole('combobox',{name:'Skill category'}),'review');
+  expect(screen.getByRole('heading',{name:entry.name})).toBeTruthy();expect(call.mock.calls).toHaveLength(before);
  });
  it('describes each preview with its item name and reads instructions only after an explicit request',async()=>{
   const {call}=bridge({catalog_discover:{entries:[entry],sources:[]},skill_preview:{text:'# Review\nKeep the current work and verify the changed files.'}});
   render(<PluginsPage notify={vi.fn()}/>);const card=await screen.findByRole('article',{name:entry.name});
-  const preview=within(card).getByRole('button',{name:'View skill'}),description=preview.getAttribute('aria-describedby');
-  expect(description).toBeTruthy();expect(document.getElementById(description!)?.textContent).toBe(entry.name);
+  const preview=within(card).getByRole('button',{name:entry.name}),description=preview.getAttribute('aria-describedby');
+  expect(description).toBeTruthy();expect(document.getElementById(description!)?.textContent).toBe(entry.description);
+  expect(within(card).getAllByRole('button')).toHaveLength(1);expect(within(card).queryByRole('switch')).toBeNull();
+  expect(within(card).queryByText('MIT')).toBeNull();
   expect(call.mock.calls.some(([action])=>action==='skill_preview')).toBe(false);preview.focus();await userEvent.keyboard('{Enter}');
-  const dialog=await screen.findByRole('dialog',{name:entry.name});expect(await within(dialog).findByText('Keep the current work and verify the changed files.')).toBeTruthy();
+  const dialog=await screen.findByRole('dialog',{name:entry.name});expect(await within(dialog).findByText('Keep the current work and verify the changed files.')).toBeTruthy();expect(within(dialog).getByText('MIT')).toBeTruthy();
   expect(call.mock.calls.filter(([action])=>action==='skill_preview')).toEqual([['skill_preview',{id:'review',project_id:undefined}]]);
   expect(call.mock.calls.some(([action])=>['skill_toggle','plugin_install','skill_edit','skill_install'].includes(action))).toBe(false);
   // jsdom does not synthesize the browser's native dialog cancel event from Escape.
@@ -92,7 +112,7 @@ describe('Library presentation preserves explicit workflows',()=>{
  it('keeps a pending readonly preview in the same modal through a harmless parent update',async()=>{
   const read=deferred<unknown>();const {call}=bridge({catalog_discover:{entries:[entry],sources:[]},skill_preview:()=>read.promise});
   const view=render(<PluginsPage notify={vi.fn()} projectId="studio"/>);await screen.findByRole('heading',{name:entry.name});
-  await userEvent.click(screen.getByRole('button',{name:'View skill'}));const dialog=screen.getByRole('dialog',{name:entry.name});expect(within(dialog).getByRole('status').textContent).toContain('Reading skill');
+  await userEvent.click(screen.getByRole('button',{name:entry.name}));const dialog=screen.getByRole('dialog',{name:entry.name});expect(within(dialog).getByRole('status').textContent).toContain('Reading skill');
   view.rerender(<PluginsPage notify={vi.fn()} projectId="studio"/>);expect(screen.getByRole('dialog',{name:entry.name})).toBe(dialog);
   await act(async()=>read.resolve({text:'# Review\nKeep the original instruction evidence.'}));expect(await within(dialog).findByText('Keep the original instruction evidence.')).toBeTruthy();
   expect(call.mock.calls.filter(([action])=>action==='skill_preview')).toEqual([['skill_preview',{id:'review',project_id:'studio'}]]);

@@ -1,4 +1,4 @@
-import { cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
+import { cloneElement, isValidElement, memo, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { Brain, Check, ChevronDown, Copy, Info, Search, X, Eye, Wrench, LoaderCircle, ArrowUpRight, Target, ListChecks, Hammer } from 'lucide-react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import { api, bytesLabel, friendlyModel, isNative, native, tokenLabel } from './api';
@@ -134,21 +134,22 @@ export function Badge({ children, tone = '' }: { children: React.ReactNode; tone
 export function ErrorNotice({ error, retry }: { error: string; retry?: () => void }) { return <div className="inline-error" role="alert"><span>{error}</span>{retry && <button onClick={retry}>Retry</button>}</div>; }
 export function PageHeader({ title, subtitle, children }: { title: string; subtitle?: string; children?: React.ReactNode }) { return <div className="page-header"><div><h1>{title}</h1>{subtitle && <p>{subtitle}</p>}</div><div className="page-actions">{children}</div></div>; }
 export function Toggle({ label, checked, onChange, description, disabled }: { label: string; checked: boolean; onChange: (v: boolean) => void; description?: string; disabled?: boolean }) {
-  return <div className="setting-row"><div><span>{label}</span>{description && <small>{description}</small>}</div><button type="button" className="toggle" role="switch" aria-checked={checked} aria-label={label} disabled={disabled} onClick={() => onChange(!checked)}><span /></button></div>;
+  const descriptionId = useId();
+  return <div className="setting-row"><div><span>{label}</span>{description && <small id={descriptionId}>{description}</small>}</div><button type="button" className="toggle" role="switch" aria-checked={checked} aria-label={label} aria-describedby={description ? descriptionId : undefined} disabled={disabled} onClick={() => onChange(!checked)}><span /></button></div>;
 }
 function CodeBlock({children}: {children?:React.ReactNode}) {
   const code=isValidElement<{children?:React.ReactNode;className?:string}>(children)?children.props:null;
   const text=typeof code?.children==='string'?code.children:'';
   const language=code?.className?.replace(/^language-/,'') || 'Code';
-  const [state,setState]=useState('Copy'), timer=useRef<ReturnType<typeof setTimeout>|null>(null);
-  useEffect(()=>()=>{if(timer.current)clearTimeout(timer.current);},[]);
-  async function copy(){try{if(isNative())await native('copy',text);else await navigator.clipboard.writeText(text);setState('Copied');}catch{setState('Copy failed');}if(timer.current)clearTimeout(timer.current);timer.current=setTimeout(()=>setState('Copy'),2000);}
+  const [state,setState]=useState('Copy'), timer=useRef<ReturnType<typeof setTimeout>|null>(null), copyAttempt=useRef(0);
+  useEffect(()=>()=>{copyAttempt.current++;if(timer.current!==null)clearTimeout(timer.current);},[]);
+  async function copy(){const attempt=++copyAttempt.current;let result='Copied';try{if(isNative())await native('copy',text);else await navigator.clipboard.writeText(text);}catch{result='Copy failed';}if(attempt!==copyAttempt.current)return;setState(result);if(timer.current!==null)clearTimeout(timer.current);timer.current=setTimeout(()=>{timer.current=null;setState('Copy');},2000);}
   return <div className="code-block"><header><span>{language}</span><button type="button" aria-label="Copy code" onClick={()=>void copy()}><Copy size={13}/><span role="status">{state}</span></button></header><pre tabIndex={0}>{children}</pre></div>;
 }
 const markdownComponents:Components={a:({href,children})=><a href={href} target="_blank" rel="noopener noreferrer">{children}<ArrowUpRight size={11}/></a>,pre:CodeBlock};
-export function Markdown({ text }: { text: string }) {
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return <div className="markdown"><ReactMarkdown components={markdownComponents}>{text}</ReactMarkdown></div>;
-}
+});
 function SavedImage({ image }: { image: string }) {
   const [src, setSrc] = useState(image.startsWith('forge-attachment:') ? '' : image.startsWith('data:') ? image : `data:image/jpeg;base64,${image}`);
   const [error, setError] = useState(''); const ref = useRef<HTMLDivElement>(null);
@@ -163,23 +164,29 @@ function SavedImage({ image }: { image: string }) {
   }, [image]);
   return <div ref={ref} className="saved-image">{src ? <img alt="Attached image" loading="lazy" src={src} /> : <span>{error || 'Saved image'}</span>}</div>;
 }
-export function MessageView({ message, streaming = false, showThinking = true, thinkingIntent }: { message: Message; streaming?: boolean; showThinking?: boolean; thinkingIntent?: ThinkingReadIntent }) {
+// Persisted messages retain their object identity during token updates. Use React's
+// full shallow prop comparison so a new read owner, status or message still renders;
+// mutable disclosure intent remains owned by ThinkingDisclosure's lifecycle.
+export const MessageView = memo(function MessageView({ message, streaming = false, showThinking = true, thinkingIntent }: { message: Message; streaming?: boolean; showThinking?: boolean; thinkingIntent?: ThinkingReadIntent }) {
   const [copied, setCopied] = useState(false), [copyError,setCopyError]=useState(false);
+  const copyTimer=useRef<ReturnType<typeof setTimeout>|null>(null), copyAttempt=useRef(0);
+  useEffect(()=>()=>{copyAttempt.current++;if(copyTimer.current!==null)clearTimeout(copyTimer.current);},[]);
   if (message.role === 'tool') return <details className="tool-message"><summary><Wrench size={14} />{message.tool_name || 'Tool result'}</summary><pre>{message.content}</pre></details>;
   if (message.role === 'system') return null;
   async function copy() {
-    try { if (isNative()) await native('copy', message.content); else await navigator.clipboard.writeText(message.content); setCopyError(false);setCopied(true); setTimeout(() => setCopied(false), 1500); } catch {setCopyError(true);}
+    const attempt=++copyAttempt.current;
+    try { if (isNative()) await native('copy', message.content); else await navigator.clipboard.writeText(message.content); if(attempt!==copyAttempt.current)return;setCopyError(false);setCopied(true);if(copyTimer.current!==null)clearTimeout(copyTimer.current);copyTimer.current=setTimeout(()=>{copyTimer.current=null;setCopied(false);},1500); } catch {if(attempt===copyAttempt.current){if(copyTimer.current!==null)clearTimeout(copyTimer.current);copyTimer.current=null;setCopied(false);setCopyError(true);}}
   }
   return <article className={`message ${message.role}`}>
-    <div className="message-meta">{message.role === 'user' ? 'You' : <><img src="./forge.svg" alt="" />Forge</>}{message.status && message.status !== 'complete' && <span>{message.status}</span>}</div>
+    <div className="message-meta"><span className={`message-author${message.role === 'assistant' ? ' sr-only' : ''}`}>{message.role === 'user' ? 'You' : 'Forge'}</span>{message.status && message.status !== 'complete' && <span className="message-status">{message.status}</span>}</div>
     {message.images?.length ? <div className="message-images">{message.images.map((image, i) => <SavedImage key={i} image={image} />)}</div> : null}
     {message.thinking && showThinking && <ThinkingDisclosure key={thinkingIntent?.key ?? message.id ?? message.run_id} text={message.thinking} streaming={streaming} active={streaming && !message.content} intent={thinkingIntent} />}
     <Markdown text={message.content}/>{streaming && <span className="stream-caret" aria-hidden="true"/>}
-    {!streaming && message.role !== 'user' && message.content && <button className="text-button copy-button" onClick={copy}>{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? 'Copied' : 'Copy'}</button>}
+    {!streaming && message.role !== 'user' && message.content && <div className="message-actions" role="group" aria-label="Message actions" data-feedback={copied || copyError ? 'true' : undefined}><button type="button" className="text-button copy-button" aria-label="Copy response" onClick={()=>void copy()}>{copied ? <Check size={13} aria-hidden="true" /> : <Copy size={13} aria-hidden="true" />}<span aria-hidden="true">{copied ? 'Copied' : 'Copy'}</span><span className="sr-only" role="status">{copied ? 'Response copied' : ''}</span></button></div>}
     {copyError && <small role="alert">Could not copy. Select the text to copy it manually.</small>}
     {message.sources?.length ? <details className="sources"><summary>Sources · {message.sources.length}</summary>{message.sources.map((s, i) => <a key={i} href={/^https?:\/\//.test(s.url) ? s.url : undefined} target="_blank" rel="noopener noreferrer">{s.title || s.url}</a>)}</details> : null}
   </article>;
-}
+});
 export function ToolCard({ event }: { event: RunEvent }) { return <details className="tool-card"><summary>{event.state === 'running' ? <LoaderCircle size={13} className="spin" /> : event.state === 'done' ? <Check size={13} /> : <Info size={13} />}<span>{event.name?.replaceAll('_', ' ') || 'Tool action'}</span><small>{event.state}</small></summary><pre>{JSON.stringify(event.arguments ?? event.result ?? {}, null, 2)}</pre>{event.arguments && event.result !== undefined ? <pre>{typeof event.result === 'string' ? event.result : JSON.stringify(event.result, null, 2)}</pre> : null}</details>; }
 export function reasoningCapability(model:Model,providerId:string):string|null {
   if((providerId==='openrouter' || model.provider==='openrouter') && ['openrouter/free','openrouter/auto'].includes(model.name))return 'Reasoning varies by route';

@@ -1,5 +1,5 @@
 .workspace-panel .workspace-panel-heading {display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);flex-shrink:0;}
-.workspace-panel-heading h2 {margin:0;}
+.workspace-panel-heading .workspace-panel-title {margin:0;font-size:12px;line-height:1.4;font-weight:600;flex-shrink:0;}
 .workspace-panel-heading>.icon-button {--control-size:32px;width:32px;height:32px;flex-shrink:0;}
 .workspace-panel .workspace-panel-tabs {display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:3px;min-width:0;flex:1;overflow:visible;}
 .workspace-panel .workspace-panel-tabs>button {position:relative;display:flex;align-items:center;justify-content:center;min-width:0;min-height:32px;padding:6px;border:0;border-radius:6px;background:transparent;color:var(--secondary);transition:background-color .15s,color .15s;}

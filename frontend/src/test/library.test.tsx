@@ -26,19 +26,21 @@ describe('setup library', () => {
     expect(filterLibraryEntries(entries, 'for tools', 'plugin', 'documentation').map(entry => entry.id)).toEqual([plugin.id, 'mcp']);
     expect(filterLibraryEntries(entries, 'research browser', 'skill', 'research')).toEqual([starter]);
     expect(filterLibraryEntries(entries, 'unrelated', 'all', '')).toEqual([]);
+    const build={...starter,bundle:'build'},development={...starter,id:'dotnet',bundle:'development'};
+    expect(filterLibraryEntries([build,development], 'coding', 'skill', '', 'build')).toEqual([build,development]);
   });
   it('lets enabled skills turn off without changing an explicitly disabled automatic selection', async () => {
     const { call, responses, skill } = bridge({ skill_toggle: (data: Record<string, unknown>) => { responses.skills = { skills: [{ ...skill, enabled: data.enabled, automatic: data.automatic }] }; return { ok: true }; } });
     render(<PluginsPage notify={vi.fn()} projectId="project-1" />); await screen.findByRole('heading', { name: 'Research' });
-    await userEvent.click(screen.getByRole('switch', { name: 'Enable Research' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Research' }));
+    await userEvent.click(screen.getByRole('switch', { name: 'Enable Research in details' }));
     await waitFor(() => expect(call).toHaveBeenCalledWith('skill_toggle', { id: 'skill-1', enabled: false, automatic: false, project_id: 'project-1' }));
-    await waitFor(() => expect(screen.getByRole('switch', { name: 'Enable Research' }).getAttribute('aria-checked')).toBe('false'));
-    await userEvent.click(screen.getByRole('button', { name: /Installed/ }));
-    expect((screen.getByRole('switch', { name: 'Automatically use Research' }) as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Enable Research in details' }).getAttribute('aria-checked')).toBe('false'));
+    expect((screen.getByRole('switch', { name: 'Automatically use Research in details' }) as HTMLButtonElement).disabled).toBe(true);
   });
   it('previews a disabled skill without enabling it or granting an action', async () => {
     const { call } = bridge({ skills: { skills: [{ id: 'skill-1', name: 'Research', enabled: false, automatic: false, builtin: true }] } });
-    render(<PluginsPage notify={vi.fn()} />); await screen.findByRole('heading', { name: 'Research' }); await userEvent.click(screen.getByRole('button', { name: 'View skill' }));
+    render(<PluginsPage notify={vi.fn()} />); await screen.findByRole('heading', { name: 'Research' }); await userEvent.click(screen.getByRole('button', { name: 'Research' }));
     expect(await screen.findByText('Read the sources before reaching a conclusion.')).toBeTruthy();
     expect(call).toHaveBeenCalledWith('skill_preview', { id: 'skill-1', project_id: undefined });
     expect(screen.getByRole('switch', { name: 'Enable Research in details' }).getAttribute('aria-checked')).toBe('false');
@@ -46,7 +48,9 @@ describe('setup library', () => {
   });
   it('reviews compatibility and staged source before a discovered plugin can install', async () => {
     const { call } = bridge({ plugin_inspect: { name: 'Docs tools', compatible: true, inspection_id: 'staged-docs', compatibility: 'Portable skills', warnings: ['Connections need setup.'], licenses: ['LICENSE'] }, plugin_install: { ok: true } });
-    render(<PluginsPage notify={vi.fn()} />); await screen.findByRole('heading', { name: 'Docs tools' }); await userEvent.click(screen.getByRole('button', { name: 'Review & install' }));
+    render(<PluginsPage notify={vi.fn()} />); await screen.findByRole('heading', { name: 'Docs tools' }); await userEvent.click(screen.getByRole('button', { name: 'Docs tools' }));
+    const details = screen.getByRole('dialog');expect(within(details).getByText('Review license')).toBeTruthy();
+    await userEvent.click(within(details).getByRole('button', { name: 'Review & install' }));
     expect((screen.getByLabelText('Source') as HTMLInputElement).value).toBe(plugin.source); expect(call.mock.calls.some(([action]) => action === 'plugin_install')).toBe(false);
     await userEvent.click(screen.getByRole('button', { name: 'Inspect source' })); await screen.findByText('Portable skills'); await userEvent.click(screen.getByRole('button', { name: 'Install reviewed plugin' }));
     await waitFor(() => expect(call).toHaveBeenCalledWith('plugin_install', { inspection_id: 'staged-docs', source: plugin.source, reviewed: true }));
@@ -73,7 +77,7 @@ describe('setup library', () => {
   it('keeps plugin details separate from skills belonging to the same plugin', async () => {
     const { call } = bridge({ skills: { skills: [{ id: 'child-skill', name: 'Child skill', plugin_id: 'plugin-1', enabled: true, automatic: false }] }, plugins: { plugins: [{ id: 'plugin-1', name: 'Parent plugin', source: 'builtin:research', enabled: true }] } });
     render(<PluginsPage notify={vi.fn()} />); await screen.findByRole('heading', { name: 'Research' }); await userEvent.click(screen.getByRole('button', { name: /Installed/ }));
-    const card = screen.getByRole('heading', { name: 'Parent plugin' }).closest('article')!; await userEvent.click(within(card).getByRole('button', { name: 'View details' }));
+    const card = screen.getByRole('heading', { name: 'Parent plugin' }).closest('article')!; await userEvent.click(within(card).getByRole('button', { name: 'Parent plugin' }));
     const dialog = screen.getByRole('dialog'); expect(within(dialog).getByRole('heading', { name: 'Parent plugin' })).toBeTruthy(); expect(within(dialog).getByRole('button', { name: 'Review update' })).toBeTruthy();
     expect(call.mock.calls.some(([action]) => action === 'skill_preview')).toBe(false);
   });

@@ -46,6 +46,10 @@ export function WorkspacePanel({ tab, select, close, width, resize, children, fo
 }) {
   const current = WORKSPACE_TABS.find(item => item.id === tab) || WORKSPACE_TABS[2];
   const id = useId(), buttons = useRef(new Map<string, HTMLButtonElement>()), keyboardFocus = useRef(false);
+  const scroll = useRef<HTMLDivElement>(null);
+  const scrollScope = JSON.stringify([focusScope?.page, focusScope?.projectId, focusScope?.chatId, focusScope?.navigation]);
+  const scrollPositions = useRef({scope:scrollScope,tabs:new Map<string,number>()});
+  const pendingScroll = useRef<{expected:number;cancel:()=>void}|null>(null);
   const pane = useRef<HTMLElement>(null), currentOwner = useRef({scope: focusScope, tab: current.id});
   currentOwner.current = {scope: focusScope, tab: current.id};
   const pendingFocus = useRef<{scope: WorkspacePanelFocusScope; trigger: HTMLButtonElement} | null>(null);
@@ -65,6 +69,49 @@ export function WorkspacePanel({ tab, select, close, width, resize, children, fo
     }
     activate();
   }
+  useLayoutEffect(() => {
+    if(scrollPositions.current.scope!==scrollScope)scrollPositions.current={scope:scrollScope,tabs:new Map()};
+    const element=scroll.current;if(!element)return;
+    const target=scrollPositions.current.tabs.get(current.id) || 0;
+    element.scrollTop=target;
+    if(Math.abs(element.scrollTop-target)<1)return;
+
+    // Remounted content can still be loading. Retain its target briefly, without
+    // scrolling through partial results or overriding the reader's next action.
+    let active=true,timer:ReturnType<typeof setTimeout>|undefined;
+    let resize:ResizeObserver|undefined,mutation:MutationObserver|undefined;
+    const inputs=['wheel','pointerdown','touchstart','keydown'];
+    const stop=(remember=false)=>{
+      if(!active)return;active=false;
+      if(pendingScroll.current===request)pendingScroll.current=null;
+      if(timer!==undefined)clearTimeout(timer);
+      resize?.disconnect();mutation?.disconnect();element.removeEventListener('load',attempt,true);
+      for(const name of inputs)element.removeEventListener(name,cancel,true);
+      if(remember && scrollPositions.current.scope===scrollScope)scrollPositions.current.tabs.set(current.id,element.scrollTop);
+    };
+    const cancel=()=>stop(true);
+    const request={expected:element.scrollTop,cancel};pendingScroll.current=request;
+    const attempt=()=>{
+      if(!active)return;
+      if(!element.isConnected || scrollPositions.current.scope!==scrollScope){stop();return;}
+      if(element.scrollHeight-element.clientHeight<target)return;
+      element.scrollTop=target;request.expected=element.scrollTop;
+      if(Math.abs(element.scrollTop-target)<1)stop();
+    };
+    const observeContent=()=>{
+      resize?.disconnect();resize?.observe(element);
+      for(const child of element.children)resize?.observe(child);
+    };
+    if(typeof ResizeObserver!=='undefined')resize=new ResizeObserver(attempt);
+    if(typeof MutationObserver!=='undefined'){
+      mutation=new MutationObserver(()=>{if(active){observeContent();attempt();}});
+      mutation.observe(element,{childList:true,subtree:true,characterData:true,attributes:true});
+    }
+    observeContent();element.addEventListener('load',attempt,true);
+    for(const name of inputs)element.addEventListener(name,cancel,{capture:true,passive:true});
+    timer=setTimeout(()=>stop(),5000);
+    return()=>stop();
+  },[current.id,scrollScope]);
   useLayoutEffect(() => {
     if (keyboardFocus.current) { buttons.current.get(current.id)?.focus(); keyboardFocus.current = false; }
   }, [current.id]);
@@ -93,7 +140,7 @@ export function WorkspacePanel({ tab, select, close, width, resize, children, fo
   }, []);
   return <ActivityFocusContext.Provider value={focusScope ? activateActivity : null}><aside ref={pane} aria-label="Workspace details" style={{ width }} className={`right-panel workspace-panel${current.id === 'browser' ? ' with-browser' : ''}`}>
     <ResizeHandle label="Resize workspace panel" value={width} min={280} max={520} change={resize} reverse />
-    <header className="workspace-panel-heading"><h2 className="sr-only">{current.title}</h2><nav className="workspace-panel-tabs" role="tablist" aria-label="Detail pane views">{WORKSPACE_TABS.map((item, index) => <WorkspaceTab
+    <header className="workspace-panel-heading"><h2 className="workspace-panel-title">{current.title}</h2><nav className="workspace-panel-tabs" role="tablist" aria-label="Detail pane views">{WORKSPACE_TABS.map((item, index) => <WorkspaceTab
       key={item.id} item={item} id={id} selected={current.id === item.id} buttonRef={element => { if (element) buttons.current.set(item.id, element); else buttons.current.delete(item.id); }}
       click={() => { keyboardFocus.current = false; select(item.id); }} keyDown={event => {
         const nextIndex = event.key === 'ArrowRight' ? (index + 1) % WORKSPACE_TABS.length : event.key === 'ArrowLeft' ? (index + WORKSPACE_TABS.length - 1) % WORKSPACE_TABS.length : event.key === 'Home' ? 0 : event.key === 'End' ? WORKSPACE_TABS.length - 1 : -1;
@@ -103,7 +150,11 @@ export function WorkspacePanel({ tab, select, close, width, resize, children, fo
         keyboardFocus.current = next.id !== current.id;
         select(next.id); buttons.current.get(next.id)?.focus();
       }}/>)}</nav><IconButton label="Close detail pane" onClick={() => {close();queueMicrotask(()=>document.querySelector<HTMLButtonElement>('button[aria-label="Open workspace panel"]')?.focus());}}><X size={16} /></IconButton></header>
-    <div id={`${id}-content`} role="tabpanel" aria-labelledby={`${id}-${current.id}`} className={`right-scroll${current.id === 'browser' ? ' browser-scroll' : ''}`}>{children}</div>
+    <div ref={scroll} id={`${id}-content`} role="tabpanel" aria-labelledby={`${id}-${current.id}`} className={`right-scroll${current.id === 'browser' ? ' browser-scroll' : ''}`} onScroll={event=>{
+      const pending=pendingScroll.current;
+      if(pending){if(Math.abs(event.currentTarget.scrollTop-pending.expected)<1)return;pending.cancel();}
+      if(scrollPositions.current.scope===scrollScope)scrollPositions.current.tabs.set(current.id,event.currentTarget.scrollTop);
+    }}>{children}</div>
   </aside></ActivityFocusContext.Provider>;
 }
 
