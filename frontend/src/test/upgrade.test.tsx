@@ -94,6 +94,22 @@ describe('local browser and dictation feedback', () => {
     bridge(); render(<App/>); await boot(); await screen.findByText('What are we building?'); expect(screen.getByText('32K context')).toBeTruthy(); expect(screen.getByLabelText('Generation speed in tokens per second').textContent).toBe('Tokens/s: —');
     await userEvent.click(screen.getByRole('button',{name:'Minimal HUD'})); expect(screen.getByText('32K context')).toBeTruthy(); expect(screen.getByLabelText('Generation speed in tokens per second').textContent).toBe('Tokens/s: —'); expect(screen.getByRole('button',{name:'Show reply'}).closest('header')).toBeTruthy(); expect(document.querySelectorAll('.composer-status i')).toHaveLength(1);
   });
+  it('shows reconnecting during an active run and restores working status after polling recovers', async () => {
+    let offline=true;
+    const run={id:'reconnecting-run',chat_id:chat.id,status:'running',mode:'chat'};
+    bridge({bootstrap:{settings:{...DEFAULT_SETTINGS,model:'fixture:9b'},projects:[],chats:[chat],runs:[run],capabilities:{}},
+      chats:{chats:[chat]},runs:{runs:[run]},get_chat:{...chat,messages:[]},
+      poll:()=>{if(offline)throw new Error('Synthetic disconnected poll');return {events:[],next_cursor:0,status:'running',finished:false};}});
+    render(<App/>);await boot();await screen.findByRole('button',{name:'Stop generation'});
+    await screen.findByText('Reconnecting');
+    expect(document.querySelector('.composer-connection')?.classList.contains('status-waiting')).toBe(true);
+    expect(document.querySelector('.composer-connection')?.classList.contains('status-running')).toBe(false);
+    expect(screen.getByRole('button',{name:'Pause run'})).toBeTruthy();
+    offline=false;
+    await waitFor(()=>expect(screen.queryByText('Reconnecting')).toBeNull());
+    expect(screen.getByRole('button',{name:'Stop generation'})).toBeTruthy();
+    expect(document.querySelector('.composer-connection')?.classList.contains('status-running')).toBe(true);
+  });
   it('reports an empty transcript without claiming that text was inserted', async () => {
     bridge({dictation_start:{state:'done',text:''}}); render(<App/>); await boot(); await screen.findByText('What are we building?'); await userEvent.click(screen.getByRole('button',{name:'Start dictation'})); expect(await screen.findByText(/No speech detected/)).toBeTruthy(); expect(screen.queryByText('Transcript added to your draft.')).toBeNull();
   });

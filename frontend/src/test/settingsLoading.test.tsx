@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ComponentProps } from 'react';
@@ -121,7 +121,7 @@ describe('Settings page loading in the workspace', () => {
     await workspace(); await userEvent.click(screen.getByRole('button', { name: 'Settings' }));
     await userEvent.click(screen.getByRole('button', { name: 'Close Settings' }));
     await userEvent.click(screen.getByRole('button', { name: 'Next fixture project' }));
-    await waitFor(() => expect(document.querySelector('.welcome>p')?.textContent).toBe('Next fixture project'));
+    await waitFor(() => expect(within(screen.getByRole('banner')).getByRole('button',{name:'Next fixture project'})).toBeTruthy());
     await act(async () => page.resolve(loaded));
     expect(screen.queryByRole('heading', { name: 'Loaded settings fixture' })).toBeNull();
     expect((screen.getByRole('textbox', { name: 'Message Forge' }) as HTMLTextAreaElement).value).toBe('');

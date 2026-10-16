@@ -37,9 +37,13 @@ describe('existing tools grouped without losing supplied destinations',()=>{
     expect(groups[1].label).toBe('Other tools');expect(groups[3].label).toBe('Other tools');
     expect(groups.flatMap(group=>group.items).filter(item=>item.page==='custom')).toHaveLength(2);
   });
-  it('keeps the project and chat controls above the footer tools with actual selected identities',async()=>{
+  it('places Tools after Search and before projects with the expected keyboard order',async()=>{
     const {select,call}=sidebar();const tree=document.querySelector('.project-tree')!,tools=screen.getByRole('button',{name:'Tools'});
-    expect(tree.compareDocumentPosition(tools)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(tools.compareDocumentPosition(tree)&Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    screen.getByRole('button',{name:/New chat/}).focus();
+    await userEvent.tab();expect(document.activeElement).toBe(screen.getByRole('textbox',{name:'Search projects and chats'}));
+    await userEvent.tab();expect(document.activeElement).toBe(tools);
+    await userEvent.tab();expect(document.activeElement).toBe(screen.getByRole('button',{name:'Projects'}));
     expect(document.querySelector('.sidebar')?.getAttribute('data-accent')).toBe('blue');
     expect(document.querySelector('.project-group')?.getAttribute('data-accent')).toBe('sage');
     expect(screen.getByRole('button',{name:'Keep this conversation'}).classList.contains('active')).toBe(true);

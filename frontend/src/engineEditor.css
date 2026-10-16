@@ -6,12 +6,24 @@
 .engine-preset-note .text-button{font-size:12px}
 .engine-protocol{margin:12px 0;border-top:1px solid var(--border)}
 .engine-protocol>summary{padding:10px 0;cursor:pointer;font-size:12px;line-height:1.6;color:var(--secondary)}
-.engine-protocol>summary small{margin-left:9px;color:var(--muted);font-size:11px;overflow-wrap:anywhere}
+.engine-protocol>summary small{margin-left:9px;color:var(--muted);font-size:12px;overflow-wrap:anywhere}
 .engine-protocol>.field{margin-top:4px}
 .engine-model-metadata{margin:14px 0}
 .engine-model-metadata summary{font-size:12px;color:var(--text);cursor:pointer}
 .engine-model-metadata>div{padding:11px 0;border-bottom:1px solid var(--border);overflow-wrap:anywhere}
 .engine-model-metadata strong{font-size:12px}
 .engine-model-metadata p{margin-top:6px}
-.engine-model-metadata small{font-size:11px;line-height:1.6;color:var(--muted)}
+.engine-model-metadata small{font-size:12px;line-height:1.6;color:var(--muted)}
 .engine-model-metadata summary:focus-visible,.engine-protocol>summary:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+.engine-editor .engine-note {color:var(--muted);margin:0 0 16px;line-height:1.6;}
+.engine-editor .field>label {font-size:12px;}
+.engine-editor .field small {font-size:12px;line-height:1.6;}
+.engine-editor :is(input,select) {min-height:34px;font-size:13px;}
+.engine-editor .connection-feedback {display:flex;align-items:flex-start;gap:9px;padding:12px;border-radius:6px;background:var(--hover);font-size:12px;line-height:1.6;overflow-wrap:anywhere;}
+.engine-editor .connection-feedback>svg {margin-top:2px;color:var(--accent);flex-shrink:0;}
+.engine-editor .connection-feedback.error>svg {color:var(--danger);}
+.engine-editor .connection-feedback strong {font-size:12px;font-weight:550;}
+.engine-editor .connection-feedback p {margin:4px 0 0;color:var(--muted);}
+.engine-editor footer {flex-wrap:wrap;gap:8px;padding-top:16px;border-top:1px solid var(--border);}
+.engine-editor footer .engine-cancel {margin-right:auto;}
+.engine-editor footer button {min-height:32px;font-size:12px;}
